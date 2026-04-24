@@ -100,7 +100,7 @@ class NgefilmProvider : MainAPI() {
                 this.year = year
                 this.plot = description
                 this.tags = tags
-                this.rating = rating?.toRatingInt()
+
                 addActors(actors)
                 this.duration = duration ?: 0
                 addTrailer(trailer)
@@ -111,7 +111,7 @@ class NgefilmProvider : MainAPI() {
                 this.year = year
                 this.plot = description
                 this.tags = tags
-                this.rating = rating?.toRatingInt()
+
                 addActors(actors)
                 this.duration = duration ?: 0
                 addTrailer(trailer)

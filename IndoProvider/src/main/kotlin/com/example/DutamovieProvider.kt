@@ -68,11 +68,11 @@ class DutamovieProvider : MainAPI() {
                 newEpisode(href) { this.name = "Episode $epNum"; this.episode = epNum; this.posterUrl = poster }
             }.filter { it.episode != null }
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                posterUrl = poster; this.year = year; plot = description; this.tags = tags; this.rating = rating?.toRatingInt(); addActors(actors); addTrailer(trailer)
+                posterUrl = poster; this.year = year; plot = description; this.tags = tags; addActors(actors); addTrailer(trailer)
             }
         } else {
             newMovieLoadResponse(title, url, TvType.Movie, url) {
-                posterUrl = poster; this.year = year; plot = description; this.tags = tags; this.rating = rating?.toRatingInt(); addActors(actors); addTrailer(trailer)
+                posterUrl = poster; this.year = year; plot = description; this.tags = tags; addActors(actors); addTrailer(trailer)
             }
         }
     }

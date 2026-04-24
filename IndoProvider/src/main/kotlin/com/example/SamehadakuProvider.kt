@@ -86,8 +86,8 @@ class SamehadakuProvider : MainAPI() {
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val document = app.get(data).document
-        document.select("div#downloadb li").apmap { el ->
-            el.select("a").apmap {
+        document.select("div#downloadb li").amap { el ->
+            el.select("a").amap {
                 loadExtractor(fixUrl(it.attr("href")), "$mainUrl/", subtitleCallback) { link ->
                     runBlocking { callback.invoke(newExtractorLink(link.name, link.name, link.url, link.type) { this.referer = link.referer; this.quality = el.select("strong").text().fixQuality(); this.headers = link.headers }) }
                 }

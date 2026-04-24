@@ -117,7 +117,7 @@ class AnimeIndoProvider : MainAPI() {
             val header = it.selectFirst("span.lchx > a") ?: return@mapNotNull null
             val episode = header.text().trim().replace("Episode", "").trim().toIntOrNull()
             val link = fixUrl(header.attr("href"))
-            Episode(link, episode = episode)
+            newEpisode(link) { this.episode = episode }
         }.reversed()
 
         val recommendations = document.select("div.relat div.animposx").mapNotNull {
@@ -151,13 +151,13 @@ class AnimeIndoProvider : MainAPI() {
         val document = app.get(data).document
         document.select("div.itemleft > .mirror > option").mapNotNull {
             fixUrl(Jsoup.parse(base64Decode(it.attr("value"))).select("iframe").attr("src"))
-        }.apmap {
+        }.amap {
             if (it.startsWith(mainUrl)) {
                 app.get(it, referer = "$mainUrl/").document.select("iframe").attr("src")
             } else {
                 it
             }
-        }.apmap {
+        }.amap {
             if (!it.isNullOrBlank()) {
                 loadExtractor(httpsify(it), data, subtitleCallback, callback)
             }

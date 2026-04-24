@@ -92,7 +92,7 @@ class PusatfilmProvider : MainAPI() {
                 this.year = year
                 this.plot = description
                 this.tags = tags
-                this.rating = rating?.toRatingInt()
+
                 this.duration = duration ?: 0
                 addActors(actors)
                 addTrailer(trailer)
@@ -103,7 +103,7 @@ class PusatfilmProvider : MainAPI() {
                 this.year = year
                 this.plot = description
                 this.tags = tags
-                this.rating = rating?.toRatingInt()
+
                 this.duration = duration ?: 0
                 addActors(actors)
                 addTrailer(trailer)

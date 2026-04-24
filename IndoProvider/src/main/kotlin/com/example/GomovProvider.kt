@@ -94,7 +94,7 @@ open class GomovProvider : MainAPI() {
         val tvType = if (url.contains("/tv/")) TvType.TvSeries else TvType.Movie
         val description = document.selectFirst("div[itemprop=description] > p")?.text()?.trim()
         val trailer = document.selectFirst("ul.gmr-player-nav li a.gmr-trailer-popup")?.attr("href")
-        val rating = document.selectFirst("div.gmr-meta-rating > span[itemprop=ratingValue]")?.text()?.toRatingInt()
+
         val actors = document.select("div.gmr-moviedata").last()?.select("span[itemprop=actors]")?.map { it.select("a").text() }
 
         val recommendations = document.select("div.idmuvi-rp ul li").mapNotNull {
@@ -107,19 +107,18 @@ open class GomovProvider : MainAPI() {
                 val name = eps.text()
                 val episode = name.split(" ").lastOrNull()?.filter { it.isDigit() }?.toIntOrNull()
                 val season = name.split(" ").firstOrNull()?.filter { it.isDigit() }?.toIntOrNull()
-                Episode(
-                    href,
-                    name,
-                    season = if(name.contains(" ")) season else null,
-                    episode = episode,
-                )
+                newEpisode(href) {
+                    this.name = name
+                    this.season = if(name.contains(" ")) season else null
+                    this.episode = episode
+                }
             }.filter { it.episode != null }
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                 this.posterUrl = poster
                 this.year = year
                 this.plot = description
                 this.tags = tags
-                this.rating = rating
+
                 addActors(actors)
                 this.recommendations = recommendations
                 addTrailer(trailer)
@@ -130,7 +129,7 @@ open class GomovProvider : MainAPI() {
                 this.year = year
                 this.plot = description
                 this.tags = tags
-                this.rating = rating
+
                 addActors(actors)
                 this.recommendations = recommendations
                 addTrailer(trailer)
@@ -148,14 +147,14 @@ open class GomovProvider : MainAPI() {
         val id = document.selectFirst("div#muvipro_player_content_id")?.attr("data-id")
 
         if(id.isNullOrEmpty()) {
-            document.select("ul.muvipro-player-tabs li a").apmap { ele ->
+            document.select("ul.muvipro-player-tabs li a").amap { ele ->
                 val iframe = app.get(fixUrl(ele.attr("href"))).document.selectFirst("div.gmr-embed-responsive iframe")
-                    ?.getIframeAttr()?.let { httpsify(it) } ?: return@apmap
+                    ?.getIframeAttr()?.let { httpsify(it) } ?: return@amap
 
                 loadExtractor(iframe, "$directUrl/", subtitleCallback, callback)
             }
         } else {
-            document.select("div.tab-content-ajax").apmap { ele ->
+            document.select("div.tab-content-ajax").amap { ele ->
                 val server = app.post(
                     "$directUrl/wp-admin/admin-ajax.php",
                     data = mapOf("action" to "muvipro_player_content", "tab" to ele.attr("id"), "post_id" to "$id")
