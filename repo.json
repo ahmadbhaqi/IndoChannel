@@ -1,0 +1,8 @@
+{
+  "name": "IndoChannel",
+  "description": "Ekstensi komunitas CloudStream untuk film, serial, dan anime dari berbagai provider Indonesia.",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/plugins.json"
+  ]
+}
