@@ -3,7 +3,7 @@ package com.example
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
-import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
+
 import com.lagradost.cloudstream3.utils.httpsify
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -92,7 +92,7 @@ class PusatfilmProvider : MainAPI() {
                 this.year = year
                 this.plot = description
                 this.tags = tags
-                addScore(rating)
+                this.rating = rating?.toRatingInt()
                 this.duration = duration ?: 0
                 addActors(actors)
                 addTrailer(trailer)
@@ -103,7 +103,7 @@ class PusatfilmProvider : MainAPI() {
                 this.year = year
                 this.plot = description
                 this.tags = tags
-                addScore(rating)
+                this.rating = rating?.toRatingInt()
                 this.duration = duration ?: 0
                 addActors(actors)
                 addTrailer(trailer)
