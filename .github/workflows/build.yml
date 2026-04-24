@@ -58,6 +58,7 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+
       - name: Build Plugins
         run: |
           cd src
@@ -66,6 +67,18 @@ jobs:
           cp **/build/*.cs3 ../builds || true
           cp **/build/*.jar ../builds || true
           cp build/plugins.json ../builds || true
+
+      - name: Generate repo.json
+        run: |
+          cd builds
+          echo '{
+            "name": "IndoChannel",
+            "description": "Kumpulan provider film dan anime berbahasa Indonesia.",
+            "manifestVersion": 1,
+            "pluginLists": [
+              "https://raw.githubusercontent.com/${{ github.repository }}/builds/plugins.json"
+            ]
+          }' > repo.json
 
       - name: Push builds
         run: |
@@ -84,3 +97,4 @@ jobs:
             builds/*.cs3
             builds/*.jar
             builds/plugins.json
+            builds/repo.json
