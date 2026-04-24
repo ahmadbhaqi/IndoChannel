@@ -1,58 +1,70 @@
-**⚠️ This is currently under development, dont use it yet if you're not comfortable with constantly merging new changes**
+# 🇮🇩 IndoChannel Cloudstream Repository
 
-# `Cloudstream3 Plugin Repo Template`
+Selamat datang di repositori **IndoChannel** untuk [Cloudstream](https://github.com/recloudstream/cloudstream)! 
+Repositori ini menyediakan berbagai ekstensi (plugin) untuk layanan streaming film dan anime berbahasa Indonesia.
 
-Template for a [Cloudstream3](https://github.com/recloudstream) plugin repo
+## 📦 Daftar Provider (Ekstensi)
 
-**⚠️ Make sure you check "Include all branches" when using this template**
+Saat ini, IndoChannel mendukung berbagai sumber streaming lokal terpopuler, antara lain:
 
- 
-## Getting started with writing your first plugin
+### 🎬 Movie & TV Series
+- **Rebahin**
+- **LayarKaca (LK21)**
+- **Gomov**
+- **Ngefilm**
+- **Pusatfilm**
+- **Dutamovie**
+- **Idlix**
+- **JuraganFilm**
+- **Cgvindo**
 
-This template includes 1 example plugin.
+### 🌸 Anime
+- **Otakudesu**
+- **Samehadaku**
+- **Anoboy**
+- **Kuronime**
 
-1. Open the root build.gradle.kts, read the comments and replace all the placeholders
-2. Familiarize yourself with the project structure. Most files are commented
-3. Build or deploy your first plugin using:
-   - Windows: `.\gradlew.bat ExampleProvider:make` or `.\gradlew.bat ExampleProvider:deployWithAdb`
-   - Linux & Mac: `./gradlew ExampleProvider:make` or `./gradlew ExampleProvider:deployWithAdb`
+> **Catatan:** Semua sumber yang ada di sini adalah layanan web streaming gratis yang dikurasi. Harap maklum jika ada situs yang kadang offline atau berubah domain (kami selalu berusaha melakukan update secara berkala).
 
+---
 
-## Granting All Files Access on Newer Android Devices
+## 🛠️ Cara Pemasangan (Instalasi)
 
-For local plugin testing, you need to grant the app "All Files Access" on newer Android devices (Android 11 and above). Here’s how to do it:
+Untuk memasukkan semua provider dari IndoChannel ke aplikasi Cloudstream Anda, ikuti langkah-langkah mudah berikut:
 
-### Using ADB
+### Metode 1: Penggunaan Shortcode (Direkomendasikan)
+1. Buka aplikasi **Cloudstream**.
+2. Masuk ke tab **Settings** (Pengaturan) -> **Extensions** (Ekstensi).
+3. Klik tombol **+ Add Repository**.
+4. Pada kolom yang muncul, isi URL dengan link berikut ini:
+   ```text
+   https://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/repo.json
+   ```
+5. Isi nama repositori dengan `IndoChannel` (opsional).
+6. Klik **Download** dan tunggu hingga daftar ekstensi muncul, lalu tekan lambang Unduh (panah ke bawah) untuk setiap plugin yang ingin digunakan.
 
-* `adb shell appops set --uid PACKAGE_NAME MANAGE_EXTERNAL_STORAGE allow`
-* Replace `PACKAGE_NAME` with the name of the package for the Cloudstream3 version you are using:
-   - debug: `com.lagradost.cloudstream3.prerelease.debug`
-   - prerelease: `com.lagradost.cloudstream3.prerelease`
-   - stable: `com.lagradost.cloudstream3`
+### Metode 2: Sekali Klik (Bila didukung)
+Jika Anda membuka halaman ini di browser HP Anda yang sudah terinstal Cloudstream, cukup salin tautan instalasi otomatis berikut lalu buka di browser Anda:
 
-### Manually
+`cloudstreamrepo://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/repo.json`
 
-1. **Open Settings**: Go to your device’s Settings menu.
+---
 
-2. **Navigate to Special Access**:
-   - Tap on "Apps & notifications" or "Apps".
-   - Select "Special app access" or "Special access".
+## 💻 Untuk Pengembang (Developer)
 
-3. **Select All Files Access**:
-   - Tap on "All files access".
-   - It may be under the three vertical dots menu towards the top of the screen.
+Ingin ikut berkontribusi atau memperbaiki scraper yang bermasalah?
+Pastikan Anda sudah menginstal **JDK 17+** dan menggunakan **Android Studio** atau Command Line.
 
-4. **Grant Access to the App**: Find the app in the list and tap on it to toggle it, if it is not already enabled.
+### Kompilasi & Build Lokal:
+- Windows: `.\gradlew.bat IndoProvider:make` atau `.\gradlew.bat IndoProvider:deployWithAdb`
+- Linux & Mac: `./gradlew IndoProvider:make` atau `./gradlew IndoProvider:deployWithAdb`
 
-6. **Restart the App**: Close and reopen the app to apply the changes.
+### Catatan Penting
+Semua struktur plugin dan CSS Selector berpedoman pada dokumentasi `cloudstream3-plugin`. Mohon jangan menggabungkan dua domain berbeda jika kelas elemen web mereka (*DOM class*) tidak sama.
 
+---
 
-## License
+## ⚖️ Lisensi dan Disclaimer
 
-Everything in this repo is released into the public domain. You may use it however you want with no conditions whatsoever
-
-
-## Attribution
-
-This template as well as the gradle plugin and the whole plugin system is **heavily** based on [Aliucord](https://github.com/Aliucord).
-*Go use it, it's a great mobile discord client mod!*
+- Proyek ini dirilis ke dalam domain publik (Public Domain).
+- **DISCLAIMER:** Developer tidak meng-host file video apa pun di server sendiri. Repositori ini murni hanya sebuah *scraper* (pengumpul tautan) dan menautkan konten ke provider aslinya.

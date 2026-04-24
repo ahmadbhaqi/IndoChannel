@@ -18,13 +18,13 @@ class IndoPlugin: Plugin() {
         registerMainAPI(CgvindoProvider())
         registerMainAPI(KitanontonProvider())
         registerMainAPI(GomovProvider())
+        registerMainAPI(IdlixProvider())
+        registerMainAPI(JuraganFilmProvider())
         
         // Anime
         registerMainAPI(OtakudesuProvider())
         registerMainAPI(SamehadakuProvider())
         registerMainAPI(AnoboyProvider())
         registerMainAPI(KuronimeProvider())
-        registerMainAPI(AnimeSailProvider())
-        registerMainAPI(AnimeIndoProvider())
     }
 }
