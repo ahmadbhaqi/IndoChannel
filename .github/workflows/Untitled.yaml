@@ -5,13 +5,7 @@ concurrency:
   cancel-in-progress: true
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - master
-      - main
-    paths-ignore:
-      - '*.md'
+  workflow_dispatch:  # hanya jalan saat ditekan manual dari GitHub UI
 
 jobs:
   build:
@@ -42,13 +36,11 @@ jobs:
             git commit -m "init builds branch"
             git push $REPO builds
           fi
-
       - name: Clean old builds
         run: |
           rm -f builds/*.cs3 || true
           rm -f builds/*.jar || true
           rm -f builds/plugins.json || true
-
       - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
@@ -58,15 +50,29 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Access Secrets (local.properties)
+        run: |
+          cd src
+          echo ANIMASU_API=${{ secrets.ANIMASU_API }} >> local.properties
+          echo DUBBINDO_API=${{ secrets.DUBBINDO_API }} >> local.properties
+          echo GOMOV_API=${{ secrets.GOMOV_API }} >> local.properties
+          echo IDLIX_API=${{ secrets.IDLIX_API }} >> local.properties
+          echo KURAMANIME_API=${{ secrets.KURAMANIME_API }} >> local.properties
+          echo LAYARKACA_API=${{ secrets.LAYARKACA_API }} >> local.properties
+          echo NIMEGAMI_API=${{ secrets.NIMEGAMI_API }} >> local.properties
+          echo OPLOVERZ_API=${{ secrets.OPLOVERZ_API }} >> local.properties
+          echo OTAKUDESU_API=${{ secrets.OTAKUDESU_API }} >> local.properties
+          echo PENCURIMOVIE_API=${{ secrets.PENCURIMOVIE_API }} >> local.properties
+          echo SAMEHADAKU_API=${{ secrets.SAMEHADAKU_API }} >> local.properties
+          echo USEETV_API=${{ secrets.USEETV_API }} >> local.properties
       - name: Build Plugins
         run: |
           cd src
           chmod +x gradlew
-          ./gradlew make makePluginsJson -x lint --continue
+          ./gradlew make makePluginsJson ensureJarCompatibility -x lint --continue
           cp **/build/*.cs3 ../builds || true
           cp **/build/*.jar ../builds || true
           cp build/plugins.json ../builds || true
-
       - name: Push builds
         run: |
           cd builds
@@ -75,7 +81,6 @@ jobs:
           git add .
           git commit --amend -m "Build $GITHUB_SHA" || exit 0
           git push --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" builds
-
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
