@@ -23,7 +23,7 @@ class LayarKacaProvider : MainAPI() {
         val document = app.get(url).document
         
         // Struktur HTML ini perlu disesuaikan dengan struktur asli website LayarKaca saat ini
-        val home = document.select("div.item-article, div.grid-item").mapNotNull {
+        val home = document.select("article").mapNotNull {
             it.toSearchResult()
         }
         
@@ -31,8 +31,8 @@ class LayarKacaProvider : MainAPI() {
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val title = this.selectFirst("h2.entry-title a, h3 a")?.text() ?: return null
-        val href = this.selectFirst("h2.entry-title a, h3 a")?.attr("href") ?: return null
+        val title = this.selectFirst("h3.poster-title")?.text() ?: return null
+        val href = this.selectFirst("a")?.attr("href") ?: return null
         val posterUrl = this.selectFirst("img")?.attr("src")
 
         return newMovieSearchResponse(title, href, TvType.Movie) {
@@ -44,7 +44,7 @@ class LayarKacaProvider : MainAPI() {
         val url = "$mainUrl/?s=$query"
         val document = app.get(url).document
 
-        return document.select("div.item-article, div.grid-item").mapNotNull {
+        return document.select("article").mapNotNull {
             it.toSearchResult()
         }
     }

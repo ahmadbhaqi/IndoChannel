@@ -11,7 +11,7 @@ import java.net.URI
 
 open class GomovProvider : MainAPI() {
 
-    override var mainUrl = "https://gomov.top/"
+    override var mainUrl = "https://gomov.top"
 
     private var directUrl: String? = null
     override var name = "Gomov"

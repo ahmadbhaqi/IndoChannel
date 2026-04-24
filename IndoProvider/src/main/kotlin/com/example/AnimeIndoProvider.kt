@@ -11,7 +11,7 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
 class AnimeIndoProvider : MainAPI() {
-    override var mainUrl = "https://anime-indo.lol/"
+    override var mainUrl = "https://anime-indo.lol"
     override var name = "AnimeIndo"
     override val hasMainPage = true
     override var lang = "id"
@@ -49,7 +49,7 @@ class AnimeIndoProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
         val document = app.get("$mainUrl/${request.data}/page/$page").document
-        val home = document.select("main#main div.animposx").mapNotNull {
+        val home = document.select("a:has(div.list-anime)").mapNotNull {
             it.toSearchResult()
         }
         return newHomePageResponse(request.name, home)
@@ -70,10 +70,10 @@ class AnimeIndoProvider : MainAPI() {
     }
 
     private fun Element.toSearchResult(): AnimeSearchResponse {
-        val title = this.selectFirst("div.title, h2.entry-title, h4")?.text()?.trim() ?: ""
-        val href = getProperAnimeLink(this.selectFirst("a")!!.attr("href"))
-        val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
-        val epNum = this.selectFirst("span.episode")?.ownText()?.replace(Regex("\\D"), "")?.trim()?.toIntOrNull()
+        val title = this.selectFirst("p")?.text()?.trim() ?: ""
+        val href = getProperAnimeLink(this.attr("href"))
+        val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("data-original") ?: this.selectFirst("img")?.attr("src"))
+        val epNum = this.selectFirst("span.eps")?.text()?.replace(Regex("\\D"), "")?.trim()?.toIntOrNull()
         
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
@@ -85,14 +85,8 @@ class AnimeIndoProvider : MainAPI() {
         val anime = mutableListOf<SearchResponse>()
         (1..2).forEach { page ->
             val document = app.get("$mainUrl/page/$page/?s=$query").document
-            val media = document.select(".site-main.relat > article").mapNotNull {
-                val title = it.selectFirst("div.title > h2")?.ownText()?.trim() ?: return@mapNotNull null
-                val href = it.selectFirst("a")?.attr("href") ?: return@mapNotNull null
-                val posterUrl = it.selectFirst("img")?.attr("src").toString()
-                val type = getType(it.select("div.type").text().trim())
-                newAnimeSearchResponse(title, href, type) {
-                    this.posterUrl = posterUrl
-                }
+            val media = document.select("a:has(div.list-anime)").mapNotNull {
+                it.toSearchResult()
             }
             if(media.isNotEmpty()) anime.addAll(media)
         }
@@ -120,7 +114,7 @@ class AnimeIndoProvider : MainAPI() {
             newEpisode(link) { this.episode = episode }
         }.reversed()
 
-        val recommendations = document.select("div.relat div.animposx").mapNotNull {
+        val recommendations = document.select("a:has(div.list-anime)").mapNotNull {
             it.toSearchResult()
         }
 

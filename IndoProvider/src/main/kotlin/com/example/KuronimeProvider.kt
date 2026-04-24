@@ -29,7 +29,7 @@ class KuronimeProvider : MainAPI() {
     }
 
     private fun Element.toSearchResult(): AnimeSearchResponse? {
-        val a = selectFirst("div.bsx > a") ?: return null
+        val a = selectFirst("div.bsx > a, div.bsux > a") ?: return null
         val title = a.attr("title").ifBlank { a.selectFirst("h2")?.text() } ?: return null
         val href = fixUrlNull(a.attr("href")) ?: return null
         val posterUrl = fixUrlNull(a.selectFirst("img")?.attr("src") ?: a.selectFirst("img")?.attr("data-src"))

@@ -6,13 +6,13 @@ import org.jsoup.nodes.Element
 import java.net.URI
 
 open class RebahinProvider : MainAPI() {
-    override var mainUrl = "http://178.62.115.110/"
+    override var mainUrl = "http://156.244.7.27"
     override var name = "Rebahin"
     override val hasMainPage = true
     override var lang = "id"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.AsianDrama)
 
-    override val mainPage = mainPageOf(
+    override val mainPage get() = mainPageOf(
         "$mainUrl/trending/page/" to "Trending",
         "$mainUrl/terbaru/page/" to "Terbaru",
         "$mainUrl/rating/page/" to "Rating Tertinggi"
