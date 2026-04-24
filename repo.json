@@ -1,0 +1,8 @@
+{
+  "name": "IndoChannel",
+  "description": "Kumpulan provider film dan anime berbahasa Indonesia.",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/plugins.json"
+  ]
+}
