@@ -1,0 +1,24 @@
+[
+    {
+        "iconUrl": "https://raw.githubusercontent.com/recloudstream/cloudstream/master/app/src/main/ic_launcher-playstore.png",
+        "fileHash": "sha256-fbe6232664d95a721fa395b2133927ddf87c420d27c25b9f370c119b93609232",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ahmadbhaqi/IndoChannel",
+        "fileSize": 800568,
+        "status": 1,
+        "language": "id",
+        "authors": [
+            "Ahmad"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime"
+        ],
+        "version": 24,
+        "internalName": "IndoProvider",
+        "description": "Film, serial, dan anime dari berbagai provider Indonesia dalam satu ekstensi CloudStream.",
+        "url": "https://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/IndoProvider.cs3",
+        "name": "IndoProvider"
+    }
+]
