@@ -86,6 +86,29 @@ class SamehadakuProvider : MainAPI() {
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val document = app.get(data).document
+
+        // 1) Streaming servers (embed players). These are resolved through a
+        // WordPress admin-ajax.php call and usually serve device-friendly
+        // streams, so the user can actually switch between streaming servers.
+        document.select("div#server ul li div, div.east_player_option").amap { el ->
+            val post = el.attr("data-post")
+            val nume = el.attr("data-nume")
+            val type = el.attr("data-type")
+            if (post.isBlank() || nume.isBlank()) return@amap
+            try {
+                val embed = app.post(
+                    "$mainUrl/wp-admin/admin-ajax.php",
+                    data = mapOf("action" to "player_ajax", "post" to post, "nume" to nume, "type" to type),
+                    referer = data,
+                    headers = mapOf("X-Requested-With" to "XMLHttpRequest")
+                ).document.selectFirst("iframe")?.attr("src")?.let { fixIframeUrl(it) }
+                if (!embed.isNullOrBlank()) {
+                    loadExtractor(embed, "$mainUrl/", subtitleCallback, callback)
+                }
+            } catch (_: Exception) {}
+        }
+
+        // 2) Download mirrors (kept for download support and as a fallback).
         document.select("div#downloadb li").amap { el ->
             el.select("a").amap {
                 loadExtractor(fixUrl(it.attr("href")), "$mainUrl/", subtitleCallback) { link ->
@@ -94,6 +117,12 @@ class SamehadakuProvider : MainAPI() {
             }
         }
         return true
+    }
+
+    private fun fixIframeUrl(url: String): String = when {
+        url.startsWith("//") -> "https:$url"
+        url.startsWith("http") -> url
+        else -> fixUrl(url)
     }
 
     private fun String.fixQuality(): Int = when (this.uppercase()) {
