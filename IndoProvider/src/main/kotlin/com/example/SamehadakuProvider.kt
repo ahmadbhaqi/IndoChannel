@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
+import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.runBlocking
 import org.jsoup.nodes.Element
@@ -86,10 +87,8 @@ class SamehadakuProvider : MainAPI() {
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val document = app.get(data).document
+        var hasLinks = false
 
-        // 1) Streaming servers (embed players). These are resolved through a
-        // WordPress admin-ajax.php call and usually serve device-friendly
-        // streams, so the user can actually switch between streaming servers.
         document.select("div#server ul li div, div.east_player_option").amap { el ->
             val post = el.attr("data-post")
             val nume = el.attr("data-nume")
@@ -104,19 +103,26 @@ class SamehadakuProvider : MainAPI() {
                 ).document.selectFirst("iframe")?.attr("src")?.let { fixIframeUrl(it) }
                 if (!embed.isNullOrBlank()) {
                     loadExtractor(embed, "$mainUrl/", subtitleCallback, callback)
+                    hasLinks = true
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                logError(e)
+            }
         }
 
-        // 2) Download mirrors (kept for download support and as a fallback).
         document.select("div#downloadb li").amap { el ->
             el.select("a").amap {
-                loadExtractor(fixUrl(it.attr("href")), "$mainUrl/", subtitleCallback) { link ->
-                    runBlocking { callback.invoke(newExtractorLink(link.name, link.name, link.url, link.type) { this.referer = link.referer; this.quality = el.select("strong").text().fixQuality(); this.headers = link.headers }) }
+                try {
+                    loadExtractor(fixUrl(it.attr("href")), "$mainUrl/", subtitleCallback) { link ->
+                        runBlocking { callback.invoke(newExtractorLink(link.name, link.name, link.url, link.type) { this.referer = link.referer; this.quality = el.select("strong").text().fixQuality(); this.headers = link.headers }) }
+                    }
+                    hasLinks = true
+                } catch (e: Exception) {
+                    logError(e)
                 }
             }
         }
-        return true
+        return hasLinks
     }
 
     private fun fixIframeUrl(url: String): String = when {

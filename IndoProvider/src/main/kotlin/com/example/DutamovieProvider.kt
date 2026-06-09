@@ -3,6 +3,7 @@ package com.example
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
+import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -80,18 +81,31 @@ class DutamovieProvider : MainAPI() {
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val document = app.get(data).document
         val id = document.selectFirst("div#muvipro_player_content_id")?.attr("data-id")
+        var hasLinks = false
         if (id.isNullOrEmpty()) {
             document.select("ul.muvipro-player-tabs li a").amap { ele ->
-                val iframe = app.get(fixUrl(ele.attr("href"))).document.selectFirst("div.gmr-embed-responsive iframe")?.let { it.attr("data-litespeed-src").takeIf { s -> s.isNotEmpty() } ?: it.attr("src") }?.let { httpsify(it) } ?: return@amap
-                loadExtractor(iframe, "$directUrl/", subtitleCallback, callback)
+                try {
+                    val iframe = app.get(fixUrl(ele.attr("href"))).document.selectFirst("div.gmr-embed-responsive iframe")?.let { it.attr("data-litespeed-src").takeIf { s -> s.isNotEmpty() } ?: it.attr("src") }?.let { httpsify(it) } ?: return@amap
+                    loadExtractor(iframe, "$directUrl/", subtitleCallback, callback)
+                    hasLinks = true
+                } catch (e: Exception) {
+                    logError(e)
+                }
             }
         } else {
             document.select("div.tab-content-ajax").amap { ele ->
-                val server = app.post("$directUrl/wp-admin/admin-ajax.php", data = mapOf("action" to "muvipro_player_content", "tab" to ele.attr("id"), "post_id" to "$id")).document.select("iframe").attr("src").let { httpsify(it) }
-                loadExtractor(server, "$directUrl/", subtitleCallback, callback)
+                try {
+                    val src = app.post("$directUrl/wp-admin/admin-ajax.php", data = mapOf("action" to "muvipro_player_content", "tab" to ele.attr("id"), "post_id" to "$id")).document.select("iframe").attr("src")
+                    if (src.isNotBlank()) {
+                        loadExtractor(httpsify(src), "$directUrl/", subtitleCallback, callback)
+                        hasLinks = true
+                    }
+                } catch (e: Exception) {
+                    logError(e)
+                }
             }
         }
-        return true
+        return hasLinks
     }
 
     private fun Element.getImageAttr(): String = when {

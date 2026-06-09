@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
+import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 
@@ -73,7 +74,12 @@ class AnoboyProvider : MainAPI() {
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val document = app.get(data).document
         val iframeUrl = document.selectFirst("div.player-embed > iframe")?.attr("src") ?: return false
-        loadExtractor(iframeUrl, mainUrl, subtitleCallback, callback)
-        return true
+        return try {
+            loadExtractor(iframeUrl, mainUrl, subtitleCallback, callback)
+            true
+        } catch (e: Exception) {
+            logError(e)
+            false
+        }
     }
 }
