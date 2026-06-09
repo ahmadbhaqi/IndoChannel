@@ -8,7 +8,6 @@ import com.lagradost.cloudstream3.utils.httpsify
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import org.jsoup.nodes.Element
-import java.net.URI
 import java.net.URLEncoder
 
 class PusatfilmProvider : MainAPI() {
@@ -132,22 +131,4 @@ class PusatfilmProvider : MainAPI() {
         return true
     }
 
-    private fun Element.getImageAttr(): String {
-        return when {
-            this.hasAttr("data-src") -> this.attr("abs:data-src")
-            this.hasAttr("data-lazy-src") -> this.attr("abs:data-lazy-src")
-            this.hasAttr("srcset") -> this.attr("abs:srcset").substringBefore(" ")
-            else -> this.attr("abs:src")
-        }
-    }
-
-    private fun String?.fixImageQuality(): String? {
-        if (this == null) return null
-        val regex = Regex("(-\\d*x\\d*)").find(this)?.groupValues?.get(0) ?: return this
-        return this.replace(regex, "")
-    }
-
-    private fun getBaseUrl(url: String): String {
-        return URI(url).let { "${it.scheme}://${it.host}" }
-    }
 }
