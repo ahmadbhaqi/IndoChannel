@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.net.URLEncoder
 
 class PusatfilmProvider : MainAPI() {
     override var mainUrl = "https://v3.pusatfilm21info.com"
@@ -54,7 +55,8 @@ class PusatfilmProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/?s=$query&post_type[]=post&post_type[]=tv", timeout = 50L).document
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val document = app.get("$mainUrl/?s=$encoded&post_type[]=post&post_type[]=tv", timeout = 50L).document
         return document.select("article.item").mapNotNull { it.toSearchResult() }
     }
 

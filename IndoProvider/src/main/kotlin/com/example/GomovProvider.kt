@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.utils.httpsify
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.net.URLEncoder
 
 open class GomovProvider : MainAPI() {
 
@@ -75,7 +76,8 @@ open class GomovProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        return app.get("$mainUrl/?s=$query&post_type[]=post&post_type[]=tv").document.select("article.item")
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        return app.get("$mainUrl/?s=$encoded&post_type[]=post&post_type[]=tv").document.select("article.item")
             .mapNotNull {
                 it.toSearchResult()
             }

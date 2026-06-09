@@ -13,6 +13,7 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.runBlocking
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import java.net.URLEncoder
 
 class OtakudesuProvider : MainAPI() {
     override var mainUrl = "https://otakudesu.blog/"
@@ -46,7 +47,8 @@ class OtakudesuProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/?s=$query&post_type=anime").document
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val document = app.get("$mainUrl/?s=$encoded&post_type=anime").document
         return document.select("ul.chivsrc > li").mapNotNull {
             val title = it.selectFirst("h2")?.text()?.trim() ?: return@mapNotNull null
             val href = it.selectFirst("a")?.attr("href") ?: return@mapNotNull null
