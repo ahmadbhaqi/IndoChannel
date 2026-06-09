@@ -3,6 +3,7 @@ package com.example
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
+import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 
@@ -65,11 +66,17 @@ class KuronimeProvider : MainAPI() {
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val document = app.get(data).document
+        var hasLinks = false
         document.select("select.mirror > option[value]").forEach { option ->
-            val decoded = base64Decode(option.attr("value"))
-            val iframe = org.jsoup.Jsoup.parse(decoded).selectFirst("iframe")?.attr("src") ?: return@forEach
-            loadExtractor(iframe, "$mainUrl/", subtitleCallback, callback)
+            try {
+                val decoded = base64Decode(option.attr("value"))
+                val iframe = org.jsoup.Jsoup.parse(decoded).selectFirst("iframe")?.attr("src") ?: return@forEach
+                loadExtractor(iframe, "$mainUrl/", subtitleCallback, callback)
+                hasLinks = true
+            } catch (e: Exception) {
+                logError(e)
+            }
         }
-        return true
+        return hasLinks
     }
 }

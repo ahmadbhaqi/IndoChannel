@@ -1,6 +1,7 @@
 package com.example
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 
@@ -73,17 +74,19 @@ class LayarKacaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Proses mendapatkan link video (iframe)
         val document = app.get(data).document
-        
-        // LayarKaca biasanya menggunakan banyak iframe (embed).
-        // Kita mengambil semua iframe dan menggunakan Extractor bawaan Cloudstream.
+        var hasLinks = false
         document.select("iframe").forEach { iframe ->
             val src = iframe.attr("src")
             if (src.startsWith("http")) {
-                loadExtractor(src, data, subtitleCallback, callback)
+                try {
+                    loadExtractor(src, data, subtitleCallback, callback)
+                    hasLinks = true
+                } catch (e: Exception) {
+                    logError(e)
+                }
             }
         }
-        return true
+        return hasLinks
     }
 }
