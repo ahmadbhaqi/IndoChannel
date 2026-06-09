@@ -14,7 +14,7 @@ buildscript {
     dependencies {
         classpath("com.android.tools.build:gradle:8.7.3")
         // Cloudstream gradle plugin which makes everything work and builds plugins
-        classpath("com.github.recloudstream:gradle:-SNAPSHOT")
+        classpath("com.github.recloudstream:gradle:81b1d424d2")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.0")
     }
 }
@@ -84,6 +84,13 @@ subprojects {
         // IMPORTANT: Do not bump Jackson above 2.13.1, as newer versions will
         // break compatibility on older Android devices.
         implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1") // JSON Parser
+
+        // Unit testing
+        val testImplementation by configurations
+        testImplementation("junit:junit:4.13.2")
+        testImplementation("org.jsoup:jsoup:1.18.3")
+        testImplementation(files("${gradle.gradleUserHomeDir}/caches/cloudstream/cloudstream/cloudstream.jar"))
+        testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     }
 }
 
