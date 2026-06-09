@@ -50,8 +50,8 @@ class KuronimeProvider : MainAPI() {
         val poster = document.selectFirst("div.thumb > img")?.attr("src")
         val tags = document.select("div.genxed > a").map { it.text() }
         val year = document.selectFirst("div.info-content span:contains(Released)")?.ownText()?.trim()?.toIntOrNull()
-        val status = when (document.selectFirst("div.info-content span:contains(Status)")?.ownText()?.trim()) { "Ongoing" -> ShowStatus.Ongoing; else -> ShowStatus.Completed }
-        val type = when { document.selectFirst("div.info-content span:contains(Type)")?.ownText()?.contains("Movie", true) == true -> TvType.AnimeMovie; else -> TvType.Anime }
+        val status = getAnimeStatus(document.selectFirst("div.info-content span:contains(Status)")?.ownText()?.trim() ?: "Completed")
+        val type = getAnimeType(document.selectFirst("div.info-content span:contains(Type)")?.ownText()?.trim() ?: "TV")
         val description = document.selectFirst("div[itemprop=description]")?.text()?.trim()
         val episodes = document.select("div.eplister ul li").mapNotNull { el ->
             val a = el.selectFirst("a") ?: return@mapNotNull null

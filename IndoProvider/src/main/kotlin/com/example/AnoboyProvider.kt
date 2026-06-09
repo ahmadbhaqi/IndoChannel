@@ -17,11 +17,6 @@ class AnoboyProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
 
-    companion object {
-        fun getType(t: String): TvType = when { t.contains("OVA", true) || t.contains("Special", true) -> TvType.OVA; t.contains("Movie", true) -> TvType.AnimeMovie; else -> TvType.Anime }
-        fun getStatus(t: String): ShowStatus = when (t) { "Completed" -> ShowStatus.Completed; "Ongoing" -> ShowStatus.Ongoing; else -> ShowStatus.Completed }
-    }
-
     override val mainPage = mainPageOf(
         "anime/?page=%d&status=&type=&order=update" to "Latest Release",
         "genres/action/page/%d/" to "Action",
@@ -54,9 +49,9 @@ class AnoboyProvider : MainAPI() {
         val title = document.selectFirst("h1.entry-title")?.text()?.replace("Subtitle Indonesia", "")?.trim() ?: return null
         val poster = document.selectFirst("div.thumbook > div.thumb > img[itemprop=image]")?.attr("src")
         val tags = document.select("div.genxed > a").map { it.text() }
-        val type = getType(document.selectFirst("div.info-content > div.spe > span:contains(Type:)")?.ownText()?.trim() ?: "TV")
+        val type = getAnimeType(document.selectFirst("div.info-content > div.spe > span:contains(Type:)")?.ownText()?.trim() ?: "TV")
         val year = document.selectFirst("div.info-content > div.spe > span:contains(Released:)")?.ownText()?.toIntOrNull()
-        val status = getStatus(document.selectFirst("div.info-content > div.spe > span:contains(Status:)")?.ownText()?.trim() ?: "Completed")
+        val status = getAnimeStatus(document.selectFirst("div.info-content > div.spe > span:contains(Status:)")?.ownText()?.trim() ?: "Completed")
         val description = document.select("div[itemprop=description] > p").text()
         val trailer = document.selectFirst("a.trailerbutton")?.attr("href")
         val episodes = document.select("div.eplister ul li").mapNotNull { element ->

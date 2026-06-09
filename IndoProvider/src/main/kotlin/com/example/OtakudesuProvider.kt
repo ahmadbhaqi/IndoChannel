@@ -26,8 +26,6 @@ class OtakudesuProvider : MainAPI() {
     companion object {
         const val acefile = "https://acefile.co"
         val mirrorBlackList = arrayOf("Mega", "MegaUp", "Otakufiles")
-        fun getType(t: String): TvType = if (t.contains("OVA", true) || t.contains("Special")) TvType.OVA else if (t.contains("Movie", true)) TvType.AnimeMovie else TvType.Anime
-        fun getStatus(t: String): ShowStatus = when (t) { "Completed" -> ShowStatus.Completed; "Ongoing" -> ShowStatus.Ongoing; else -> ShowStatus.Completed }
     }
 
     override val mainPage = mainPageOf("ongoing-anime/page/%d/" to "Anime Ongoing", "complete-anime/page/%d/" to "Anime Completed")
@@ -62,9 +60,9 @@ class OtakudesuProvider : MainAPI() {
         val title = document.selectFirst("div.infozingle > p:nth-child(1) > span")?.ownText()?.replace(":", "")?.trim() ?: return null
         val poster = document.selectFirst("div.fotoanime > img")?.attr("src")
         val tags = document.select("div.infozingle > p:nth-child(11) > span > a").map { it.text() }
-        val type = getType(document.selectFirst("div.infozingle > p:nth-child(5) > span")?.ownText()?.replace(":", "")?.trim() ?: "tv")
+        val type = getAnimeType(document.selectFirst("div.infozingle > p:nth-child(5) > span")?.ownText()?.replace(":", "")?.trim() ?: "tv")
         val year = Regex("\\d, (\\d*)").find(document.select("div.infozingle > p:nth-child(9) > span").text())?.groupValues?.get(1)?.toIntOrNull()
-        val status = getStatus(document.selectFirst("div.infozingle > p:nth-child(6) > span")?.ownText()?.replace(":", "")?.trim() ?: "Completed")
+        val status = getAnimeStatus(document.selectFirst("div.infozingle > p:nth-child(6) > span")?.ownText()?.replace(":", "")?.trim() ?: "Completed")
         val description = document.select("div.sinopc > p").text()
         val episodeListElements = document.select("div.episodelist")
         val episodes = (episodeListElements.getOrNull(1) ?: episodeListElements.firstOrNull())?.select("ul > li")?.mapNotNull {

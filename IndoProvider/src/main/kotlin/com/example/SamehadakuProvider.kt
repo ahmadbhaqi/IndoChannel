@@ -18,11 +18,6 @@ class SamehadakuProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
 
-    companion object {
-        fun getType(t: String): TvType = when { t.contains("OVA", true) || t.contains("Special", true) -> TvType.OVA; t.contains("Movie", true) -> TvType.AnimeMovie; else -> TvType.Anime }
-        fun getStatus(t: String): ShowStatus = when (t) { "Completed" -> ShowStatus.Completed; "Ongoing" -> ShowStatus.Ongoing; else -> ShowStatus.Completed }
-    }
-
     override val mainPage = mainPageOf(
         "anime-terbaru/page/%d" to "Terbaru",
         "genre/action/page/%d/" to "Action",
@@ -70,8 +65,8 @@ class SamehadakuProvider : MainAPI() {
         val poster = document.selectFirst("div.thumb > img")?.attr("src")
         val tags = document.select("div.genre-info > a").map { it.text() }
         val year = document.selectFirst("div.spe > span:contains(Rilis)")?.ownText()?.let { Regex("\\d,\\s(\\d*)").find(it)?.groupValues?.getOrNull(1)?.toIntOrNull() }
-        val status = getStatus(document.selectFirst("div.spe > span:contains(Status)")?.ownText() ?: return null)
-        val type = getType(document.selectFirst("div.spe > span:contains(Type)")?.ownText()?.trim()?.lowercase() ?: "tv")
+        val status = getAnimeStatus(document.selectFirst("div.spe > span:contains(Status)")?.ownText() ?: return null)
+        val type = getAnimeType(document.selectFirst("div.spe > span:contains(Type)")?.ownText()?.trim()?.lowercase() ?: "tv")
         val description = document.select("div.desc p").text().trim()
         val trailer = document.selectFirst("div.trailer-anime iframe")?.attr("src")
         val episodes = document.select("div.lstepsiode.listeps ul li").mapNotNull {
