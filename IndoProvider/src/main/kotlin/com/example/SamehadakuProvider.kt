@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.runBlocking
 import org.jsoup.nodes.Element
+import java.net.URLEncoder
 
 class SamehadakuProvider : MainAPI() {
     override var mainUrl = "https://v2.samehadaku.how"
@@ -58,7 +59,8 @@ class SamehadakuProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        return app.get("$mainUrl/?s=$query").document.select("main#main div.animepost").mapNotNull { it.toSearchResult() }
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        return app.get("$mainUrl/?s=$encoded").document.select("main#main div.animepost").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse? {

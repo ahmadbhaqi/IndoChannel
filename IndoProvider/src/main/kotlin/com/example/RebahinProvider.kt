@@ -5,9 +5,10 @@ import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.net.URLEncoder
 
 open class RebahinProvider : MainAPI() {
-    override var mainUrl = "http://156.244.7.27"
+    override var mainUrl = "https://156.244.7.27"
     override var name = "Rebahin"
     override val hasMainPage = true
     override var lang = "id"
@@ -34,7 +35,8 @@ open class RebahinProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        return app.get("$mainUrl/?s=$query").document.select("article.item-infinite, div.ml-item").mapNotNull { it.toSearchResult() }
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        return app.get("$mainUrl/?s=$encoded").document.select("article.item-infinite, div.ml-item").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse {

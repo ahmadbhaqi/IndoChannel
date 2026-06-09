@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
+import java.net.URLEncoder
 
 class LayarKacaProvider : MainAPI() {
     // INFO: Karena URL LayarKaca sering berubah (diblokir), Anda perlu memasukkan URL aktif yang paling baru di sini.
@@ -42,7 +43,8 @@ class LayarKacaProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/?s=$query"
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val url = "$mainUrl/?s=$encoded"
         val document = app.get(url).document
 
         return document.select("article").mapNotNull {

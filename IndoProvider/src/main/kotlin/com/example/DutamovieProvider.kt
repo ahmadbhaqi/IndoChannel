@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.net.URLEncoder
 
 class DutamovieProvider : MainAPI() {
     override var mainUrl = "https://wavereview.com"
@@ -44,7 +45,8 @@ class DutamovieProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        return app.get("$mainUrl?s=$query&post_type[]=post&post_type[]=tv").document
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        return app.get("$mainUrl?s=$encoded&post_type[]=post&post_type[]=tv").document
             .select("article.item-infinite").mapNotNull { it.toSearchResult() }
     }
 

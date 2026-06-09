@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.httpsify
 import com.lagradost.cloudstream3.utils.loadExtractor
 import java.net.URI
+import java.net.URLEncoder
 import org.jsoup.nodes.Element
 
 class NgefilmProvider : MainAPI() {
@@ -57,7 +58,8 @@ class NgefilmProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl?s=$query&post_type[]=post&post_type[]=tv").document
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val document = app.get("$mainUrl?s=$encoded&post_type[]=post&post_type[]=tv").document
         return document.select("article.item-infinite").mapNotNull { it.toSearchResult() }
     }
 
