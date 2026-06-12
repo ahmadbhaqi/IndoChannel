@@ -3,7 +3,7 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
 }
 
-version = 1
+version = 2
 
 cloudstream {
     description = "Kumpulan provider film dan anime berbahasa Indonesia."

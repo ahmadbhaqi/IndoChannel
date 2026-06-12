@@ -118,17 +118,7 @@ class PusatfilmProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
-        val iframeEl = document.selectFirst("div.gmr-embed-responsive iframe, div.movieplay iframe, iframe")
-        val iframe = listOf("src", "data-src", "data-litespeed-src")
-            .firstNotNullOfOrNull { key -> iframeEl?.attr(key)?.takeIf { it.isNotBlank() } }
-            ?.let { httpsify(it) }
-
-        if (!iframe.isNullOrBlank()) {
-            val refererBase = runCatching { getBaseUrl(iframe) }.getOrDefault(mainUrl) + "/"
-            loadExtractor(iframe, refererBase, subtitleCallback, callback)
-        }
-        return true
+        return loadGmrLinks(data, null, { fixUrl(it) }, subtitleCallback, callback)
     }
 
 
