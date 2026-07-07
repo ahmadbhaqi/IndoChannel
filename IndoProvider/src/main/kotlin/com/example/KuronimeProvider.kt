@@ -6,7 +6,7 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 
-class KuronimeProvider : MainAPI() {
+open class KuronimeProvider : MainAPI() {
     override var mainUrl = "https://kuronime.sbs"
     override var name = "Kuronime"
     override val hasMainPage = true
