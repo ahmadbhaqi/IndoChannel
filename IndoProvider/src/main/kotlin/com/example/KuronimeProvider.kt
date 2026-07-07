@@ -65,11 +65,15 @@ class KuronimeProvider : MainAPI() {
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val document = app.get(data).document
+        var loaded = false
         document.select("select.mirror > option[value]").forEach { option ->
             val decoded = base64Decode(option.attr("value"))
-            val iframe = org.jsoup.Jsoup.parse(decoded).selectFirst("iframe")?.attr("src") ?: return@forEach
-            loadExtractor(iframe, "$mainUrl/", subtitleCallback, callback)
+            val iframe = org.jsoup.Jsoup.parse(decoded).selectFirst("iframe")?.let {
+                ProviderHtmlParser.firstIframeSource(it)
+            }
+            val server = toPlayableUrl(iframe) ?: return@forEach
+            loaded = loadExtractorWithResult(server, "$mainUrl/", subtitleCallback, callback) || loaded
         }
-        return true
+        return loaded
     }
 }

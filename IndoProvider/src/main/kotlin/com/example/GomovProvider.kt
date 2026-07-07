@@ -143,28 +143,37 @@ open class GomovProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
+        val fetch = app.get(data)
+        val document = fetch.document
+        val baseUrl = directUrl ?: getBaseUrl(fetch.url)
         val id = document.selectFirst("div#muvipro_player_content_id")?.attr("data-id")
+        var loaded = false
 
         if(id.isNullOrEmpty()) {
-            document.select("ul.muvipro-player-tabs li a").amap { ele ->
-                val iframe = app.get(fixUrl(ele.attr("href"))).document.selectFirst("div.gmr-embed-responsive iframe")
-                    ?.getIframeAttr()?.let { httpsify(it) } ?: return@amap
+            document.select("ul.muvipro-player-tabs li a").forEach { ele ->
+                val iframe = app.get(fixUrl(ele.attr("href"))).document
+                    .selectFirst("div.gmr-embed-responsive iframe")
+                    ?.let { ProviderHtmlParser.firstIframeSource(it) }
+                    ?.let { toPlayableUrl(it) }
+                    ?: return@forEach
 
-                loadExtractor(iframe, "$directUrl/", subtitleCallback, callback)
+                loaded = loadExtractorWithResult(iframe, "$baseUrl/", subtitleCallback, callback) || loaded
             }
         } else {
-            document.select("div.tab-content-ajax").amap { ele ->
+            document.select("div.tab-content-ajax").forEach { ele ->
                 val server = app.post(
-                    "$directUrl/wp-admin/admin-ajax.php",
+                    "$baseUrl/wp-admin/admin-ajax.php",
                     data = mapOf("action" to "muvipro_player_content", "tab" to ele.attr("id"), "post_id" to "$id")
-                ).document.select("iframe").attr("src").let { httpsify(it) }
+                ).document.selectFirst("iframe")
+                    ?.let { ProviderHtmlParser.firstIframeSource(it) }
+                    ?.let { toPlayableUrl(it) }
+                    ?: return@forEach
 
-                loadExtractor(server, "$directUrl/", subtitleCallback, callback)
+                loaded = loadExtractorWithResult(server, "$baseUrl/", subtitleCallback, callback) || loaded
             }
         }
 
-        return true
+        return loaded
     }
 
     private fun Element.getImageAttr(): String? {

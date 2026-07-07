@@ -86,15 +86,16 @@ class SamehadakuProvider : MainAPI() {
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val document = app.get(data).document
+        var loaded = false
 
         // 1) Streaming servers (embed players). These are resolved through a
         // WordPress admin-ajax.php call and usually serve device-friendly
         // streams, so the user can actually switch between streaming servers.
-        document.select("div#server ul li div, div.east_player_option").amap { el ->
+        document.select("div#server ul li div, div.east_player_option").forEach { el ->
             val post = el.attr("data-post")
             val nume = el.attr("data-nume")
             val type = el.attr("data-type")
-            if (post.isBlank() || nume.isBlank()) return@amap
+            if (post.isBlank() || nume.isBlank()) return@forEach
             try {
                 val embed = app.post(
                     "$mainUrl/wp-admin/admin-ajax.php",
@@ -103,20 +104,21 @@ class SamehadakuProvider : MainAPI() {
                     headers = mapOf("X-Requested-With" to "XMLHttpRequest")
                 ).document.selectFirst("iframe")?.attr("src")?.let { fixIframeUrl(it) }
                 if (!embed.isNullOrBlank()) {
-                    loadExtractor(embed, "$mainUrl/", subtitleCallback, callback)
+                    loaded = loadExtractorWithResult(embed, "$mainUrl/", subtitleCallback, callback) || loaded
                 }
             } catch (_: Exception) {}
         }
 
         // 2) Download mirrors (kept for download support and as a fallback).
-        document.select("div#downloadb li").amap { el ->
-            el.select("a").amap {
+        document.select("div#downloadb li").forEach { el ->
+            el.select("a").forEach {
                 loadExtractor(fixUrl(it.attr("href")), "$mainUrl/", subtitleCallback) { link ->
+                    loaded = true
                     runBlocking { callback.invoke(newExtractorLink(link.name, link.name, link.url, link.type) { this.referer = link.referer; this.quality = el.select("strong").text().fixQuality(); this.headers = link.headers }) }
                 }
             }
         }
-        return true
+        return loaded
     }
 
     private fun fixIframeUrl(url: String): String = when {

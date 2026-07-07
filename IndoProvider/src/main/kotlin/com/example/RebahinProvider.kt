@@ -56,20 +56,46 @@ open class RebahinProvider : MainAPI() {
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val document = app.get(data).document
-        document.select("iframe, div.gmr-embed-responsive iframe").forEach { iframe ->
-            val src = iframe.attr("data-src").ifBlank { iframe.attr("src") }
-            if (src.startsWith("http")) loadExtractor(src, data, subtitleCallback, callback)
+        val fetch = app.get(data)
+        val document = fetch.document
+        val directUrl = getBaseUrl(fetch.url)
+        var loaded = false
+
+        ProviderHtmlParser.iframeSources(document, "iframe, div.gmr-embed-responsive iframe").forEach { src ->
+            val iframe = toPlayableUrl(src) ?: return@forEach
+            loaded = loadExtractorWithResult(iframe, data, subtitleCallback, callback) || loaded
         }
+
+        ProviderHtmlParser.muviproAjaxRequests(document).forEach { request ->
+            try {
+                val iframe = app.post(
+                    "$directUrl/wp-admin/admin-ajax.php",
+                    data = request.toPostData(),
+                    referer = data,
+                    headers = mapOf("X-Requested-With" to "XMLHttpRequest")
+                ).document.selectFirst("iframe")?.let { ProviderHtmlParser.firstIframeSource(it) }
+
+                val server = toPlayableUrl(iframe) ?: return@forEach
+                loaded = loadExtractorWithResult(server, "$directUrl/", subtitleCallback, callback) || loaded
+            } catch (_: Exception) {}
+        }
+
         document.select("ul#player-list > li a, ul.muvipro-player-tabs li a").forEach { link ->
             val href = link.attr("href")
             if (href.isNotBlank()) {
                 try {
-                    val iframeSrc = app.get(fixUrl(href)).document.selectFirst("iframe")?.attr("src")
-                    if (!iframeSrc.isNullOrBlank()) loadExtractor(iframeSrc, data, subtitleCallback, callback)
+                    val iframeSrc = app.get(fixUrl(href)).document.selectFirst("iframe")?.let {
+                        ProviderHtmlParser.firstIframeSource(it)
+                    }
+                    val server = toPlayableUrl(iframeSrc) ?: return@forEach
+                    loaded = loadExtractorWithResult(server, data, subtitleCallback, callback) || loaded
                 } catch (_: Exception) {}
             }
         }
-        return true
+        return loaded
+    }
+
+    private fun getBaseUrl(url: String): String {
+        return URI(url).let { "${it.scheme}://${it.host}" }
     }
 }

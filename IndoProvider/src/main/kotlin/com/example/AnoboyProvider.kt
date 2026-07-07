@@ -72,8 +72,10 @@ class AnoboyProvider : MainAPI() {
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val document = app.get(data).document
-        val iframeUrl = document.selectFirst("div.player-embed > iframe")?.attr("src") ?: return false
-        loadExtractor(iframeUrl, mainUrl, subtitleCallback, callback)
-        return true
+        val iframeUrl = document.selectFirst("div.player-embed > iframe")?.let {
+            ProviderHtmlParser.firstIframeSource(it)
+        }
+        val server = toPlayableUrl(iframeUrl) ?: return false
+        return loadExtractorWithResult(server, mainUrl, subtitleCallback, callback)
     }
 }

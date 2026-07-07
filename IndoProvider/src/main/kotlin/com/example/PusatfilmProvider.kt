@@ -118,16 +118,17 @@ class PusatfilmProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val document = app.get(data).document
-        val iframeEl = document.selectFirst("div.gmr-embed-responsive iframe, div.movieplay iframe, iframe")
-        val iframe = listOf("src", "data-src", "data-litespeed-src")
-            .firstNotNullOfOrNull { key -> iframeEl?.attr(key)?.takeIf { it.isNotBlank() } }
-            ?.let { httpsify(it) }
+        val iframe = document
+            .selectFirst("div.gmr-embed-responsive iframe, div.movieplay iframe, iframe")
+            ?.let { ProviderHtmlParser.firstIframeSource(it) }
+            ?.let { toPlayableUrl(it) }
 
-        if (!iframe.isNullOrBlank()) {
+        return if (!iframe.isNullOrBlank()) {
             val refererBase = runCatching { getBaseUrl(iframe) }.getOrDefault(mainUrl) + "/"
-            loadExtractor(iframe, refererBase, subtitleCallback, callback)
+            loadExtractorWithResult(iframe, refererBase, subtitleCallback, callback)
+        } else {
+            false
         }
-        return true
     }
 
     private fun Element.getImageAttr(): String {

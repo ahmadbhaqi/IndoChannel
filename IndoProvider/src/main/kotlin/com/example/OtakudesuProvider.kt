@@ -82,6 +82,7 @@ class OtakudesuProvider : MainAPI() {
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val document = app.get(data).document
+        var loaded = false
         try {
             val scriptData = document.select("script:containsData(action:)").lastOrNull()?.data()
             val token = scriptData?.substringAfter("{action:\"")?.substringBefore("\"}").toString()
@@ -90,14 +91,20 @@ class OtakudesuProvider : MainAPI() {
             val mirrorData = document.select("div.mirrorstream > ul > li").mapNotNull { base64Decode(it.select("a").attr("data-content")) }.toString()
             tryParseJson<List<ResponseSources>>(mirrorData)?.forEach { res ->
                 val sources = Jsoup.parse(base64Decode(app.post("$mainUrl/wp-admin/admin-ajax.php", data = mapOf("id" to res.id, "i" to res.i, "q" to res.q, "nonce" to nonce, "action" to action)).parsed<ResponseData>().data)).select("iframe").attr("src")
-                loadCustomExtractor(sources, data, subtitleCallback, callback, getQuality(res.q))
+                loaded = loadCustomExtractor(sources, data, subtitleCallback, callback, getQuality(res.q)) || loaded
             }
         } catch (_: Exception) {}
-        return true
+        return loaded
     }
 
-    private suspend fun loadCustomExtractor(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit, quality: Int = Qualities.Unknown.value) {
-        loadExtractor(url, referer, subtitleCallback) { link -> runBlocking { callback.invoke(newExtractorLink(link.name, link.name, link.url, link.type) { this.referer = link.referer; this.quality = quality; this.headers = link.headers; this.extractorData = link.extractorData }) } }
+    private suspend fun loadCustomExtractor(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit, quality: Int = Qualities.Unknown.value): Boolean {
+        var loaded = false
+        val server = toPlayableUrl(url) ?: return false
+        loadExtractor(server, referer, subtitleCallback) { link ->
+            loaded = true
+            runBlocking { callback.invoke(newExtractorLink(link.name, link.name, link.url, link.type) { this.referer = link.referer; this.quality = quality; this.headers = link.headers; this.extractorData = link.extractorData }) }
+        }
+        return loaded
     }
 
     private fun getQuality(str: String?): Int = Regex("(\\d{3,4})[pP]").find(str ?: "")?.groupValues?.getOrNull(1)?.toIntOrNull() ?: Qualities.Unknown.value

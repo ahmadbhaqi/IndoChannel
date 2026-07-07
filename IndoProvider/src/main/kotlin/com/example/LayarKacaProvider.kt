@@ -73,17 +73,13 @@ class LayarKacaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Proses mendapatkan link video (iframe)
         val document = app.get(data).document
-        
-        // LayarKaca biasanya menggunakan banyak iframe (embed).
-        // Kita mengambil semua iframe dan menggunakan Extractor bawaan Cloudstream.
-        document.select("iframe").forEach { iframe ->
-            val src = iframe.attr("src")
-            if (src.startsWith("http")) {
-                loadExtractor(src, data, subtitleCallback, callback)
-            }
+
+        var loaded = false
+        ProviderHtmlParser.iframeSources(document).forEach { src ->
+            val iframe = toPlayableUrl(src) ?: return@forEach
+            loaded = loadExtractorWithResult(iframe, data, subtitleCallback, callback) || loaded
         }
-        return true
+        return loaded
     }
 }
