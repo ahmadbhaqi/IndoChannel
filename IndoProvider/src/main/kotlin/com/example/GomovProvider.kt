@@ -47,7 +47,7 @@ open class GomovProvider : MainAPI() {
     private fun Element.toSearchResult(): SearchResponse? {
         val title = this.selectFirst("h2.entry-title > a")?.text()?.trim() ?: return null
         val href = fixUrl(this.selectFirst("a")!!.attr("href"))
-        val posterUrl = fixUrlNull(this.selectFirst("a > img")?.getImageAttr()).fixImageQuality()
+        val posterUrl = fixUrlNull(ProviderHtmlParser.imageSource(this.selectFirst("a > img"))).fixImageQuality()
         val quality = this.select("div.gmr-qual, div.gmr-quality-item > a").text().trim().replace("-", "")
         return if (quality.isEmpty()) {
             val episode = Regex("Episode\\s?([0-9]+)").find(title)?.groupValues?.getOrNull(1)?.toIntOrNull()
@@ -67,7 +67,7 @@ open class GomovProvider : MainAPI() {
     private fun Element.toRecommendResult(): SearchResponse? {
         val title = this.selectFirst("a > span.idmuvi-rp-title")?.text()?.trim() ?: return null
         val href = this.selectFirst("a")!!.attr("href")
-        val posterUrl = fixUrlNull(this.selectFirst("a > img")?.getImageAttr().fixImageQuality())
+        val posterUrl = fixUrlNull(ProviderHtmlParser.imageSource(this.selectFirst("a > img")).fixImageQuality())
         return newMovieSearchResponse(title, href, TvType.Movie) {
             this.posterUrl = posterUrl
         }
@@ -87,7 +87,7 @@ open class GomovProvider : MainAPI() {
 
         val title = document.selectFirst("h1.entry-title")?.text()?.substringBefore("Season")?.substringBefore("Episode")?.trim()
                 .toString()
-        val poster = fixUrlNull(document.selectFirst("figure.pull-left > img")?.getImageAttr())?.fixImageQuality()
+        val poster = fixUrlNull(ProviderHtmlParser.imageSource(document.selectFirst("figure.pull-left > img")))?.fixImageQuality()
         val tags = document.select("span.gmr-movie-genre:contains(Genre:) > a").map { it.text() }
 
         val year = document.select("span.gmr-movie-genre:contains(Year:) > a").text().trim().toIntOrNull()
@@ -150,6 +150,11 @@ open class GomovProvider : MainAPI() {
         var loaded = false
 
         if(id.isNullOrEmpty()) {
+            ProviderHtmlParser.mediaSources(document, "div.gmr-embed-responsive iframe, iframe").forEach { src ->
+                val iframe = toPlayableUrl(src) ?: return@forEach
+                loaded = loadExtractorWithResult(iframe, "$baseUrl/", subtitleCallback, callback) || loaded
+            }
+
             document.select("ul.muvipro-player-tabs li a").forEach { ele ->
                 val iframe = app.get(fixUrl(ele.attr("href"))).document
                     .selectFirst("div.gmr-embed-responsive iframe")

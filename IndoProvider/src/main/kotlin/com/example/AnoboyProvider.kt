@@ -1,81 +1,101 @@
 package com.example
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
-import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
-import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
-import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.ExtractorLink
 import org.jsoup.nodes.Element
 
 class AnoboyProvider : MainAPI() {
-    override var mainUrl = "https://anoboy.be"
+    override var mainUrl = "https://ww1.anoboy.boo"
     override var name = "Anoboy"
     override val hasMainPage = true
     override var lang = "id"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
 
-    companion object {
-        fun getType(t: String): TvType = when { t.contains("OVA", true) || t.contains("Special", true) -> TvType.OVA; t.contains("Movie", true) -> TvType.AnimeMovie; else -> TvType.Anime }
-        fun getStatus(t: String): ShowStatus = when (t) { "Completed" -> ShowStatus.Completed; "Ongoing" -> ShowStatus.Ongoing; else -> ShowStatus.Completed }
-    }
-
     override val mainPage = mainPageOf(
-        "anime/?page=%d&status=&type=&order=update" to "Latest Release",
-        "genres/action/page/%d/" to "Action",
-        "genres/adventure/page/%d/" to "Adventure",
-        "genres/romance/page/%d/" to "Romance",
-        "genres/school/page/%d/" to "School"
+        "page/%d/" to "Terbaru",
+        "category/anime/page/%d/" to "Anime",
+        "category/anime-movie/page/%d/" to "Movie"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get("$mainUrl/${request.data.format(page)}").document
-        val items = document.select("article[itemtype='http://schema.org/CreativeWork']").mapNotNull { it.toSearchResult() }
+        val items = document.select("a[rel=bookmark]:has(div.amv)").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, items)
     }
 
     private fun Element.toSearchResult(): AnimeSearchResponse? {
-        val a = this.selectFirst("div.bsx > a") ?: return null
-        val title = a.selectFirst("h2")?.text()?.trim() ?: a.attr("title") ?: return null
-        val href = fixUrlNull(a.attr("href")) ?: return null
-        val posterUrl = fixUrlNull(a.selectFirst("img")?.attr("src"))
-        return newAnimeSearchResponse(title, href, TvType.Anime) { this.posterUrl = posterUrl }
+        val title = attr("title").ifBlank { selectFirst("h3.ibox1")?.text() }?.trim() ?: return null
+        val href = fixUrlNull(attr("href")) ?: return null
+        val posterUrl = fixUrlNull(ProviderHtmlParser.imageSource(selectFirst("img")))
+        val epNum = Regex("Episode\\s*(\\d+)", RegexOption.IGNORE_CASE).find(title)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        return newAnimeSearchResponse(title, href, TvType.Anime) {
+            this.posterUrl = posterUrl
+            addSub(epNum)
+        }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        return app.get("$mainUrl/?s=$query").document.select("article[itemtype='http://schema.org/CreativeWork']").mapNotNull { it.toSearchResult() }
+        val document = app.get("$mainUrl/?s=$query").document
+        return document.select("a[rel=bookmark]:has(div.amv)").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url).document
-        val title = document.selectFirst("h1.entry-title")?.text()?.replace("Subtitle Indonesia", "")?.trim() ?: return null
-        val poster = document.selectFirst("div.thumbook > div.thumb > img[itemprop=image]")?.attr("src")
-        val tags = document.select("div.genxed > a").map { it.text() }
-        val type = getType(document.selectFirst("div.info-content > div.spe > span:contains(Type:)")?.ownText()?.trim() ?: "TV")
-        val year = document.selectFirst("div.info-content > div.spe > span:contains(Released:)")?.ownText()?.toIntOrNull()
-        val status = getStatus(document.selectFirst("div.info-content > div.spe > span:contains(Status:)")?.ownText()?.trim() ?: "Completed")
-        val description = document.select("div[itemprop=description] > p").text()
-        val trailer = document.selectFirst("a.trailerbutton")?.attr("href")
-        val episodes = document.select("div.eplister ul li").mapNotNull { element ->
-            val headerAnchor = element.selectFirst("a") ?: return@mapNotNull null
-            val link = fixUrl(headerAnchor.attr("href"))
-            val episodeNumber = headerAnchor.text().trim().replace(Regex(".*Episode\\s*(\\d+).*"), "$1").toIntOrNull()
-            newEpisode(link) { this.name = "Episode ${episodeNumber ?: 0}"; this.episode = episodeNumber }
-        }.reversed()
-        val tracker = APIHolder.getTracker(listOf(title), TrackerType.getTypes(type), year)
+        val rawTitle = document.selectFirst("h1.entry-title, h2.entry-title")?.text()?.trim() ?: return null
+        val title = rawTitle.replace("Subtitle Indonesia", "", ignoreCase = true).trim()
+        val description = document.select("div.entry-content p, div.sisi.entry-content").text().trim().takeIf { it.isNotBlank() }
+        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
+        val episode = Regex("Episode\\s*(\\d+)", RegexOption.IGNORE_CASE).find(rawTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val type = if (rawTitle.contains("Movie", ignoreCase = true)) TvType.AnimeMovie else TvType.Anime
+
+        val episodes = listOf(
+            newEpisode(url) {
+                this.name = rawTitle
+                this.episode = episode
+                this.posterUrl = poster
+            }
+        )
+
         return newAnimeLoadResponse(title, url, type) {
-            engName = title; posterUrl = tracker?.image ?: poster; backgroundPosterUrl = tracker?.cover; this.year = year
-            addEpisodes(DubStatus.Subbed, episodes); showStatus = status; plot = description; this.tags = tags; addTrailer(trailer)
-            addMalId(tracker?.malId); addAniListId(tracker?.aniId?.toIntOrNull())
+            posterUrl = poster
+            plot = description
+            addEpisodes(DubStatus.Subbed, episodes)
         }
     }
 
-    override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
         val document = app.get(data).document
-        val iframeUrl = document.selectFirst("div.player-embed > iframe")?.let {
-            ProviderHtmlParser.firstIframeSource(it)
+        var loaded = false
+
+        val candidates = (
+            ProviderHtmlParser.mediaSources(document, "iframe#mediaplayer, iframe") +
+                document.select("a[data-video]").mapNotNull { it.attr("data-video").takeIf { value -> value.isNotBlank() } }
+            ).distinct()
+
+        candidates.forEach { raw ->
+            val url = toPlayableUrl(raw) ?: return@forEach
+            val resolvedSources = if (url.contains("/uploads/", ignoreCase = true)) {
+                try {
+                    ProviderHtmlParser.mediaSources(app.get(url).document)
+                } catch (_: Exception) {
+                    emptyList()
+                }
+            } else {
+                listOf(url)
+            }
+
+            resolvedSources.forEach { source ->
+                val server = toPlayableUrl(source) ?: return@forEach
+                loaded = loadExtractorWithResult(server, mainUrl, subtitleCallback, callback) || loaded
+            }
         }
-        val server = toPlayableUrl(iframeUrl) ?: return false
-        return loadExtractorWithResult(server, mainUrl, subtitleCallback, callback)
+
+        return loaded
     }
 }

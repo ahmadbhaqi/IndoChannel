@@ -6,7 +6,7 @@ import org.jsoup.nodes.Element
 import java.net.URI
 
 open class RebahinProvider : MainAPI() {
-    override var mainUrl = "http://156.244.7.27"
+    override var mainUrl = "https://154.203.167.63"
     override var name = "Rebahin"
     override val hasMainPage = true
     override var lang = "id"
@@ -27,7 +27,7 @@ open class RebahinProvider : MainAPI() {
     internal fun Element.toSearchResult(): SearchResponse? {
         val title = selectFirst("h2 a, h3.mli-info h2")?.text()?.trim() ?: return null
         val href = fixUrl(selectFirst("a")?.attr("href") ?: return null)
-        val posterUrl = fixUrlNull(selectFirst("img")?.attr("data-src") ?: selectFirst("img")?.attr("src"))
+        val posterUrl = fixUrlNull(ProviderHtmlParser.imageSource(selectFirst("img")))
         val quality = selectFirst("span.mli-quality, div.gmr-qual")?.text()?.trim()
         return newMovieSearchResponse(title, href, TvType.Movie) { this.posterUrl = posterUrl; this.quality = getQualityFromString(quality) }
     }
@@ -39,7 +39,7 @@ open class RebahinProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
         val title = document.selectFirst("h1.entry-title, h3[itemprop=name]")?.text()?.trim().orEmpty()
-        val poster = document.selectFirst("img.thumbnail, figure.pull-left > img")?.attr("src")
+        val poster = fixUrlNull(ProviderHtmlParser.imageSource(document.selectFirst("img.thumbnail, figure.pull-left > img")))
         val description = document.selectFirst("div[itemprop=description], div.synopsis")?.text()?.trim()
         val year = document.selectFirst("span.year, a[href*=/year/]")?.text()?.toIntOrNull()
         val tags = document.select("div.gmr-moviedata a[href*=/genre/], span.jptag a").map { it.text() }
@@ -61,7 +61,7 @@ open class RebahinProvider : MainAPI() {
         val directUrl = getBaseUrl(fetch.url)
         var loaded = false
 
-        ProviderHtmlParser.iframeSources(document, "iframe, div.gmr-embed-responsive iframe").forEach { src ->
+        ProviderHtmlParser.mediaSources(document, "iframe, div.gmr-embed-responsive iframe").forEach { src ->
             val iframe = toPlayableUrl(src) ?: return@forEach
             loaded = loadExtractorWithResult(iframe, data, subtitleCallback, callback) || loaded
         }

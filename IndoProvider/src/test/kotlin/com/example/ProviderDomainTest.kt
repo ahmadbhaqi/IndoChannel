@@ -24,7 +24,7 @@ class ProviderDomainTest {
     fun `new movie providers use requested domains`() {
         val expectedDomains = mapOf(
             "IndoxxiProvider.kt" to """override var mainUrl = "https://comblank.com"""",
-            "FilmapikProvider.kt" to """override var mainUrl = "https://filmapik.to"""",
+            "FilmapikProvider.kt" to """override var mainUrl = "https://filmapik.fitness"""",
             "IndofilmProvider.kt" to """override var mainUrl = "https://yuhhaber.com""""
         )
 

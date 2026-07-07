@@ -32,7 +32,7 @@ open class KuronimeProvider : MainAPI() {
         val a = selectFirst("div.bsx > a, div.bsux > a") ?: return null
         val title = a.attr("title").ifBlank { a.selectFirst("h2")?.text() } ?: return null
         val href = fixUrlNull(a.attr("href")) ?: return null
-        val posterUrl = fixUrlNull(a.selectFirst("img")?.attr("src") ?: a.selectFirst("img")?.attr("data-src"))
+        val posterUrl = fixUrlNull(ProviderHtmlParser.imageSource(a.selectFirst("img")))
         val epNum = selectFirst("span.epx")?.text()?.filter { it.isDigit() }?.toIntOrNull()
         return newAnimeSearchResponse(title.trim(), href, TvType.Anime) { this.posterUrl = posterUrl; addSub(epNum) }
     }
@@ -44,7 +44,7 @@ open class KuronimeProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url).document
         val title = document.selectFirst("h1.entry-title")?.text()?.trim() ?: return null
-        val poster = document.selectFirst("div.thumb > img")?.attr("src")
+        val poster = fixUrlNull(ProviderHtmlParser.imageSource(document.selectFirst("div.thumb > img, div.tb img")))
         val tags = document.select("div.genxed > a").map { it.text() }
         val year = document.selectFirst("div.info-content span:contains(Released)")?.ownText()?.trim()?.toIntOrNull()
         val status = when (document.selectFirst("div.info-content span:contains(Status)")?.ownText()?.trim()) { "Ongoing" -> ShowStatus.Ongoing; else -> ShowStatus.Completed }
@@ -66,13 +66,20 @@ open class KuronimeProvider : MainAPI() {
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val document = app.get(data).document
         var loaded = false
-        document.select("select.mirror > option[value]").forEach { option ->
-            val decoded = base64Decode(option.attr("value"))
-            val iframe = org.jsoup.Jsoup.parse(decoded).selectFirst("iframe")?.let {
-                ProviderHtmlParser.firstIframeSource(it)
-            }
-            val server = toPlayableUrl(iframe) ?: return@forEach
+        ProviderHtmlParser.mediaSources(document).forEach { src ->
+            val server = toPlayableUrl(src) ?: return@forEach
             loaded = loadExtractorWithResult(server, "$mainUrl/", subtitleCallback, callback) || loaded
+        }
+
+        document.select("select.mirror > option[value]").forEach { option ->
+            try {
+                val decoded = base64Decode(option.attr("value"))
+                val iframe = org.jsoup.Jsoup.parse(decoded).selectFirst("iframe")?.let {
+                    ProviderHtmlParser.firstIframeSource(it)
+                }
+                val server = toPlayableUrl(iframe) ?: return@forEach
+                loaded = loadExtractorWithResult(server, "$mainUrl/", subtitleCallback, callback) || loaded
+            } catch (_: Exception) {}
         }
         return loaded
     }
