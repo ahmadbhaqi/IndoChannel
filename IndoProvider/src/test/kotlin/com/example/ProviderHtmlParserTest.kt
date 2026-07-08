@@ -127,4 +127,101 @@ class ProviderHtmlParserTest {
             InlineDataParser.miranimeSourceUrls(html)
         )
     }
+
+    @Test
+    fun `idlixCatalogItems reads list and search responses`() {
+        val listJson = """
+            {
+                "data": [
+                    {
+                        "id": "movie-id",
+                        "contentType": "movie",
+                        "title": "The Furious",
+                        "slug": "the-furious-2026",
+                        "posterPath": "/poster.jpg",
+                        "releaseDate": "2026-06-10",
+                        "quality": "WEB-DL"
+                    }
+                ]
+            }
+        """.trimIndent()
+        val searchJson = """
+            {
+                "results": [
+                    {
+                        "id": "series-id",
+                        "contentType": "tv_series",
+                        "title": "Fast & Furious Spy Racers",
+                        "slug": "fast-and-furious-spy-racers-2019",
+                        "posterPath": "/series.jpg",
+                        "firstAirDate": "2019-12-26"
+                    }
+                ]
+            }
+        """.trimIndent()
+
+        assertEquals(
+            listOf(
+                IdlixCatalogItem(
+                    id = "movie-id",
+                    title = "The Furious",
+                    slug = "the-furious-2026",
+                    contentType = "movie",
+                    posterPath = "/poster.jpg",
+                    releaseDate = "2026-06-10",
+                    quality = "WEB-DL"
+                )
+            ),
+            IdlixApiParser.catalogItems(listJson)
+        )
+        assertEquals(
+            listOf(
+                IdlixCatalogItem(
+                    id = "series-id",
+                    title = "Fast & Furious Spy Racers",
+                    slug = "fast-and-furious-spy-racers-2019",
+                    contentType = "tv_series",
+                    posterPath = "/series.jpg",
+                    firstAirDate = "2019-12-26"
+                )
+            ),
+            IdlixApiParser.catalogItems(searchJson)
+        )
+    }
+
+    @Test
+    fun `idlixSeasonEpisodes reads episode ids for load links`() {
+        val json = """
+            {
+                "season": {
+                    "seasonNumber": 1,
+                    "episodes": [
+                        {
+                            "id": "episode-id",
+                            "episodeNumber": 2,
+                            "name": "Connecticut House",
+                            "overview": "Lisa's new career gets off to a dubious start.",
+                            "stillPath": "/still.jpg",
+                            "airDate": "2017-07-14"
+                        }
+                    ]
+                }
+            }
+        """.trimIndent()
+
+        assertEquals(
+            listOf(
+                IdlixEpisodeItem(
+                    id = "episode-id",
+                    seasonNumber = 1,
+                    episodeNumber = 2,
+                    name = "Connecticut House",
+                    overview = "Lisa's new career gets off to a dubious start.",
+                    stillPath = "/still.jpg",
+                    airDate = "2017-07-14"
+                )
+            ),
+            IdlixApiParser.seasonEpisodes(json)
+        )
+    }
 }

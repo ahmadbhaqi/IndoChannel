@@ -25,7 +25,8 @@ class ProviderDomainTest {
         val expectedDomains = mapOf(
             "IndoxxiProvider.kt" to """override var mainUrl = "https://comblank.com"""",
             "FilmapikProvider.kt" to """override var mainUrl = "https://filmapik.fitness"""",
-            "IndofilmProvider.kt" to """override var mainUrl = "https://yuhhaber.com""""
+            "IndofilmProvider.kt" to """override var mainUrl = "https://yuhhaber.com"""",
+            "KitanontonProvider.kt" to """override var mainUrl = "https://kitanonton.com""""
         )
 
         expectedDomains.forEach { (fileName, expected) ->
