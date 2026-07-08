@@ -60,6 +60,40 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `firstImageSource skips theme control icons and returns poster`() {
+        val card = Jsoup.parse(
+            """
+            <article>
+                <img src="https://provider.example/assets/images/controls-play.svg">
+                <img itemprop="image" src="https://image.example/poster.jpg">
+            </article>
+            """.trimIndent()
+        ).selectFirst("article")
+
+        assertEquals("https://image.example/poster.jpg", ProviderHtmlParser.firstImageSource(card, "img"))
+    }
+
+    @Test
+    fun `absoluteUrl resolves provider relative links against explicit base url`() {
+        assertEquals(
+            "https://plus.oploverz.ltd/series/3d-kanojo-real-girl",
+            ProviderHtmlParser.absoluteUrl("/series/3d-kanojo-real-girl", "https://plus.oploverz.ltd")
+        )
+    }
+
+    @Test
+    fun `normalizeUrlHost replaces mirror host with active provider host`() {
+        assertEquals(
+            "https://154.203.167.63/bandits-of-batavia-2027/",
+            ProviderHtmlParser.normalizeUrlHost(
+                "https://tv5.rebahinxxi.auction/bandits-of-batavia-2027/",
+                "https://154.203.167.63",
+                "rebahinxxi"
+            )
+        )
+    }
+
+    @Test
     fun `mediaSources includes playable og video url`() {
         val document = Jsoup.parse(
             """

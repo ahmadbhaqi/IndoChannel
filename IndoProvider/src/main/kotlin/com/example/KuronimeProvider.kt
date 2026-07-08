@@ -31,8 +31,8 @@ open class KuronimeProvider : MainAPI() {
     private fun Element.toSearchResult(): AnimeSearchResponse? {
         val a = selectFirst("div.bsx > a, div.bsux > a") ?: return null
         val title = a.attr("title").ifBlank { a.selectFirst("h2")?.text() } ?: return null
-        val href = fixUrlNull(a.attr("href")) ?: return null
-        val posterUrl = fixUrlNull(ProviderHtmlParser.imageSource(a.selectFirst("img")))
+        val href = ProviderHtmlParser.absoluteUrl(a.attr("href"), mainUrl) ?: return null
+        val posterUrl = fixUrlNull(ProviderHtmlParser.firstImageSource(a, "img[itemprop=image], div.limit > img, img[src*=uploads], img"))
         val epNum = selectFirst("span.epx")?.text()?.filter { it.isDigit() }?.toIntOrNull()
         return newAnimeSearchResponse(title.trim(), href, TvType.Anime) { this.posterUrl = posterUrl; addSub(epNum) }
     }
@@ -53,7 +53,8 @@ open class KuronimeProvider : MainAPI() {
         val episodes = document.select("div.eplister ul li").mapNotNull { el ->
             val a = el.selectFirst("a") ?: return@mapNotNull null
             val epNum = a.selectFirst("div.epl-num")?.text()?.toIntOrNull() ?: Regex("Episode\\s*(\\d+)").find(a.text())?.groupValues?.getOrNull(1)?.toIntOrNull()
-            newEpisode(fixUrl(a.attr("href"))) { this.episode = epNum; this.name = "Episode $epNum" }
+            val href = ProviderHtmlParser.absoluteUrl(a.attr("href"), mainUrl) ?: return@mapNotNull null
+            newEpisode(href) { this.episode = epNum; this.name = "Episode $epNum" }
         }.reversed()
         val tracker = APIHolder.getTracker(listOf(title), TrackerType.getTypes(type), year, true)
         return newAnimeLoadResponse(title, url, type) {

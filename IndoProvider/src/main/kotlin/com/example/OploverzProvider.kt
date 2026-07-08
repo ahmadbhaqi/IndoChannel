@@ -30,20 +30,23 @@ class OploverzProvider : MainAPI() {
     }
 
     private fun Document.toSeriesResults(): List<AnimeSearchResponse> {
-        return select("a[href^='/series/']:has(img), a[href^='$mainUrl/series/']:has(img)")
+        return select("a[href^='/series/'], a[href^='$mainUrl/series/']")
             .mapNotNull { it.toSeriesResult() }
             .distinctBy { it.url }
     }
 
     private fun Element.toSeriesResult(): AnimeSearchResponse? {
-        val href = attr("href").takeIf { it.isNotBlank() && !it.contains("/episode/") } ?: return null
+        val href = attr("href").takeIf {
+            it.isNotBlank() && !it.contains("/episode/") && !it.trimEnd('/').endsWith("/series")
+        } ?: return null
         val image = selectFirst("img")
         val title = image?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
             ?: attr("title").trim().takeIf { it.isNotBlank() }
             ?: text().trim().takeIf { it.isNotBlank() }
             ?: return null
         val poster = fixUrlNull(ProviderHtmlParser.imageSource(image))
-        return newAnimeSearchResponse(title, fixUrl(href), TvType.Anime) {
+        val url = ProviderHtmlParser.absoluteUrl(href, mainUrl) ?: return null
+        return newAnimeSearchResponse(title, url, TvType.Anime) {
             posterUrl = poster
         }
     }

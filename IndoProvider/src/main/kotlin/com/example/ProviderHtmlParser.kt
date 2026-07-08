@@ -2,6 +2,7 @@ package com.example
 
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.URI
 
 internal data class MuviproAjaxRequest(
     val postId: String,
@@ -55,6 +56,44 @@ internal object ProviderHtmlParser {
         }
     }
 
+    fun firstImageSource(element: Element?, selector: String = "img"): String? {
+        return element
+            ?.select(selector)
+            ?.firstNotNullOfOrNull { imageSource(it) }
+    }
+
+    fun absoluteUrl(raw: String?, baseUrl: String): String? {
+        val value = raw?.trim()?.takeIf { it.isPlayableCandidate() } ?: return null
+        return try {
+            val uri = URI(value)
+            if (uri.isAbsolute) value else URI(baseUrl.trimEnd('/') + "/").resolve(value).toString()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun normalizeUrlHost(raw: String?, baseUrl: String, hostNeedle: String): String? {
+        val value = absoluteUrl(raw, baseUrl) ?: return null
+        return try {
+            val target = URI(value)
+            val base = URI(baseUrl)
+            val targetHost = target.host.orEmpty()
+            if (!targetHost.contains(hostNeedle, ignoreCase = true) || targetHost.equals(base.host, ignoreCase = true)) {
+                return value
+            }
+
+            URI(
+                base.scheme,
+                base.authority,
+                target.rawPath,
+                target.rawQuery,
+                target.rawFragment
+            ).toString()
+        } catch (_: Exception) {
+            value
+        }
+    }
+
     fun mediaSources(document: Document, iframeSelector: String = "iframe"): List<String> {
         val iframeSources = iframeSources(document, iframeSelector)
         val metaSources = mediaMetaSelectors.flatMap { selector ->
@@ -90,7 +129,11 @@ internal object ProviderHtmlParser {
     }
 
     private fun String.isImageCandidate(): Boolean {
-        return isPlayableCandidate() && !startsWith("data:", ignoreCase = true)
+        return isPlayableCandidate() &&
+            !startsWith("data:", ignoreCase = true) &&
+            !contains("/assets/images/controls-play.svg", ignoreCase = true) &&
+            !contains("/assets/images/search.svg", ignoreCase = true) &&
+            !contains("histats.com/0.gif", ignoreCase = true)
     }
 
     private fun String.srcsetFirstUrl(): String? {

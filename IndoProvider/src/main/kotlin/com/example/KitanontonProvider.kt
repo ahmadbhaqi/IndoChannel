@@ -31,7 +31,9 @@ class KitanontonProvider : MainAPI() {
     }
 
     private fun Document.toArticleResults(): List<SearchResponse> {
-        return select("article.post").mapNotNull { it.toArticleResult() }.distinctBy { it.url }
+        return select("article.post, article:has(.entry-title a), article:has(a:has(img))")
+            .mapNotNull { it.toArticleResult() }
+            .distinctBy { it.url }
     }
 
     private fun Element.toArticleResult(): SearchResponse? {
@@ -41,7 +43,8 @@ class KitanontonProvider : MainAPI() {
             ?: selectFirst("img")?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
             ?: return null
         val poster = fixUrlNull(ProviderHtmlParser.imageSource(selectFirst("img")))
-        return newMovieSearchResponse(title.cleanKitanontonTitle(), href, TvType.Movie) {
+        val url = ProviderHtmlParser.absoluteUrl(href, mainUrl) ?: return null
+        return newMovieSearchResponse(title.cleanKitanontonTitle(), url, TvType.Movie) {
             posterUrl = poster
         }
     }

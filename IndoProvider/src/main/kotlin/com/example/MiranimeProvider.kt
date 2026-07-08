@@ -45,7 +45,8 @@ class MiranimeProvider : MainAPI() {
             ?: text().trim().takeIf { it.isNotBlank() }
             ?: return null
         val poster = fixUrlNull(ProviderHtmlParser.imageSource(image))
-        return newAnimeSearchResponse(title, fixUrl(href), TvType.Anime) {
+        val url = ProviderHtmlParser.absoluteUrl(href, mainUrl) ?: return null
+        return newAnimeSearchResponse(title, url, TvType.Anime) {
             posterUrl = poster
         }
     }
@@ -75,7 +76,7 @@ class MiranimeProvider : MainAPI() {
             .mapNotNull { episodeElement ->
                 val href = episodeElement.attr("href").takeIf { it.isNotBlank() } ?: return@mapNotNull null
                 val episode = Regex("""episode-(\d+)""").find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                newEpisode(fixUrl(href)) {
+                newEpisode(ProviderHtmlParser.absoluteUrl(href, mainUrl) ?: return@mapNotNull null) {
                     name = episode?.let { "Episode $it" } ?: episodeElement.text().trim()
                     this.episode = episode
                     posterUrl = poster

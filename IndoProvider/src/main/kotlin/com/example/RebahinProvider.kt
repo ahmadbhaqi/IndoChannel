@@ -26,8 +26,8 @@ open class RebahinProvider : MainAPI() {
 
     internal fun Element.toSearchResult(): SearchResponse? {
         val title = selectFirst("h2 a, h3.mli-info h2")?.text()?.trim() ?: return null
-        val href = fixUrl(selectFirst("a")?.attr("href") ?: return null)
-        val posterUrl = fixUrlNull(ProviderHtmlParser.imageSource(selectFirst("img")))
+        val href = fixProviderUrl(selectFirst("a")?.attr("href") ?: return null) ?: return null
+        val posterUrl = fixUrlNull(ProviderHtmlParser.firstImageSource(this))
         val quality = selectFirst("span.mli-quality, div.gmr-qual")?.text()?.trim()
         return newMovieSearchResponse(title, href, TvType.Movie) { this.posterUrl = posterUrl; this.quality = getQualityFromString(quality) }
     }
@@ -47,7 +47,8 @@ open class RebahinProvider : MainAPI() {
         return if (tvType == TvType.TvSeries) {
             val episodes = document.select("div.vid-episodes a, div.gmr-listseries a").mapNotNull { eps ->
                 val epNum = Regex("Episode\\s*(\\d+)").find(eps.text())?.groupValues?.getOrNull(1)?.toIntOrNull()
-                newEpisode(fixUrl(eps.attr("href"))) { this.episode = epNum; this.name = "Episode $epNum"; this.posterUrl = poster }
+                val href = fixProviderUrl(eps.attr("href")) ?: return@mapNotNull null
+                newEpisode(href) { this.episode = epNum; this.name = "Episode $epNum"; this.posterUrl = poster }
             }
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) { posterUrl = poster; this.year = year; plot = description; this.tags = tags }
         } else {
@@ -82,7 +83,7 @@ open class RebahinProvider : MainAPI() {
             val href = link.attr("href")
             if (href.isNotBlank()) {
                 try {
-                    val iframeSrc = app.get(fixUrl(href)).document.selectFirst("iframe")?.let {
+                    val iframeSrc = app.get(fixProviderUrl(href) ?: return@forEach).document.selectFirst("iframe")?.let {
                         ProviderHtmlParser.firstIframeSource(it)
                     }
                     loaded = loadResolvedExtractorWithResult(iframeSrc, data, subtitleCallback, callback) || loaded
@@ -90,6 +91,10 @@ open class RebahinProvider : MainAPI() {
             }
         }
         return loaded
+    }
+
+    private fun fixProviderUrl(raw: String): String? {
+        return ProviderHtmlParser.normalizeUrlHost(raw, mainUrl, "rebahinxxi")
     }
 
     private fun getBaseUrl(url: String): String {
