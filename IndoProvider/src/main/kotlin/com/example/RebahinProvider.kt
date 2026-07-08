@@ -62,8 +62,7 @@ open class RebahinProvider : MainAPI() {
         var loaded = false
 
         ProviderHtmlParser.mediaSources(document, "iframe, div.gmr-embed-responsive iframe").forEach { src ->
-            val iframe = toPlayableUrl(src) ?: return@forEach
-            loaded = loadExtractorWithResult(iframe, data, subtitleCallback, callback) || loaded
+            loaded = loadResolvedExtractorWithResult(src, data, subtitleCallback, callback) || loaded
         }
 
         ProviderHtmlParser.muviproAjaxRequests(document).forEach { request ->
@@ -75,8 +74,7 @@ open class RebahinProvider : MainAPI() {
                     headers = mapOf("X-Requested-With" to "XMLHttpRequest")
                 ).document.selectFirst("iframe")?.let { ProviderHtmlParser.firstIframeSource(it) }
 
-                val server = toPlayableUrl(iframe) ?: return@forEach
-                loaded = loadExtractorWithResult(server, "$directUrl/", subtitleCallback, callback) || loaded
+                loaded = loadResolvedExtractorWithResult(iframe, "$directUrl/", subtitleCallback, callback) || loaded
             } catch (_: Exception) {}
         }
 
@@ -87,8 +85,7 @@ open class RebahinProvider : MainAPI() {
                     val iframeSrc = app.get(fixUrl(href)).document.selectFirst("iframe")?.let {
                         ProviderHtmlParser.firstIframeSource(it)
                     }
-                    val server = toPlayableUrl(iframeSrc) ?: return@forEach
-                    loaded = loadExtractorWithResult(server, data, subtitleCallback, callback) || loaded
+                    loaded = loadResolvedExtractorWithResult(iframeSrc, data, subtitleCallback, callback) || loaded
                 } catch (_: Exception) {}
             }
         }

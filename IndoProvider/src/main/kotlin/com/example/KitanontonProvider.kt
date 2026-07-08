@@ -82,8 +82,7 @@ class KitanontonProvider : MainAPI() {
         document.select(".entry-content a[href], article a[href]").forEach { link ->
             val href = link.attr("href").trim()
             if (href.isBlank() || href.contains("kitanonton.com") || href.startsWith("#")) return@forEach
-            val server = toPlayableUrl(href) ?: return@forEach
-            loaded = loadExtractorWithResult(server, data, subtitleCallback, callback) || loaded
+            loaded = loadResolvedExtractorWithResult(href, data, subtitleCallback, callback) || loaded
         }
         return loaded
     }

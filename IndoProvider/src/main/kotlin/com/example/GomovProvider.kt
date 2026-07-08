@@ -151,18 +151,16 @@ open class GomovProvider : MainAPI() {
 
         if(id.isNullOrEmpty()) {
             ProviderHtmlParser.mediaSources(document, "div.gmr-embed-responsive iframe, iframe").forEach { src ->
-                val iframe = toPlayableUrl(src) ?: return@forEach
-                loaded = loadExtractorWithResult(iframe, "$baseUrl/", subtitleCallback, callback) || loaded
+                loaded = loadResolvedExtractorWithResult(src, "$baseUrl/", subtitleCallback, callback) || loaded
             }
 
             document.select("ul.muvipro-player-tabs li a").forEach { ele ->
                 val iframe = app.get(fixUrl(ele.attr("href"))).document
                     .selectFirst("div.gmr-embed-responsive iframe")
                     ?.let { ProviderHtmlParser.firstIframeSource(it) }
-                    ?.let { toPlayableUrl(it) }
                     ?: return@forEach
 
-                loaded = loadExtractorWithResult(iframe, "$baseUrl/", subtitleCallback, callback) || loaded
+                loaded = loadResolvedExtractorWithResult(iframe, "$baseUrl/", subtitleCallback, callback) || loaded
             }
         } else {
             document.select("div.tab-content-ajax").forEach { ele ->
@@ -171,10 +169,9 @@ open class GomovProvider : MainAPI() {
                     data = mapOf("action" to "muvipro_player_content", "tab" to ele.attr("id"), "post_id" to "$id")
                 ).document.selectFirst("iframe")
                     ?.let { ProviderHtmlParser.firstIframeSource(it) }
-                    ?.let { toPlayableUrl(it) }
                     ?: return@forEach
 
-                loaded = loadExtractorWithResult(server, "$baseUrl/", subtitleCallback, callback) || loaded
+                loaded = loadResolvedExtractorWithResult(server, "$baseUrl/", subtitleCallback, callback) || loaded
             }
         }
 

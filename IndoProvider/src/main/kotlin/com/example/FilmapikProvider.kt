@@ -122,8 +122,7 @@ class FilmapikProvider : MainAPI() {
 
         var loaded = false
         servers.forEach { raw ->
-            val server = toPlayableUrl(raw) ?: return@forEach
-            loaded = loadExtractorWithResult(server, data, subtitleCallback, callback) || loaded
+            loaded = loadResolvedExtractorWithResult(raw, data, subtitleCallback, callback) || loaded
         }
         return loaded
     }

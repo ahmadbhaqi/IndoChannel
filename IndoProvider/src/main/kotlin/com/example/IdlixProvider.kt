@@ -94,8 +94,7 @@ class IdlixProvider : MainAPI() {
 
         var loaded = false
         IdlixApiParser.playableUrls(playInfo).forEach { raw ->
-            val server = toPlayableUrl(raw) ?: return@forEach
-            loaded = loadExtractorWithResult(server, mainUrl, subtitleCallback, callback) || loaded
+            loaded = loadResolvedExtractorWithResult(raw, mainUrl, subtitleCallback, callback) || loaded
         }
         return loaded
     }

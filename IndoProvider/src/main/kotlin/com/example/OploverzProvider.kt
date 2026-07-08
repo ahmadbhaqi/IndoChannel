@@ -101,8 +101,7 @@ class OploverzProvider : MainAPI() {
         val episode = Regex("""/episode/(\d+)""").find(data)?.groupValues?.getOrNull(1)?.toIntOrNull()
         var loaded = false
         InlineDataParser.oploverzStreamUrls(document.html(), episode).forEach { raw ->
-            val server = toPlayableUrl(raw) ?: return@forEach
-            loaded = loadExtractorWithResult(server, mainUrl, subtitleCallback, callback) || loaded
+            loaded = loadResolvedExtractorWithResult(raw, mainUrl, subtitleCallback, callback) || loaded
         }
         return loaded
     }

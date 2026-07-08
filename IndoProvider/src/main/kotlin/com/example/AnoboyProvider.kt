@@ -91,8 +91,7 @@ class AnoboyProvider : MainAPI() {
             }
 
             resolvedSources.forEach { source ->
-                val server = toPlayableUrl(source) ?: return@forEach
-                loaded = loadExtractorWithResult(server, mainUrl, subtitleCallback, callback) || loaded
+                loaded = loadResolvedExtractorWithResult(source, mainUrl, subtitleCallback, callback) || loaded
             }
         }
 

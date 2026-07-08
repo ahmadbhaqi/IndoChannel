@@ -129,6 +129,45 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `playSobatUrls decrypts encrypted player payload`() {
+        val html = """
+            <script>
+                window.payload = "{\"iv\":\"ABEiM0RVZneImaq7zN3u/w==\",\"data\":\"jcnQBUKMrJE5BkzD119j3/yizUSXLAM0pS062Yj0wREvec9ySwfrXuSq/IOVVCW6WvsAa7UwxT1hs+oWmuIpcd8GJ1sXubg1CEOd4Yovu7NoyuHwc3ZgZsX48VhsbWie\"}";
+            </script>
+        """.trimIndent()
+
+        assertEquals(
+            listOf(
+                "https://abysscdn.com/?v=UDPNmR2acq",
+                "https://filemoon.sx/e/v2dt7jq5kxpr"
+            ),
+            InlineDataParser.playSobatUrls(html)
+        )
+    }
+
+    @Test
+    fun `kuronimeSourceId reads encrypted api id from watch page`() {
+        val html = """
+            <script>var xenHash = "awar"; var _0xa100d42aa = "encrypted-source-id";</script>
+        """.trimIndent()
+
+        assertEquals("encrypted-source-id", InlineDataParser.kuronimeSourceId(html))
+    }
+
+    @Test
+    fun `kuronimeMirrorUrls decrypts api mirror payload`() {
+        val encrypted = "eyJjdCI6Im4xVGEyb2JmWnZZUnlrTDF6dkJBQWJXa3FzNThoTW5OSWk1bE1ERzB0REc4UHBpWjF3Ujl3ZkphZzlROWxoV3RrVFJEblVrcXJMQUtlbFErNHpsOUVVK2hPRGY1WnNDU3NvSlk5Q0JSa05ZeUZ6S29WdUZJT1Qrb3ZTUHI4MkU2emNTQlB3WE5NUkhpRGg2N0pFUjhVRjBDL2I5WTI1UjVBWVJPVXRiRldhYz0iLCJpdiI6ImI5ODJhYjQ1M2VkOGM0OTU2YTNkMjI5MTRhNGYxODVjIiwicyI6IjAwMTEyMjMzNDQ1NTY2NzcifQ=="
+
+        assertEquals(
+            listOf(
+                "https://filemoon.sx/e/kuronime",
+                "https://filelions.to/v/kuronime"
+            ),
+            InlineDataParser.kuronimeMirrorUrls(encrypted)
+        )
+    }
+
+    @Test
     fun `idlixCatalogItems reads list and search responses`() {
         val listJson = """
             {

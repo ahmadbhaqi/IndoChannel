@@ -100,8 +100,7 @@ class MiranimeProvider : MainAPI() {
         val document = app.get(data).document
         var loaded = false
         InlineDataParser.miranimeSourceUrls(document.html()).forEach { raw ->
-            val server = toPlayableUrl(raw) ?: return@forEach
-            loaded = loadExtractorWithResult(server, data, subtitleCallback, callback) || loaded
+            loaded = loadResolvedExtractorWithResult(raw, data, subtitleCallback, callback) || loaded
         }
         return loaded
     }

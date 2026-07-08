@@ -64,11 +64,30 @@ open class KuronimeProvider : MainAPI() {
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val document = app.get(data).document
+        val fetch = app.get(data)
+        val document = fetch.document
+        val html = fetch.text
         var loaded = false
+
+        InlineDataParser.kuronimeSourceId(html)?.let { sourceId ->
+            try {
+                val response = app.post(
+                    "https://animeku.org/api/v9/sources",
+                    json = mapOf("id" to sourceId),
+                    referer = data,
+                    headers = mapOf(
+                        "Content-Type" to "application/json",
+                        "Accept" to "application/json"
+                    )
+                ).text
+                InlineDataParser.kuronimeApiUrls(response).forEach { raw ->
+                    loaded = loadResolvedExtractorWithResult(raw, data, subtitleCallback, callback) || loaded
+                }
+            } catch (_: Exception) {}
+        }
+
         ProviderHtmlParser.mediaSources(document).forEach { src ->
-            val server = toPlayableUrl(src) ?: return@forEach
-            loaded = loadExtractorWithResult(server, "$mainUrl/", subtitleCallback, callback) || loaded
+            loaded = loadResolvedExtractorWithResult(src, "$mainUrl/", subtitleCallback, callback) || loaded
         }
 
         document.select("select.mirror > option[value]").forEach { option ->
@@ -77,8 +96,7 @@ open class KuronimeProvider : MainAPI() {
                 val iframe = org.jsoup.Jsoup.parse(decoded).selectFirst("iframe")?.let {
                     ProviderHtmlParser.firstIframeSource(it)
                 }
-                val server = toPlayableUrl(iframe) ?: return@forEach
-                loaded = loadExtractorWithResult(server, "$mainUrl/", subtitleCallback, callback) || loaded
+                loaded = loadResolvedExtractorWithResult(iframe, "$mainUrl/", subtitleCallback, callback) || loaded
             } catch (_: Exception) {}
         }
         return loaded
