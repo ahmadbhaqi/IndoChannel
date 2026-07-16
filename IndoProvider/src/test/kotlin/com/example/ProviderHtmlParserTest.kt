@@ -353,6 +353,32 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `asiaStreamMasterUrl accepts uppercase HTTPS scheme`() {
+        val html = """sniff("slug","7","hash",null,[],1,1,false);"""
+
+        assertEquals(
+            "https://watch.asiastream.cc/m3u8/7/hash/master.txt?s=1&cache=1",
+            InlineDataParser.asiaStreamMasterUrl(html, "HTTPS://watch.asiastream.cc/watch?v=x")
+        )
+    }
+
+    @Test
+    fun `toPlayableUrl accepts uppercase HTTP schemes`() {
+        val api = RebahinProvider()
+
+        assertEquals("https://video.example/embed", api.toPlayableUrl("HTTPS://video.example/embed"))
+        assertEquals("https://video.example/embed", api.toPlayableUrl("HTTP://video.example/embed"))
+    }
+
+    @Test
+    fun `toPlayableUrl rejects explicit non HTTP schemes`() {
+        val api = RebahinProvider()
+
+        assertNull(api.toPlayableUrl("FTP://video.example/movie.mp4"))
+        assertNull(api.toPlayableUrl("data:text/html,<iframe></iframe>"))
+    }
+
+    @Test
     fun `isNonContentPage recognizes upstream interstitials and errors`() {
         assertTrue(ProviderHtmlParser.isNonContentPage("<title>Internet Positif</title>"))
         assertTrue(ProviderHtmlParser.isNonContentPage("<title>Just a moment...</title><script src='https://challenges.cloudflare.com/x'></script>"))
@@ -406,6 +432,44 @@ class ProviderHtmlParserTest {
             extractorRequests
         )
         assertEquals("https://cdn.example/master.m3u8", links.single().url)
+    }
+
+    @Test
+    fun `PlaySobat without emitted nested links falls through extractor and cached generic fallback`() = runBlocking {
+        val playerUrl = "https://playsobat.xyz/embed/1"
+        val links = mutableListOf<ExtractorLink>()
+        val extractorRequests = mutableListOf<String>()
+        var playerFetches = 0
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                if (url == playerUrl) {
+                    playerFetches++
+                    """
+                        <script>
+                            window.payload = "{\"iv\":\"ABEiM0RVZneImaq7zN3u/w==\",\"data\":\"jcnQBUKMrJE5BkzD119j3/yizUSXLAM0pS062Yj0wREvec9ySwfrXuSq/IOVVCW6WvsAa7UwxT1hs+oWmuIpcd8GJ1sXubg1CEOd4Yovu7NoyuHwc3ZgZsX48VhsbWie\"}";
+                        </script>
+                        <iframe src="https://cdn.example/fallback.m3u8"></iframe>
+                    """.trimIndent()
+                } else {
+                    "<title>Internet Positif</title>"
+                }
+            },
+            extractorLoader = { url, _, _, _ ->
+                extractorRequests += url
+                false
+            },
+            directLinkFactory = { source, name, url, referer, quality, type, headers ->
+                directExtractorLink(source, name, url, referer, quality, type, headers)
+            }
+        )
+
+        assertTrue(session.resolve(playerUrl, "https://provider.example/item"))
+        assertTrue(playerUrl in extractorRequests)
+        assertEquals(1, playerFetches)
+        assertEquals("https://cdn.example/fallback.m3u8", links.single().url)
     }
 
     @Test
@@ -483,6 +547,80 @@ class ProviderHtmlParserTest {
         )
         assertEquals(ExtractorLinkType.M3U8, links.single().type)
         assertEquals("https://watch.asiastream.cc/watch?v=K8OFQSVM", links.single().referer)
+    }
+
+    @Test
+    fun `malformed AsiaStream sniff falls through extractor and cached generic fallback`() = runBlocking {
+        val playerUrl = "https://watch.asiastream.cc/watch?v=K8OFQSVM"
+        val links = mutableListOf<ExtractorLink>()
+        val extractorRequests = mutableListOf<String>()
+        var playerFetches = 0
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                assertEquals(playerUrl, url)
+                playerFetches++
+                """
+                    <script>sniff("slug","invalid uid!","hash",null,[],1,1,false);</script>
+                    <iframe src="https://cdn.example/fallback.m3u8"></iframe>
+                """.trimIndent()
+            },
+            extractorLoader = { url, _, _, _ ->
+                extractorRequests += url
+                false
+            },
+            directLinkFactory = { source, name, url, referer, quality, type, headers ->
+                directExtractorLink(source, name, url, referer, quality, type, headers)
+            }
+        )
+
+        assertTrue(session.resolve(playerUrl, "https://provider.example/item"))
+        assertEquals(listOf(playerUrl), extractorRequests)
+        assertEquals(1, playerFetches)
+        assertEquals("https://cdn.example/fallback.m3u8", links.single().url)
+    }
+
+    @Test
+    fun `extractor true without callback does not report success`() = runBlocking {
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = {},
+            pageFetcher = { _, _ -> "<title>Internet Positif</title>" },
+            extractorLoader = { _, _, _, _ -> true }
+        )
+
+        assertFalse(session.resolve("https://player.example/embed/1", null))
+    }
+
+    @Test
+    fun `extractor false with callback reports success`() = runBlocking {
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { _, _ -> error("emission should stop generic fallback") },
+            extractorLoader = { _, _, _, callback ->
+                callback(
+                    directExtractorLink(
+                        "test",
+                        "test",
+                        "https://cdn.example/master.m3u8",
+                        "",
+                        0,
+                        ExtractorLinkType.M3U8,
+                        emptyMap()
+                    )
+                )
+                false
+            }
+        )
+
+        assertTrue(session.resolve("https://player.example/embed/1", null))
+        assertEquals("https://cdn.example/master.m3u8", links.single().url)
     }
 
     @Test

@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
+import kotlin.coroutines.cancellation.CancellationException
 import org.jsoup.nodes.Element
 import java.net.URI
 
@@ -85,19 +86,31 @@ class DutamovieProvider : MainAPI() {
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
         if (id.isNullOrEmpty()) {
             document.select("ul.muvipro-player-tabs li a").forEach { ele ->
-                val iframe = app.get(fixUrl(ele.attr("href"))).document
-                    .selectFirst("div.gmr-embed-responsive iframe")
-                    ?.let { ProviderHtmlParser.firstIframeSource(it) }
+                val iframe = try {
+                    app.get(fixUrl(ele.attr("href"))).document
+                        .selectFirst("div.gmr-embed-responsive iframe")
+                        ?.let { ProviderHtmlParser.firstIframeSource(it) }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
                     ?: return@forEach
                 resolver.resolve(iframe, "$baseUrl/")
             }
         } else {
             document.select("div.tab-content-ajax").forEach { ele ->
-                val server = app.post(
-                    "$baseUrl/wp-admin/admin-ajax.php",
-                    data = mapOf("action" to "muvipro_player_content", "tab" to ele.attr("id"), "post_id" to "$id")
-                ).document.selectFirst("iframe")
-                    ?.let { ProviderHtmlParser.firstIframeSource(it) }
+                val server = try {
+                    app.post(
+                        "$baseUrl/wp-admin/admin-ajax.php",
+                        data = mapOf("action" to "muvipro_player_content", "tab" to ele.attr("id"), "post_id" to "$id")
+                    ).document.selectFirst("iframe")
+                        ?.let { ProviderHtmlParser.firstIframeSource(it) }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
                     ?: return@forEach
                 resolver.resolve(server, "$baseUrl/")
             }

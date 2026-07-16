@@ -73,9 +73,10 @@ internal object InlineDataParser {
         val cache = match.groupValues[3]
         return runCatching {
             val player = java.net.URI(playerUrl)
-            if (player.scheme !in setOf("http", "https") || player.host.isNullOrBlank()) return null
+            val scheme = player.scheme?.lowercase()
+            if (scheme !in setOf("http", "https") || player.host.isNullOrBlank()) return null
             java.net.URI(
-                player.scheme,
+                scheme,
                 player.authority,
                 "/m3u8/$uid/$hash/master.txt",
                 "s=1&cache=$cache",

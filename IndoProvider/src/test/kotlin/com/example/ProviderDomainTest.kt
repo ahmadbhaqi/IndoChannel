@@ -1,6 +1,8 @@
 package com.example
 
 import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import java.io.File
 
@@ -79,10 +81,21 @@ class ProviderDomainTest {
             "FilmapikProvider.kt"
         )
 
+        val sessionCreation = Regex("""\bLinkResolutionSession\s*\(""")
+        val legacyCalls = listOf("loadExtractorWithResult", "loadResolvedExtractorWithResult")
         providers.forEach { fileName ->
             val source = source(fileName)
-            assertTrue(source.contains("LinkResolutionSession("), "$fileName should create one shared session")
-            assertTrue(!source.contains("loadExtractorWithResult("), "$fileName should not bypass the shared resolver")
+            assertEquals(
+                1,
+                sessionCreation.findAll(source).count(),
+                "$fileName should create exactly one shared session"
+            )
+            legacyCalls.forEach { legacyCall ->
+                assertFalse(
+                    Regex("""\b$legacyCall\s*\(""").containsMatchIn(source),
+                    "$fileName should not call $legacyCall"
+                )
+            }
         }
     }
 
@@ -104,24 +117,46 @@ class ProviderDomainTest {
     }
 
     @Test
-    fun `provider fetch fallbacks do not swallow cancellation`() {
+    fun `per candidate provider fetches rethrow cancellation and skip ordinary failures`() {
         val providers = listOf(
             "NgefilmProvider.kt",
             "DutamovieProvider.kt",
-            "PusatfilmProvider.kt",
-            "RebahinProvider.kt",
-            "GomovProvider.kt",
-            "IdlixProvider.kt",
-            "KitanontonProvider.kt",
-            "FilmapikProvider.kt"
+            "GomovProvider.kt"
         )
-        val caughtSuspendFetch = Regex("""runCatching\s*\{\s*app\.(get|post)""")
+        val perCandidateFetches = listOf(
+            """app\s*\.\s*get\s*\(\s*fixUrl\s*\(\s*ele\s*\.\s*attr\s*\(\s*"href"\s*\)\s*\)\s*\)""",
+            """app\s*\.\s*post\s*\("""
+        )
 
         providers.forEach { fileName ->
-            assertTrue(
-                !caughtSuspendFetch.containsMatchIn(source(fileName)),
-                "$fileName should rethrow cancellation from caught fetches"
-            )
+            val source = source(fileName)
+            perCandidateFetches.forEach { fetchPattern ->
+                val cancellationSafeFetch = Regex(
+                    """(?s)try\s*\{(?:(?!catch\s*\().)*?$fetchPattern(?:(?!catch\s*\().)*?}\s*catch\s*\(\s*(\w+)\s*:\s*CancellationException\s*\)\s*\{\s*throw\s+\1\s*}\s*catch\s*\(\s*_\s*:\s*Exception\s*\)\s*\{\s*null\s*}"""
+                )
+                assertTrue(
+                    cancellationSafeFetch.containsMatchIn(source),
+                    "$fileName should isolate $fetchPattern with cancellation-safe catches"
+                )
+            }
         }
+    }
+
+    @Test
+    fun `Pusatfilm iterates every matching iframe`() {
+        val loadLinksSource = source("PusatfilmProvider.kt")
+            .substringAfter("override suspend fun loadLinks")
+        val allIframeIteration = Regex(
+            """(?s)document\s*\.\s*select\s*\(\s*"[^"]*iframe[^"]*"\s*\)(?:(?!selectFirst)[\s\S])*?\.\s*forEach\s*\{"""
+        )
+
+        assertTrue(
+            allIframeIteration.containsMatchIn(loadLinksSource),
+            "PusatfilmProvider should iterate the complete iframe selection"
+        )
+        assertFalse(
+            Regex("""\bselectFirst\s*\(""").containsMatchIn(loadLinksSource),
+            "PusatfilmProvider loadLinks should not stop at the first iframe"
+        )
     }
 }

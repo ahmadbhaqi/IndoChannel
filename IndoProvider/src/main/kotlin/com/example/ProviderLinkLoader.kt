@@ -62,6 +62,7 @@ internal class LinkResolutionSession(
         if (genericDepth > maxDepth || !visitedCandidates.add(url)) return
 
         try {
+            var cachedHtml: String? = null
             directMediaType(url)?.let { type ->
                 emitDirect(url, referer, type)
                 return
@@ -70,27 +71,30 @@ internal class LinkResolutionSession(
             val host = URI(url).host.orEmpty().lowercase()
             if (host == "playsobat.xyz" || host.endsWith(".playsobat.xyz")) {
                 val html = pageFetcher(url, referer)
+                cachedHtml = html
                 if (ProviderHtmlParser.isNonContentPage(html)) return
+                val beforeAdapter = emittedUrls.size
                 InlineDataParser.playSobatUrls(html).forEach { nested ->
                     api.toPlayableUrl(nested)?.let { resolveCandidate(it, url, genericDepth) }
                 }
-                return
+                if (emittedUrls.size > beforeAdapter) return
             }
 
             if (host == "asiastream.cc" || host.endsWith(".asiastream.cc")) {
-                val html = pageFetcher(url, referer)
+                val html = cachedHtml ?: pageFetcher(url, referer).also { cachedHtml = it }
                 if (ProviderHtmlParser.isNonContentPage(html)) return
+                val beforeAdapter = emittedUrls.size
                 InlineDataParser.asiaStreamMasterUrl(html, url)?.let { master ->
                     emitDirect(master, url, ExtractorLinkType.M3U8)
                 }
-                return
+                if (emittedUrls.size > beforeAdapter) return
             }
 
             val beforeExtractor = emittedUrls.size
             extractorLoader(url, referer, subtitleCallback, ::emit)
             if (emittedUrls.size > beforeExtractor || genericDepth >= maxDepth) return
 
-            val html = pageFetcher(url, referer)
+            val html = cachedHtml ?: pageFetcher(url, referer)
             if (ProviderHtmlParser.isNonContentPage(html)) return
             val document = Jsoup.parse(html, url)
             ProviderHtmlParser.mediaSources(document).forEach { nested ->
@@ -135,13 +139,20 @@ internal fun directMediaType(url: String): ExtractorLinkType? {
 
 internal fun MainAPI.toPlayableUrl(raw: String?): String? {
     val value = raw?.trim()?.takeIf {
-        it.isNotBlank() && !it.startsWith("javascript:", ignoreCase = true)
+        it.isNotBlank()
     } ?: return null
+    val explicitScheme = Regex("""^([A-Za-z][A-Za-z0-9+.-]*):""")
+        .find(value)
+        ?.groupValues
+        ?.get(1)
+    if (explicitScheme != null &&
+        !explicitScheme.equals("http", ignoreCase = true) &&
+        !explicitScheme.equals("https", ignoreCase = true)
+    ) return null
 
     return when {
         value.startsWith("//") -> httpsify(value)
-        value.startsWith("http://") -> httpsify(value)
-        value.startsWith("https://") -> value
+        explicitScheme != null -> value.replaceFirst(Regex("""^[A-Za-z][A-Za-z0-9+.-]*:"""), "https:")
         else -> fixUrl(value)
     }
 }

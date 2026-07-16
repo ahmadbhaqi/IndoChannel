@@ -116,12 +116,12 @@ class PusatfilmProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val document = app.get(data).document
-        val iframe = document
-            .selectFirst("div.gmr-embed-responsive iframe, div.movieplay iframe, iframe")
-            ?.let { ProviderHtmlParser.firstIframeSource(it) }
+        val iframes = document
+            .select("div.gmr-embed-responsive iframe, div.movieplay iframe, iframe")
+            .mapNotNull { ProviderHtmlParser.firstIframeSource(it) }
 
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
-        if (!iframe.isNullOrBlank()) {
+        iframes.forEach { iframe ->
             val refererBase = runCatching { getBaseUrl(iframe) }.getOrDefault(mainUrl) + "/"
             resolver.resolve(iframe, refererBase)
         }

@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import java.net.URI
+import kotlin.coroutines.cancellation.CancellationException
 import org.jsoup.nodes.Element
 
 class NgefilmProvider : MainAPI() {
@@ -131,24 +132,36 @@ class NgefilmProvider : MainAPI() {
 
         if (id.isNullOrEmpty()) {
             document.select("ul.muvipro-player-tabs li a").forEach { ele ->
-                val iframe = app.get(fixUrl(ele.attr("href")))
-                    .document
-                    .selectFirst("div.gmr-embed-responsive iframe")
-                    ?.let { ProviderHtmlParser.firstIframeSource(it) }
+                val iframe = try {
+                    app.get(fixUrl(ele.attr("href")))
+                        .document
+                        .selectFirst("div.gmr-embed-responsive iframe")
+                        ?.let { ProviderHtmlParser.firstIframeSource(it) }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
                     ?: return@forEach
                 resolver.resolve(iframe, "$baseUrl/")
             }
         } else {
             document.select("div.tab-content-ajax").forEach { ele ->
-                val server = app.post(
-                    "$baseUrl/wp-admin/admin-ajax.php",
-                    data = mapOf(
-                        "action" to "muvipro_player_content",
-                        "tab" to ele.attr("id"),
-                        "post_id" to "$id"
-                    )
-                ).document.selectFirst("iframe")
-                    ?.let { ProviderHtmlParser.firstIframeSource(it) }
+                val server = try {
+                    app.post(
+                        "$baseUrl/wp-admin/admin-ajax.php",
+                        data = mapOf(
+                            "action" to "muvipro_player_content",
+                            "tab" to ele.attr("id"),
+                            "post_id" to "$id"
+                        )
+                    ).document.selectFirst("iframe")
+                        ?.let { ProviderHtmlParser.firstIframeSource(it) }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
                     ?: return@forEach
                 resolver.resolve(server, "$baseUrl/")
             }
