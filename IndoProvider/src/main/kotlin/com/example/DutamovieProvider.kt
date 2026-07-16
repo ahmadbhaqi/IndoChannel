@@ -82,15 +82,14 @@ class DutamovieProvider : MainAPI() {
         val document = fetch.document
         val baseUrl = directUrl ?: getBaseUrl(fetch.url)
         val id = document.selectFirst("div#muvipro_player_content_id")?.attr("data-id")
-        var loaded = false
+        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
         if (id.isNullOrEmpty()) {
             document.select("ul.muvipro-player-tabs li a").forEach { ele ->
                 val iframe = app.get(fixUrl(ele.attr("href"))).document
                     .selectFirst("div.gmr-embed-responsive iframe")
                     ?.let { ProviderHtmlParser.firstIframeSource(it) }
-                    ?.let { toPlayableUrl(it) }
                     ?: return@forEach
-                loaded = loadExtractorWithResult(iframe, "$baseUrl/", subtitleCallback, callback) || loaded
+                resolver.resolve(iframe, "$baseUrl/")
             }
         } else {
             document.select("div.tab-content-ajax").forEach { ele ->
@@ -99,12 +98,11 @@ class DutamovieProvider : MainAPI() {
                     data = mapOf("action" to "muvipro_player_content", "tab" to ele.attr("id"), "post_id" to "$id")
                 ).document.selectFirst("iframe")
                     ?.let { ProviderHtmlParser.firstIframeSource(it) }
-                    ?.let { toPlayableUrl(it) }
                     ?: return@forEach
-                loaded = loadExtractorWithResult(server, "$baseUrl/", subtitleCallback, callback) || loaded
+                resolver.resolve(server, "$baseUrl/")
             }
         }
-        return loaded
+        return resolver.loaded
     }
 
     private fun Element.getImageAttr(): String = when {

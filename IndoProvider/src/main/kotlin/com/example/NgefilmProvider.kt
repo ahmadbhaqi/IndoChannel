@@ -4,8 +4,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.httpsify
-import com.lagradost.cloudstream3.utils.loadExtractor
 import java.net.URI
 import org.jsoup.nodes.Element
 
@@ -129,7 +127,7 @@ class NgefilmProvider : MainAPI() {
         val document = fetch.document
         val baseUrl = directUrl ?: getBaseUrl(fetch.url)
         val id = document.selectFirst("div#muvipro_player_content_id")?.attr("data-id")
-        var loaded = false
+        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
 
         if (id.isNullOrEmpty()) {
             document.select("ul.muvipro-player-tabs li a").forEach { ele ->
@@ -137,9 +135,8 @@ class NgefilmProvider : MainAPI() {
                     .document
                     .selectFirst("div.gmr-embed-responsive iframe")
                     ?.let { ProviderHtmlParser.firstIframeSource(it) }
-                    ?.let { toPlayableUrl(it) }
                     ?: return@forEach
-                loaded = loadExtractorWithResult(iframe, "$baseUrl/", subtitleCallback, callback) || loaded
+                resolver.resolve(iframe, "$baseUrl/")
             }
         } else {
             document.select("div.tab-content-ajax").forEach { ele ->
@@ -152,12 +149,11 @@ class NgefilmProvider : MainAPI() {
                     )
                 ).document.selectFirst("iframe")
                     ?.let { ProviderHtmlParser.firstIframeSource(it) }
-                    ?.let { toPlayableUrl(it) }
                     ?: return@forEach
-                loaded = loadExtractorWithResult(server, "$baseUrl/", subtitleCallback, callback) || loaded
+                resolver.resolve(server, "$baseUrl/")
             }
         }
-        return loaded
+        return resolver.loaded
     }
 
     private fun Element.getImageAttr(): String {

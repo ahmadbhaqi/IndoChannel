@@ -81,13 +81,13 @@ class KitanontonProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val document = app.get(data).document
-        var loaded = false
+        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
         document.select(".entry-content a[href], article a[href]").forEach { link ->
             val href = link.attr("href").trim()
             if (href.isBlank() || href.contains("kitanonton.com") || href.startsWith("#")) return@forEach
-            loaded = loadResolvedExtractorWithResult(href, data, subtitleCallback, callback) || loaded
+            resolver.resolve(href, data)
         }
-        return loaded
+        return resolver.loaded
     }
 
     private fun String.cleanKitanontonTitle(): String {

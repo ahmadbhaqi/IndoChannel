@@ -147,11 +147,11 @@ open class GomovProvider : MainAPI() {
         val document = fetch.document
         val baseUrl = directUrl ?: getBaseUrl(fetch.url)
         val id = document.selectFirst("div#muvipro_player_content_id")?.attr("data-id")
-        var loaded = false
+        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
 
         if(id.isNullOrEmpty()) {
             ProviderHtmlParser.mediaSources(document, "div.gmr-embed-responsive iframe, iframe").forEach { src ->
-                loaded = loadResolvedExtractorWithResult(src, "$baseUrl/", subtitleCallback, callback) || loaded
+                resolver.resolve(src, "$baseUrl/")
             }
 
             document.select("ul.muvipro-player-tabs li a").forEach { ele ->
@@ -160,7 +160,7 @@ open class GomovProvider : MainAPI() {
                     ?.let { ProviderHtmlParser.firstIframeSource(it) }
                     ?: return@forEach
 
-                loaded = loadResolvedExtractorWithResult(iframe, "$baseUrl/", subtitleCallback, callback) || loaded
+                resolver.resolve(iframe, "$baseUrl/")
             }
         } else {
             document.select("div.tab-content-ajax").forEach { ele ->
@@ -171,11 +171,11 @@ open class GomovProvider : MainAPI() {
                     ?.let { ProviderHtmlParser.firstIframeSource(it) }
                     ?: return@forEach
 
-                loaded = loadResolvedExtractorWithResult(server, "$baseUrl/", subtitleCallback, callback) || loaded
+                resolver.resolve(server, "$baseUrl/")
             }
         }
 
-        return loaded
+        return resolver.loaded
     }
 
     private fun Element.getImageAttr(): String? {

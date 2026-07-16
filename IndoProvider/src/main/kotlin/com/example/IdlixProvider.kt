@@ -44,10 +44,14 @@ class IdlixProvider : MainAPI() {
         return if (item.isSeries) {
             val episodes = IdlixApiParser.seasons(json)
                 .flatMap { season ->
-                    runCatching {
+                    val seasonJson = try {
                         app.get("$apiUrl/series/${item.slug}/season/${season.seasonNumber}", headers = apiHeaders).text
-                    }.getOrNull()
-                        ?.let { IdlixApiParser.seasonEpisodes(it) }
+                    } catch (error: kotlin.coroutines.cancellation.CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        null
+                    }
+                    seasonJson?.let { IdlixApiParser.seasonEpisodes(it) }
                         .orEmpty()
                 }
                 .map { episode ->
@@ -88,15 +92,19 @@ class IdlixProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val streamData = IdlixStreamData.parse(data) ?: return false
-        val playInfo = runCatching {
+        val playInfo = try {
             app.get("$apiUrl/watch/play-info/${streamData.contentType}/${streamData.contentId}", headers = apiHeaders).text
-        }.getOrNull() ?: return false
-
-        var loaded = false
-        IdlixApiParser.playableUrls(playInfo).forEach { raw ->
-            loaded = loadResolvedExtractorWithResult(raw, mainUrl, subtitleCallback, callback) || loaded
+        } catch (error: kotlin.coroutines.cancellation.CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            return false
         }
-        return loaded
+
+        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        IdlixApiParser.playableUrls(playInfo).forEach { raw ->
+            resolver.resolve(raw, mainUrl)
+        }
+        return resolver.loaded
     }
 
     private fun IdlixCatalogItem.toSearchResponse(): SearchResponse? {

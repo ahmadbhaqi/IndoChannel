@@ -120,11 +120,9 @@ class FilmapikProvider : MainAPI() {
                 document.select("select#player-select option[value]").mapNotNull { it.attr("value").takeIf { value -> value.isNotBlank() } }
             ).distinct()
 
-        var loaded = false
-        servers.forEach { raw ->
-            loaded = loadResolvedExtractorWithResult(raw, data, subtitleCallback, callback) || loaded
-        }
-        return loaded
+        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        servers.forEach { raw -> resolver.resolve(raw, data) }
+        return resolver.loaded
     }
 
     data class FilmapikSearchItem(

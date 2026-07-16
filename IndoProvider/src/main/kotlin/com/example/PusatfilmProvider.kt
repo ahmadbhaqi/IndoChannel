@@ -4,8 +4,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 
-import com.lagradost.cloudstream3.utils.httpsify
-import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -121,14 +119,13 @@ class PusatfilmProvider : MainAPI() {
         val iframe = document
             .selectFirst("div.gmr-embed-responsive iframe, div.movieplay iframe, iframe")
             ?.let { ProviderHtmlParser.firstIframeSource(it) }
-            ?.let { toPlayableUrl(it) }
 
-        return if (!iframe.isNullOrBlank()) {
+        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        if (!iframe.isNullOrBlank()) {
             val refererBase = runCatching { getBaseUrl(iframe) }.getOrDefault(mainUrl) + "/"
-            loadExtractorWithResult(iframe, refererBase, subtitleCallback, callback)
-        } else {
-            false
+            resolver.resolve(iframe, refererBase)
         }
+        return resolver.loaded
     }
 
     private fun Element.getImageAttr(): String {

@@ -60,10 +60,10 @@ open class RebahinProvider : MainAPI() {
         val fetch = app.get(data)
         val document = fetch.document
         val directUrl = getBaseUrl(fetch.url)
-        var loaded = false
+        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
 
         ProviderHtmlParser.mediaSources(document, "iframe, div.gmr-embed-responsive iframe").forEach { src ->
-            loaded = loadResolvedExtractorWithResult(src, data, subtitleCallback, callback) || loaded
+            resolver.resolve(src, data)
         }
 
         ProviderHtmlParser.muviproAjaxRequests(document).forEach { request ->
@@ -74,23 +74,28 @@ open class RebahinProvider : MainAPI() {
                     referer = data,
                     headers = mapOf("X-Requested-With" to "XMLHttpRequest")
                 ).document.selectFirst("iframe")?.let { ProviderHtmlParser.firstIframeSource(it) }
-
-                loaded = loadResolvedExtractorWithResult(iframe, "$directUrl/", subtitleCallback, callback) || loaded
-            } catch (_: Exception) {}
+                resolver.resolve(iframe, "$directUrl/")
+            } catch (error: kotlin.coroutines.cancellation.CancellationException) {
+                throw error
+            } catch (_: Exception) {
+            }
         }
 
         document.select("ul#player-list > li a, ul.muvipro-player-tabs li a").forEach { link ->
             val href = link.attr("href")
             if (href.isNotBlank()) {
                 try {
-                    val iframeSrc = app.get(fixProviderUrl(href) ?: return@forEach).document.selectFirst("iframe")?.let {
-                        ProviderHtmlParser.firstIframeSource(it)
-                    }
-                    loaded = loadResolvedExtractorWithResult(iframeSrc, data, subtitleCallback, callback) || loaded
-                } catch (_: Exception) {}
+                    val playerUrl = fixProviderUrl(href) ?: return@forEach
+                    val iframe = app.get(playerUrl).document.selectFirst("iframe")
+                        ?.let { ProviderHtmlParser.firstIframeSource(it) }
+                    resolver.resolve(iframe, data)
+                } catch (error: kotlin.coroutines.cancellation.CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                }
             }
         }
-        return loaded
+        return resolver.loaded
     }
 
     private fun fixProviderUrl(raw: String): String? {

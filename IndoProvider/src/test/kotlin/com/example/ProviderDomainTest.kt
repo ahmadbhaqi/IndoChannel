@@ -65,4 +65,63 @@ class ProviderDomainTest {
             assertTrue(plugin.contains(expected), "IndoPlugin.kt should contain $expected")
         }
     }
+
+    @Test
+    fun `movie providers use one shared resolution session`() {
+        val providers = listOf(
+            "NgefilmProvider.kt",
+            "DutamovieProvider.kt",
+            "PusatfilmProvider.kt",
+            "RebahinProvider.kt",
+            "GomovProvider.kt",
+            "IdlixProvider.kt",
+            "KitanontonProvider.kt",
+            "FilmapikProvider.kt"
+        )
+
+        providers.forEach { fileName ->
+            val source = source(fileName)
+            assertTrue(source.contains("LinkResolutionSession("), "$fileName should create one shared session")
+            assertTrue(!source.contains("loadExtractorWithResult("), "$fileName should not bypass the shared resolver")
+        }
+    }
+
+    @Test
+    fun `plugin keeps every provider registered`() {
+        val plugin = source("IndoPlugin.kt")
+        val expected = listOf(
+            "LayarKacaProvider", "NgefilmProvider", "PusatfilmProvider", "DutamovieProvider",
+            "RebahinProvider", "CgvindoProvider", "KitanontonProvider", "GomovProvider",
+            "IdlixProvider", "JuraganFilmProvider", "IndoxxiProvider", "FilmapikProvider",
+            "IndofilmProvider", "OtakudesuProvider", "SamehadakuProvider", "AnoboyProvider",
+            "KuronimeProvider", "AnimeindoProvider", "OploverzProvider", "ZoronimeProvider",
+            "MiranimeProvider"
+        )
+
+        expected.forEach { provider ->
+            assertTrue(plugin.contains("registerMainAPI($provider())"), "$provider must remain visible")
+        }
+    }
+
+    @Test
+    fun `provider fetch fallbacks do not swallow cancellation`() {
+        val providers = listOf(
+            "NgefilmProvider.kt",
+            "DutamovieProvider.kt",
+            "PusatfilmProvider.kt",
+            "RebahinProvider.kt",
+            "GomovProvider.kt",
+            "IdlixProvider.kt",
+            "KitanontonProvider.kt",
+            "FilmapikProvider.kt"
+        )
+        val caughtSuspendFetch = Regex("""runCatching\s*\{\s*app\.(get|post)""")
+
+        providers.forEach { fileName ->
+            assertTrue(
+                !caughtSuspendFetch.containsMatchIn(source(fileName)),
+                "$fileName should rethrow cancellation from caught fetches"
+            )
+        }
+    }
 }
