@@ -362,6 +362,115 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `resolution session expands PlaySobat payload through extractors`() = runBlocking {
+        val links = mutableListOf<ExtractorLink>()
+        val extractorRequests = mutableListOf<Pair<String, String?>>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { _, _ ->
+                """
+                    <script>
+                        window.payload = "{\"iv\":\"ABEiM0RVZneImaq7zN3u/w==\",\"data\":\"jcnQBUKMrJE5BkzD119j3/yizUSXLAM0pS062Yj0wREvec9ySwfrXuSq/IOVVCW6WvsAa7UwxT1hs+oWmuIpcd8GJ1sXubg1CEOd4Yovu7NoyuHwc3ZgZsX48VhsbWie\"}";
+                    </script>
+                """.trimIndent()
+            },
+            extractorLoader = { url, referer, _, callback ->
+                extractorRequests += url to referer
+                if (url.startsWith("https://abysscdn.com/")) {
+                    callback(
+                        directExtractorLink(
+                            "test",
+                            "test",
+                            "https://cdn.example/master.m3u8",
+                            referer.orEmpty(),
+                            0,
+                            ExtractorLinkType.M3U8,
+                            emptyMap()
+                        )
+                    )
+                    true
+                } else {
+                    false
+                }
+            }
+        )
+
+        assertTrue(session.resolve("https://playsobat.xyz/embed/1", "https://provider.example/item"))
+        assertEquals(
+            listOf<Pair<String, String?>>(
+                "https://abysscdn.com/?v=UDPNmR2acq" to "https://playsobat.xyz/embed/1",
+                "https://filemoon.sx/e/v2dt7jq5kxpr" to "https://playsobat.xyz/embed/1"
+            ),
+            extractorRequests
+        )
+        assertEquals("https://cdn.example/master.m3u8", links.single().url)
+    }
+
+    @Test
+    fun `resolution session converts AsiaStream watch page to hls`() = runBlocking {
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { _, _ ->
+                """<script>sniff("slug","7","51b7dae1031b20174cacc7e69d6e4bf0",null,[],1,1,false);</script>"""
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            directLinkFactory = { source, name, url, referer, quality, type, headers ->
+                directExtractorLink(source, name, url, referer, quality, type, headers)
+            }
+        )
+
+        assertTrue(session.resolve("https://watch.asiastream.cc/watch?v=K8OFQSVM", "https://provider.example/item"))
+        assertEquals(
+            "https://watch.asiastream.cc/m3u8/7/51b7dae1031b20174cacc7e69d6e4bf0/master.txt?s=1&cache=1",
+            links.single().url
+        )
+        assertEquals(ExtractorLinkType.M3U8, links.single().type)
+        assertEquals("https://watch.asiastream.cc/watch?v=K8OFQSVM", links.single().referer)
+    }
+
+    @Test
+    fun `resolution session follows one relative nested iframe`() = runBlocking {
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { _, _ -> "<iframe src='/media/master.m3u8?token=abc'></iframe>" },
+            extractorLoader = { _, _, _, _ -> false },
+            directLinkFactory = { source, name, url, referer, quality, type, headers ->
+                directExtractorLink(source, name, url, referer, quality, type, headers)
+            }
+        )
+
+        assertTrue(session.resolve("https://player.example/embed/1", "https://provider.example/item"))
+        assertEquals("https://player.example/media/master.m3u8?token=abc", links.single().url)
+    }
+
+    @Test
+    fun `resolution session bounds iframe cycles`() = runBlocking {
+        var fetches = 0
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = {},
+            pageFetcher = { url, _ ->
+                fetches++
+                if (url.endsWith("/a")) "<iframe src='/b'></iframe>" else "<iframe src='/a'></iframe>"
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            maxDepth = 1
+        )
+
+        assertFalse(session.resolve("https://player.example/a", null))
+        assertEquals(1, fetches)
+    }
+
+    @Test
     fun `resolution session emits direct hls only once`() = runBlocking {
         val links = mutableListOf<ExtractorLink>()
         val session = LinkResolutionSession(

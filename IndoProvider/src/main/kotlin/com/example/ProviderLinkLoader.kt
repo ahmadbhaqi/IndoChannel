@@ -12,6 +12,7 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import java.net.URI
 import kotlin.coroutines.cancellation.CancellationException
+import org.jsoup.Jsoup
 
 internal typealias PlayerPageFetcher = suspend (url: String, referer: String?) -> String
 internal typealias CloudstreamExtractorLoader = suspend (
@@ -53,21 +54,55 @@ internal class LinkResolutionSession(
     suspend fun resolve(raw: String?, referer: String?): Boolean {
         val before = emittedUrls.size
         val url = api.toPlayableUrl(raw)?.takeUnless { it.isTrailerUrl() } ?: return false
-        if (!visitedCandidates.add(url)) return false
+        resolveCandidate(url, referer, depth = 0)
+        return emittedUrls.size > before
+    }
+
+    private suspend fun resolveCandidate(url: String, referer: String?, depth: Int) {
+        if (depth > maxDepth || !visitedCandidates.add(url)) return
 
         try {
-            val mediaType = directMediaType(url)
-            if (mediaType != null) {
-                emitDirect(url, referer, mediaType)
-            } else {
-                extractorLoader(url, referer, subtitleCallback, ::emit)
+            directMediaType(url)?.let { type ->
+                emitDirect(url, referer, type)
+                return
+            }
+
+            val host = URI(url).host.orEmpty().lowercase()
+            if (host == "playsobat.xyz" || host.endsWith(".playsobat.xyz")) {
+                val html = pageFetcher(url, referer)
+                if (ProviderHtmlParser.isNonContentPage(html)) return
+                InlineDataParser.playSobatUrls(html).forEach { nested ->
+                    api.toPlayableUrl(nested)?.let { resolveCandidate(it, url, depth + 1) }
+                }
+                return
+            }
+
+            if (host == "asiastream.cc" || host.endsWith(".asiastream.cc")) {
+                val html = pageFetcher(url, referer)
+                if (ProviderHtmlParser.isNonContentPage(html)) return
+                InlineDataParser.asiaStreamMasterUrl(html, url)?.let { master ->
+                    emitDirect(master, url, ExtractorLinkType.M3U8)
+                }
+                return
+            }
+
+            val beforeExtractor = emittedUrls.size
+            extractorLoader(url, referer, subtitleCallback, ::emit)
+            if (emittedUrls.size > beforeExtractor || depth >= maxDepth) return
+
+            val html = pageFetcher(url, referer)
+            if (ProviderHtmlParser.isNonContentPage(html)) return
+            val document = Jsoup.parse(html, url)
+            ProviderHtmlParser.mediaSources(document).forEach { nested ->
+                ProviderHtmlParser.absoluteUrl(nested, url)?.let {
+                    resolveCandidate(it, url, depth + 1)
+                }
             }
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
-            // Candidate failure is isolated; later candidates must still run.
+            // Continue with other top-level candidates.
         }
-        return emittedUrls.size > before
     }
 
     private suspend fun emitDirect(url: String, referer: String?, type: ExtractorLinkType) {
