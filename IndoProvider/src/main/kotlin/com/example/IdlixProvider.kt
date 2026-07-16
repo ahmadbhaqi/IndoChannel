@@ -5,7 +5,12 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import java.net.URLEncoder
+import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.delay
 
 class IdlixProvider : MainAPI() {
     override var mainUrl = "https://z2.idlixku.com"
@@ -42,11 +47,14 @@ class IdlixProvider : MainAPI() {
         ) ?: return null
 
         return if (item.isSeries) {
-            val episodes = IdlixApiParser.seasons(json)
+            val embeddedEpisodes = IdlixApiParser.seasonEpisodes(json)
+            val embeddedSeasons = embeddedEpisodes.mapNotNull { it.seasonNumber }.toSet()
+            val fetchedEpisodes = IdlixApiParser.seasons(json)
+                .filterNot { it.seasonNumber in embeddedSeasons }
                 .flatMap { season ->
                     val seasonJson = try {
                         app.get("$apiUrl/series/${item.slug}/season/${season.seasonNumber}", headers = apiHeaders).text
-                    } catch (error: kotlin.coroutines.cancellation.CancellationException) {
+                    } catch (error: CancellationException) {
                         throw error
                     } catch (_: Exception) {
                         null
@@ -54,6 +62,9 @@ class IdlixProvider : MainAPI() {
                     seasonJson?.let { IdlixApiParser.seasonEpisodes(it) }
                         .orEmpty()
                 }
+            val episodes = (embeddedEpisodes + fetchedEpisodes)
+                .distinctBy { it.id }
+                .sortedWith(compareBy({ it.seasonNumber ?: 0 }, { it.episodeNumber ?: 0 }))
                 .map { episode ->
                     newEpisode(IdlixStreamData("episode", episode.id, item.slug).serialize()) {
                         name = episode.name
@@ -92,19 +103,72 @@ class IdlixProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val streamData = IdlixStreamData.parse(data) ?: return false
-        val playInfo = try {
-            app.get("$apiUrl/watch/play-info/${streamData.contentType}/${streamData.contentId}", headers = apiHeaders).text
-        } catch (error: kotlin.coroutines.cancellation.CancellationException) {
+        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        repeat(2) {
+            val playInfo = requestPlayInfo(streamData) ?: return@repeat
+            val directUrls = IdlixApiParser.playableUrls(playInfo)
+            directUrls.forEach { raw -> resolver.resolve(raw, mainUrl) }
+            if (resolver.loaded) return true
+
+            val gate = IdlixApiParser.gate(playInfo) ?: return@repeat
+            delay(gate.waitMillis + 300L)
+            val claimJson = try {
+                app.post(
+                    "$apiUrl/watch/session/claim",
+                    json = mapOf("gateToken" to gate.token),
+                    referer = mainUrl,
+                    headers = apiHeaders + mapOf(
+                        "Content-Type" to "application/json",
+                        "Origin" to mainUrl
+                    )
+                ).text
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                return@repeat
+            }
+            val claim = IdlixApiParser.claim(claimJson) ?: return@repeat
+            val redeemJson = try {
+                app.post(
+                    claim.redeemUrl,
+                    json = mapOf("claim" to claim.claim, "mode" to "browser"),
+                    referer = mainUrl,
+                    headers = mapOf(
+                        "Accept" to "application/json,text/plain,*/*",
+                        "Content-Type" to "application/json",
+                        "Origin" to mainUrl
+                    )
+                ).text
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                return@repeat
+            }
+            val streamUrl = IdlixApiParser.redeemedUrl(redeemJson) ?: return@repeat
+            callback(
+                newExtractorLink(name, name, streamUrl, ExtractorLinkType.M3U8) {
+                    referer = mainUrl
+                    quality = Qualities.Unknown.value
+                    headers = mapOf("Referer" to mainUrl)
+                }
+            )
+            return true
+        }
+        return false
+    }
+
+    private suspend fun requestPlayInfo(streamData: IdlixStreamData): String? {
+        val url = "$apiUrl/watch/play-info/${streamData.contentType}/${streamData.contentId}"
+        return try {
+            // The first request establishes the owner cookie. The second token is
+            // then guaranteed to belong to the cookie kept by NiceHttp's jar.
+            app.get(url, headers = apiHeaders).text
+            app.get(url, headers = apiHeaders).text
+        } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
-            return false
+            null
         }
-
-        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
-        IdlixApiParser.playableUrls(playInfo).forEach { raw ->
-            resolver.resolve(raw, mainUrl)
-        }
-        return resolver.loaded
     }
 
     private fun IdlixCatalogItem.toSearchResponse(): SearchResponse? {
@@ -154,6 +218,16 @@ internal data class IdlixEpisodeItem(
     val overview: String? = null,
     val stillPath: String? = null,
     val airDate: String? = null
+)
+
+internal data class IdlixGateInfo(
+    val token: String,
+    val waitMillis: Long
+)
+
+internal data class IdlixClaimInfo(
+    val claim: String,
+    val redeemUrl: String
 )
 
 internal data class IdlixStreamData(
@@ -206,7 +280,7 @@ internal object IdlixApiParser {
 
     fun seasonEpisodes(json: String): List<IdlixEpisodeItem> {
         val root = runCatching { mapper.readTree(json) }.getOrNull() ?: return emptyList()
-        val season = root["season"] ?: root
+        val season = root["season"] ?: root["defaultSeason"] ?: root
         val seasonNumber = season.intOrNull("seasonNumber")
         return season["episodes"]
             ?.takeIf { it.isArray }
@@ -228,6 +302,35 @@ internal object IdlixApiParser {
     fun playableUrls(json: String): List<String> {
         val root = runCatching { mapper.readTree(json) }.getOrNull() ?: return emptyList()
         return root.findPlayableUrls().distinct()
+    }
+
+    fun gate(json: String): IdlixGateInfo? {
+        val root = runCatching { mapper.readTree(json) }.getOrNull() ?: return null
+        if (!root.textOrNull("kind").equals("gate", ignoreCase = true)) return null
+        val token = root.textOrNull("gateToken") ?: return null
+        val serverNow = root.longOrNull("serverNow")
+        val unlockAt = root.longOrNull("unlockAt")
+        val waitMillis = when {
+            serverNow == null || unlockAt == null -> 15_000L
+            serverNow < 10_000_000_000L && unlockAt < 10_000_000_000L ->
+                ((unlockAt - serverNow) * 1_000L).coerceIn(0L, 30_000L)
+            else -> (unlockAt - serverNow).coerceIn(0L, 30_000L)
+        }
+        return IdlixGateInfo(token, waitMillis)
+    }
+
+    fun claim(json: String): IdlixClaimInfo? {
+        val root = runCatching { mapper.readTree(json) }.getOrNull() ?: return null
+        val claim = root.textOrNull("claim") ?: return null
+        val redeemUrl = root.textOrNull("redeemUrl")?.takeIf { it.startsWith("https://") } ?: return null
+        return IdlixClaimInfo(claim, redeemUrl)
+    }
+
+    fun redeemedUrl(json: String): String? {
+        val root = runCatching { mapper.readTree(json) }.getOrNull() ?: return null
+        return root.textOrNull("url")?.takeIf {
+            it.startsWith("http://") || it.startsWith("https://")
+        }
     }
 
     fun imageUrl(path: String?, size: String = "w500"): String? {
@@ -296,6 +399,15 @@ internal object IdlixApiParser {
 
     private fun JsonNode.intOrNull(name: String): Int? {
         return get(name)?.takeIf { !it.isNull }?.asInt()
+    }
+
+    private fun JsonNode.longOrNull(name: String): Long? {
+        val value = get(name)?.takeIf { !it.isNull } ?: return null
+        return when {
+            value.isNumber -> value.asLong()
+            value.isTextual -> value.asText().toLongOrNull()
+            else -> null
+        }
     }
 
     private val playableKeys = setOf("url", "src", "file", "link", "embedUrl", "streamUrl", "source")

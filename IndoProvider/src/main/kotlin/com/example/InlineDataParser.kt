@@ -11,7 +11,8 @@ import javax.crypto.spec.SecretKeySpec
 
 internal object InlineDataParser {
     private const val PLAY_SOBAT_KEY = "96fb393f57087e9333cc067bf4aa378e"
-    private const val KURONIME_PASSPHRASE = "3&!Z0M,;dZWrawa=="
+    private const val KURONIME_PASSPHRASE = "3&!Z0M,VIZ;dZW=="
+    private const val KURONIME_LEGACY_PASSPHRASE = "3&!Z0M,;dZWrawa=="
     private val mapper = jacksonObjectMapper()
     private val urlRegex = Regex("""url:"(https?://[^"]+)"""")
     private val jsonLinkRegex = Regex(""""link":"(https?://[^"]+)"""")
@@ -122,19 +123,24 @@ internal object InlineDataParser {
 
     fun kuronimeMirrorUrls(encrypted: String?): List<String> {
         val value = encrypted?.takeIf { it.isNotBlank() } ?: return emptyList()
-        return try {
-            val decrypted = decryptCryptoJsPassphrase(value, KURONIME_PASSPHRASE)
-            collectUrls(mapper.readTree(decrypted))
-        } catch (_: Exception) {
-            emptyList()
-        }
+        return sequenceOf(KURONIME_PASSPHRASE, KURONIME_LEGACY_PASSPHRASE)
+            .mapNotNull { passphrase ->
+                try {
+                    val decrypted = decryptCryptoJsPassphrase(value, passphrase)
+                    collectUrls(mapper.readTree(decrypted))
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            .firstOrNull { it.isNotEmpty() }
+            .orEmpty()
     }
 
     fun kuronimeApiUrls(responseJson: String): List<String> {
         return try {
             val node = mapper.readTree(responseJson)
             val urls = mutableListOf<String>()
-            listOf("mirror", "src", "src_sd").forEach { field ->
+            listOf("src", "src_sd", "mirror").forEach { field ->
                 urls += kuronimeMirrorUrls(node.path(field).asText(null))
             }
             node.path("blog").asText(null)?.takeIf { it.isNotBlank() }?.let { blog ->

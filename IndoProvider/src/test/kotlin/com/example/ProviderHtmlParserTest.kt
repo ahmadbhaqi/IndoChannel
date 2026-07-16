@@ -94,20 +94,8 @@ class ProviderHtmlParserTest {
     @Test
     fun `absoluteUrl resolves provider relative links against explicit base url`() {
         assertEquals(
-            "https://plus.oploverz.ltd/series/3d-kanojo-real-girl",
-            ProviderHtmlParser.absoluteUrl("/series/3d-kanojo-real-girl", "https://plus.oploverz.ltd")
-        )
-    }
-
-    @Test
-    fun `normalizeUrlHost replaces mirror host with active provider host`() {
-        assertEquals(
-            "https://154.203.167.63/bandits-of-batavia-2027/",
-            ProviderHtmlParser.normalizeUrlHost(
-                "https://tv5.rebahinxxi.auction/bandits-of-batavia-2027/",
-                "https://154.203.167.63",
-                "rebahinxxi"
-            )
+            "https://oploverz.org/dr-stone-season-4/",
+            ProviderHtmlParser.absoluteUrl("/dr-stone-season-4/", "https://oploverz.org")
         )
     }
 
@@ -207,7 +195,7 @@ class ProviderHtmlParserTest {
     }
 
     @Test
-    fun `kuronimeMirrorUrls decrypts api mirror payload`() {
+    fun `kuronimeMirrorUrls decrypts legacy api mirror payload`() {
         val encrypted = "eyJjdCI6Im4xVGEyb2JmWnZZUnlrTDF6dkJBQWJXa3FzNThoTW5OSWk1bE1ERzB0REc4UHBpWjF3Ujl3ZkphZzlROWxoV3RrVFJEblVrcXJMQUtlbFErNHpsOUVVK2hPRGY1WnNDU3NvSlk5Q0JSa05ZeUZ6S29WdUZJT1Qrb3ZTUHI4MkU2emNTQlB3WE5NUkhpRGg2N0pFUjhVRjBDL2I5WTI1UjVBWVJPVXRiRldhYz0iLCJpdiI6ImI5ODJhYjQ1M2VkOGM0OTU2YTNkMjI5MTRhNGYxODVjIiwicyI6IjAwMTEyMjMzNDQ1NTY2NzcifQ=="
 
         assertEquals(
@@ -215,6 +203,16 @@ class ProviderHtmlParserTest {
                 "https://filemoon.sx/e/kuronime",
                 "https://filelions.to/v/kuronime"
             ),
+            InlineDataParser.kuronimeMirrorUrls(encrypted)
+        )
+    }
+
+    @Test
+    fun `kuronimeMirrorUrls decrypts current api source payload`() {
+        val encrypted = "eyJjdCI6ImhkRDhKUmRyRlQ1Z1QzZTBINHRKL0hkV0RQb3ZWSTFYdGlYZyszTnJ2V09Ua1V0eXkwZk1MYWxJZ0NDMDZoTHh2RExKZkxicC9UT2FROXdZMGp1U1ZRPT0iLCJpdiI6ImNmYTEzMWNlNWQ2YmIyZmViM2RlMDI1MzJhZTY1MjlkIiwicyI6Ijg4OTlhYWJiY2NkZGVlZmYifQ=="
+
+        assertEquals(
+            listOf("https://edge.kuroplayer.xyz/hls/1080p/index.m3u8"),
             InlineDataParser.kuronimeMirrorUrls(encrypted)
         )
     }

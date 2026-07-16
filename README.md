@@ -29,7 +29,6 @@ Saat ini, IndoChannel mendukung berbagai sumber streaming lokal terpopuler, anta
 - **Animeindo**
 - **Oploverz**
 - **Zoronime**
-- **Miranime**
 
 > **Catatan:** Semua sumber yang ada di sini adalah layanan web streaming gratis yang dikurasi. Harap maklum jika ada situs yang kadang offline atau berubah domain (kami selalu berusaha melakukan update secara berkala).
 

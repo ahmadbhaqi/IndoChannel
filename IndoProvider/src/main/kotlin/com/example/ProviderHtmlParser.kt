@@ -72,28 +72,6 @@ internal object ProviderHtmlParser {
         }
     }
 
-    fun normalizeUrlHost(raw: String?, baseUrl: String, hostNeedle: String): String? {
-        val value = absoluteUrl(raw, baseUrl) ?: return null
-        return try {
-            val target = URI(value)
-            val base = URI(baseUrl)
-            val targetHost = target.host.orEmpty()
-            if (!targetHost.contains(hostNeedle, ignoreCase = true) || targetHost.equals(base.host, ignoreCase = true)) {
-                return value
-            }
-
-            URI(
-                base.scheme,
-                base.authority,
-                target.rawPath,
-                target.rawQuery,
-                target.rawFragment
-            ).toString()
-        } catch (_: Exception) {
-            value
-        }
-    }
-
     fun mediaSources(document: Document, iframeSelector: String = "iframe"): List<String> {
         val iframeSources = iframeSources(document, iframeSelector)
         val metaSources = mediaMetaSelectors.flatMap { selector ->

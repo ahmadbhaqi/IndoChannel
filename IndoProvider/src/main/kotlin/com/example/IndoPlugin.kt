@@ -32,6 +32,5 @@ class IndoPlugin: Plugin() {
         registerMainAPI(AnimeindoProvider())
         registerMainAPI(OploverzProvider())
         registerMainAPI(ZoronimeProvider())
-        registerMainAPI(MiranimeProvider())
     }
 }

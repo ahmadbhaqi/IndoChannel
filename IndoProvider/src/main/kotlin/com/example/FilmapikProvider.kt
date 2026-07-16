@@ -9,7 +9,7 @@ import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
 class FilmapikProvider : MainAPI() {
-    override var mainUrl = "https://filmapik.fitness"
+    override var mainUrl = "https://filmapik.college"
     override var name = "Filmapik"
     override val hasMainPage = true
     override var lang = "id"
@@ -73,7 +73,8 @@ class FilmapikProvider : MainAPI() {
             ?: return null
         val poster = fixUrlNull(ProviderHtmlParser.imageSource(image))
         val quality = selectFirst(".badge-quality")?.text()?.trim()
-        return newMovieSearchResponse(title.cleanTitle(), fixUrl(href), TvType.Movie) {
+        val type = if (href.contains("/tvshows/", ignoreCase = true)) TvType.TvSeries else TvType.Movie
+        return newMovieSearchResponse(title.cleanTitle(), fixUrl(href), type) {
             posterUrl = poster
             this.quality = getQualityFromString(quality)
         }
@@ -99,11 +100,46 @@ class FilmapikProvider : MainAPI() {
             it.attr("content").takeIf { tag -> tag.isNotBlank() }
         }
 
-        return newMovieLoadResponse(title, url, TvType.Movie, url) {
-            posterUrl = poster
-            this.year = year
-            plot = description
-            this.tags = tags
+        val isSeries = url.contains("/tvshows/", ignoreCase = true)
+        return if (isSeries) {
+            val episodes = document.select("a.famv-episode-btn[href]")
+                .mapNotNull { link ->
+                    val href = link.attr("href").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    val episodeNumber = Regex("""(?:episode-|EP)(\d+)""", RegexOption.IGNORE_CASE)
+                        .find("$href ${link.text()}")
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.toIntOrNull()
+                    val seasonNumber = link.closest(".famv-season-list")
+                        ?.attr("data-season")
+                        ?.toIntOrNull()
+                        ?: Regex("""season-(\d+)""", RegexOption.IGNORE_CASE)
+                            .find(href)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
+                    newEpisode(fixUrl(href)) {
+                        name = link.attr("title").takeIf { it.isNotBlank() } ?: link.text()
+                        season = seasonNumber
+                        episode = episodeNumber
+                        posterUrl = poster
+                    }
+                }
+                .distinctBy { it.data }
+
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                posterUrl = poster
+                this.year = year
+                plot = description
+                this.tags = tags
+            }
+        } else {
+            newMovieLoadResponse(title, url, TvType.Movie, url) {
+                posterUrl = poster
+                this.year = year
+                plot = description
+                this.tags = tags
+            }
         }
     }
 
@@ -113,15 +149,30 @@ class FilmapikProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
-        val servers = (
-            ProviderHtmlParser.mediaSources(document) +
-                document.select("[data-url]").mapNotNull { it.attr("data-url").takeIf { value -> value.isNotBlank() } } +
-                document.select("select#player-select option[value]").mapNotNull { it.attr("value").takeIf { value -> value.isNotBlank() } }
-            ).distinct()
-
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
-        servers.forEach { raw -> resolver.resolve(raw, data) }
+        val pages = listOf(data.trimEnd('/') + "/play", data).distinct()
+        pages.forEach { page ->
+            try {
+                val fetch = app.get(page, referer = data)
+                val document = fetch.document
+                val servers = (
+                    ProviderHtmlParser.mediaSources(document) +
+                        document.select("[data-url]").mapNotNull {
+                            it.attr("data-url").takeIf { value -> value.isNotBlank() }
+                        } +
+                        document.select("select#player-select option[value]").mapNotNull {
+                            it.attr("value").takeIf { value -> value.isNotBlank() }
+                        } +
+                        document.select("a.player-option[href]").mapNotNull {
+                            it.attr("href").takeIf { value -> value.isNotBlank() }
+                        }
+                    ).distinct()
+                servers.forEach { raw -> resolver.resolve(raw, fetch.url) }
+            } catch (error: kotlin.coroutines.cancellation.CancellationException) {
+                throw error
+            } catch (_: Exception) {
+            }
+        }
         return resolver.loaded
     }
 
@@ -134,7 +185,8 @@ class FilmapikProvider : MainAPI() {
     private fun FilmapikSearchItem.toSearchResponse(): SearchResponse? {
         val safeTitle = title?.cleanTitle()?.takeIf { it.isNotBlank() } ?: return null
         val safeUrl = url?.takeIf { it.isNotBlank() } ?: return null
-        return newMovieSearchResponse(safeTitle, safeUrl, TvType.Movie) {
+        val type = if (safeUrl.contains("/tvshows/", ignoreCase = true)) TvType.TvSeries else TvType.Movie
+        return newMovieSearchResponse(safeTitle, safeUrl, type) {
             posterUrl = img
         }
     }
@@ -144,7 +196,9 @@ class FilmapikProvider : MainAPI() {
             .replace("&#038;", "&")
             .replace("&#8211;", "-")
             .replace("Nonton Film", "")
+            .replace(Regex("""^Nonton\s+""", RegexOption.IGNORE_CASE), "")
             .replace("Subtitle Indonesia", "")
+            .replace("Sub Indo", "", ignoreCase = true)
             .trim()
     }
 }

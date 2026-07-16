@@ -25,10 +25,11 @@ class ProviderDomainTest {
     @Test
     fun `new movie providers use requested domains`() {
         val expectedDomains = mapOf(
-            "IndoxxiProvider.kt" to """override var mainUrl = "https://comblank.com"""",
-            "FilmapikProvider.kt" to """override var mainUrl = "https://filmapik.fitness"""",
-            "IndofilmProvider.kt" to """override var mainUrl = "https://yuhhaber.com"""",
-            "KitanontonProvider.kt" to """override var mainUrl = "https://kitanonton.com""""
+            "LayarKacaProvider.kt" to """override var mainUrl = "https://tv.nontonfilm.red"""",
+            "IndoxxiProvider.kt" to """override var mainUrl = "https://filmbioskop21.lk21.in.net"""",
+            "FilmapikProvider.kt" to """override var mainUrl = "https://filmapik.college"""",
+            "IndofilmProvider.kt" to """override var mainUrl = "https://indofilm.fit"""",
+            "KitanontonProvider.kt" to """override var mainUrl = "https://kitanonton2.surf""""
         )
 
         expectedDomains.forEach { (fileName, expected) ->
@@ -40,9 +41,8 @@ class ProviderDomainTest {
     fun `new anime providers use requested domains`() {
         val expectedDomains = mapOf(
             "AnimeindoProvider.kt" to """override var mainUrl = "https://anime-indo.lol"""",
-            "OploverzProvider.kt" to """override var mainUrl = "https://plus.oploverz.ltd"""",
-            "ZoronimeProvider.kt" to """override var mainUrl = "https://zoronime.live"""",
-            "MiranimeProvider.kt" to """override var mainUrl = "https://miranime.net""""
+            "OploverzProvider.kt" to """override var mainUrl = "https://oploverz.org"""",
+            "ZoronimeProvider.kt" to """override var mainUrl = "https://zoronime.live""""
         )
 
         expectedDomains.forEach { (fileName, expected) ->
@@ -59,8 +59,7 @@ class ProviderDomainTest {
             "registerMainAPI(IndofilmProvider())",
             "registerMainAPI(AnimeindoProvider())",
             "registerMainAPI(OploverzProvider())",
-            "registerMainAPI(ZoronimeProvider())",
-            "registerMainAPI(MiranimeProvider())"
+            "registerMainAPI(ZoronimeProvider())"
         )
 
         expectedRegistrations.forEach { expected ->
@@ -107,8 +106,7 @@ class ProviderDomainTest {
             "RebahinProvider", "CgvindoProvider", "KitanontonProvider", "GomovProvider",
             "IdlixProvider", "JuraganFilmProvider", "IndoxxiProvider", "FilmapikProvider",
             "IndofilmProvider", "OtakudesuProvider", "SamehadakuProvider", "AnoboyProvider",
-            "KuronimeProvider", "AnimeindoProvider", "OploverzProvider", "ZoronimeProvider",
-            "MiranimeProvider"
+            "KuronimeProvider", "AnimeindoProvider", "OploverzProvider", "ZoronimeProvider"
         )
 
         expected.forEach { provider ->
@@ -117,22 +115,69 @@ class ProviderDomainTest {
     }
 
     @Test
-    fun `per candidate provider fetches rethrow cancellation and skip ordinary failures`() {
-        val providers = listOf(
-            "NgefilmProvider.kt",
-            "DutamovieProvider.kt",
-            "GomovProvider.kt"
-        )
-        val perCandidateFetches = listOf(
-            """app\s*\.\s*get\s*\(\s*fixUrl\s*\(\s*ele\s*\.\s*attr\s*\(\s*"href"\s*\)\s*\)\s*\)""",
-            """app\s*\.\s*post\s*\("""
+    fun `miranime is removed from source and registration`() {
+        assertFalse(File(sourceRoot, "MiranimeProvider.kt").exists())
+        assertFalse(source("IndoPlugin.kt").contains("MiranimeProvider"))
+    }
+
+    @Test
+    fun `fixed providers no longer use unrelated provider aliases`() {
+        val independentProviders = listOf(
+            "AnimeindoProvider.kt",
+            "IndofilmProvider.kt",
+            "IndoxxiProvider.kt",
+            "LayarKacaProvider.kt"
         )
 
-        providers.forEach { fileName ->
+        independentProviders.forEach { fileName ->
+            val provider = source(fileName)
+            assertFalse(provider.contains(": RebahinProvider()"), "$fileName must parse its own site")
+            assertFalse(provider.contains(": KuronimeProvider()"), "$fileName must parse its own site")
+        }
+    }
+
+    @Test
+    fun `rebahin clones never rewrite a foreign catalog onto their own host`() {
+        val provider = source("RebahinProvider.kt")
+        assertFalse(provider.contains("normalizeUrlHost"))
+        assertFalse(provider.contains("rebahinxxi", ignoreCase = true))
+    }
+
+    @Test
+    fun `plugin version is bumped for provider fixes`() {
+        val moduleBuild = listOf(
+            File("build.gradle.kts"),
+            File("IndoProvider/build.gradle.kts")
+        ).first { file -> file.exists() && file.readText().contains("cloudstream") }
+
+        assertTrue(
+            Regex("""(?m)^version\s*=\s*2\s*$""").containsMatchIn(moduleBuild.readText()),
+            "Cloudstream must see these provider fixes as a new plugin release"
+        )
+    }
+
+    @Test
+    fun `per candidate provider fetches rethrow cancellation and skip ordinary failures`() {
+        val providerFetches = mapOf(
+            "NgefilmProvider.kt" to listOf(
+                """app\s*\.\s*get\s*\(\s*fixUrl\s*\(\s*ele\s*\.\s*attr\s*\(\s*"href"\s*\)\s*\)\s*\)""",
+                """app\s*\.\s*post\s*\("""
+            ),
+            "DutamovieProvider.kt" to listOf(
+                """app\s*\.\s*get\s*\(\s*fixUrl\s*\(\s*ele\s*\.\s*attr\s*\(\s*"href"\s*\)\s*\)\s*\)""",
+                """app\s*\.\s*post\s*\("""
+            ),
+            "GomovProvider.kt" to listOf(
+                """app\s*\.\s*get\s*\(\s*playerUrl""",
+                """app\s*\.\s*post\s*\("""
+            )
+        )
+
+        providerFetches.forEach { (fileName, perCandidateFetches) ->
             val source = source(fileName)
             perCandidateFetches.forEach { fetchPattern ->
                 val cancellationSafeFetch = Regex(
-                    """(?s)try\s*\{(?:(?!catch\s*\().)*?$fetchPattern(?:(?!catch\s*\().)*?}\s*catch\s*\(\s*(\w+)\s*:\s*CancellationException\s*\)\s*\{\s*throw\s+\1\s*}\s*catch\s*\(\s*_\s*:\s*Exception\s*\)\s*\{\s*null\s*}"""
+                    """(?s)try\s*\{(?:(?!catch\s*\().)*?$fetchPattern(?:(?!catch\s*\().)*?}\s*catch\s*\(\s*(\w+)\s*:\s*CancellationException\s*\)\s*\{\s*throw\s+\1\s*}\s*catch\s*\(\s*_\s*:\s*Exception\s*\)\s*\{"""
                 )
                 assertTrue(
                     cancellationSafeFetch.containsMatchIn(source),

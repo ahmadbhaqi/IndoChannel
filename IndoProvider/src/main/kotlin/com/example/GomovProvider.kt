@@ -4,17 +4,15 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.httpsify
-import com.lagradost.cloudstream3.utils.loadExtractor
 import kotlin.coroutines.cancellation.CancellationException
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.net.URLEncoder
 
 open class GomovProvider : MainAPI() {
 
     override var mainUrl = "https://gomov.top"
 
-    private var directUrl: String? = null
     override var name = "Gomov"
     override val hasMainPage = true
     override var lang = "id"
@@ -75,7 +73,8 @@ open class GomovProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        return app.get("$mainUrl/?s=$query&post_type[]=post&post_type[]=tv").document.select("article.item")
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        return app.get("$mainUrl/?s=$encoded&post_type[]=post&post_type[]=tv").document.select("article.item")
             .mapNotNull {
                 it.toSearchResult()
             }
@@ -83,7 +82,6 @@ open class GomovProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         val fetch = app.get(url)
-        directUrl = getBaseUrl(fetch.url)
         val document = fetch.document
 
         val title = document.selectFirst("h1.entry-title")?.text()?.substringBefore("Season")?.substringBefore("Episode")?.trim()
@@ -104,7 +102,7 @@ open class GomovProvider : MainAPI() {
 
         return if (tvType == TvType.TvSeries) {
             val episodes = document.select("div.vid-episodes a, div.gmr-listseries a").map { eps ->
-                val href = fixUrl(eps.attr("href"))
+                val href = ProviderHtmlParser.absoluteUrl(eps.attr("href"), fetch.url) ?: eps.attr("href")
                 val name = eps.text()
                 val episode = name.split(" ").lastOrNull()?.filter { it.isDigit() }?.toIntOrNull()
                 val season = name.split(" ").firstOrNull()?.filter { it.isDigit() }?.toIntOrNull()
@@ -146,62 +144,53 @@ open class GomovProvider : MainAPI() {
     ): Boolean {
         val fetch = app.get(data)
         val document = fetch.document
-        val baseUrl = directUrl ?: getBaseUrl(fetch.url)
+        val baseUrl = getBaseUrl(fetch.url)
         val id = document.selectFirst("div#muvipro_player_content_id")?.attr("data-id")
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
 
-        if(id.isNullOrEmpty()) {
-            ProviderHtmlParser.mediaSources(document, "div.gmr-embed-responsive iframe, iframe").forEach { src ->
-                resolver.resolve(src, "$baseUrl/")
-            }
+        ProviderHtmlParser.mediaSources(document, "div.gmr-embed-responsive iframe, iframe").forEach { src ->
+            resolver.resolve(src, fetch.url)
+        }
 
-            document.select("ul.muvipro-player-tabs li a").forEach { ele ->
-                val iframe = try {
-                    app.get(fixUrl(ele.attr("href"))).document
-                        .selectFirst("div.gmr-embed-responsive iframe")
-                        ?.let { ProviderHtmlParser.firstIframeSource(it) }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Exception) {
-                    null
-                }
-                    ?: return@forEach
+        document.select("ul.muvipro-player-tabs li a[href]").forEach { ele ->
+            val playerUrl = ProviderHtmlParser.absoluteUrl(ele.attr("href"), fetch.url) ?: return@forEach
+            val playerFetch = try {
+                app.get(playerUrl, referer = fetch.url)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                null
+            } ?: return@forEach
 
-                resolver.resolve(iframe, "$baseUrl/")
-            }
-        } else {
-            document.select("div.tab-content-ajax").forEach { ele ->
-                val server = try {
-                    app.post(
+            ProviderHtmlParser.mediaSources(playerFetch.document, "div.gmr-embed-responsive iframe, iframe")
+                .forEach { iframe -> resolver.resolve(iframe, playerFetch.url) }
+        }
+
+        if (!id.isNullOrEmpty()) {
+            document.select("div.tab-content-ajax[id]").forEach { ele ->
+                try {
+                    val response = app.post(
                         "$baseUrl/wp-admin/admin-ajax.php",
-                        data = mapOf("action" to "muvipro_player_content", "tab" to ele.attr("id"), "post_id" to "$id")
-                    ).document.selectFirst("iframe")
-                        ?.let { ProviderHtmlParser.firstIframeSource(it) }
+                        data = mapOf(
+                            "action" to "muvipro_player_content",
+                            "tab" to ele.attr("id"),
+                            "post_id" to id
+                        ),
+                        referer = fetch.url,
+                        headers = mapOf("X-Requested-With" to "XMLHttpRequest")
+                    ).document
+                    ProviderHtmlParser.mediaSources(response).forEach { server ->
+                        resolver.resolve(server, fetch.url)
+                    }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (_: Exception) {
-                    null
+                    // Keep trying the other configured servers.
                 }
-                    ?: return@forEach
-
-                resolver.resolve(server, "$baseUrl/")
             }
         }
 
         return resolver.loaded
-    }
-
-    private fun Element.getImageAttr(): String? {
-        return when {
-            this.hasAttr("data-src") -> this.attr("abs:data-src")
-            this.hasAttr("data-lazy-src") -> this.attr("abs:data-lazy-src")
-            this.hasAttr("srcset") -> this.attr("abs:srcset").substringBefore(" ")
-            else -> this.attr("abs:src")
-        }
-    }
-
-    private fun Element?.getIframeAttr() : String? {
-        return this?.attr("data-litespeed-src").takeIf { !it.isNullOrEmpty() } ?: this?.attr("src")
     }
 
     private fun String?.fixImageQuality(): String? {

@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.net.URLEncoder
 
 open class RebahinProvider : MainAPI() {
     override var mainUrl = "https://154.203.167.63"
@@ -13,9 +14,10 @@ open class RebahinProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.AsianDrama)
 
     override val mainPage get() = mainPageOf(
-        "$mainUrl/trending/page/" to "Trending",
-        "$mainUrl/terbaru/page/" to "Terbaru",
-        "$mainUrl/rating/page/" to "Rating Tertinggi"
+        "$mainUrl/page/" to "Terbaru",
+        "$mainUrl/rating/page/" to "Rating Tertinggi",
+        "$mainUrl/film-action-terbaru/page/" to "Action",
+        "$mainUrl/series-update/page/" to "Series Update"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -29,11 +31,18 @@ open class RebahinProvider : MainAPI() {
         val href = fixProviderUrl(selectFirst("a")?.attr("href") ?: return null) ?: return null
         val posterUrl = fixUrlNull(ProviderHtmlParser.firstImageSource(this))
         val quality = selectFirst("span.mli-quality, div.gmr-qual")?.text()?.trim()
-        return newMovieSearchResponse(title, href, TvType.Movie) { this.posterUrl = posterUrl; this.quality = getQualityFromString(quality) }
+        val type = if (href.contains("/tv/", ignoreCase = true) ||
+            attr("itemtype").contains("TV", ignoreCase = true)
+        ) TvType.TvSeries else TvType.Movie
+        return newMovieSearchResponse(title, href, type) {
+            this.posterUrl = posterUrl
+            this.quality = getQualityFromString(quality)
+        }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        return app.get("$mainUrl/?s=$query").document.select("article.item-infinite, div.ml-item").mapNotNull { it.toSearchResult() }
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        return app.get("$mainUrl/?s=$encoded").document.select("article.item-infinite, div.ml-item").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -59,11 +68,12 @@ open class RebahinProvider : MainAPI() {
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val fetch = app.get(data)
         val document = fetch.document
+        val pageUrl = fetch.url
         val directUrl = getBaseUrl(fetch.url)
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
 
         ProviderHtmlParser.mediaSources(document, "iframe, div.gmr-embed-responsive iframe").forEach { src ->
-            resolver.resolve(src, data)
+            resolver.resolve(src, pageUrl)
         }
 
         ProviderHtmlParser.muviproAjaxRequests(document).forEach { request ->
@@ -71,7 +81,7 @@ open class RebahinProvider : MainAPI() {
                 val iframe = app.post(
                     "$directUrl/wp-admin/admin-ajax.php",
                     data = request.toPostData(),
-                    referer = data,
+                    referer = pageUrl,
                     headers = mapOf("X-Requested-With" to "XMLHttpRequest")
                 ).document.selectFirst("iframe")?.let { ProviderHtmlParser.firstIframeSource(it) }
                 resolver.resolve(iframe, "$directUrl/")
@@ -88,7 +98,7 @@ open class RebahinProvider : MainAPI() {
                     val playerUrl = fixProviderUrl(href) ?: return@forEach
                     val iframe = app.get(playerUrl).document.selectFirst("iframe")
                         ?.let { ProviderHtmlParser.firstIframeSource(it) }
-                    resolver.resolve(iframe, data)
+                    resolver.resolve(iframe, pageUrl)
                 } catch (error: kotlin.coroutines.cancellation.CancellationException) {
                     throw error
                 } catch (_: Exception) {
@@ -99,7 +109,14 @@ open class RebahinProvider : MainAPI() {
     }
 
     private fun fixProviderUrl(raw: String): String? {
-        return ProviderHtmlParser.normalizeUrlHost(raw, mainUrl, "rebahinxxi")
+        val value = ProviderHtmlParser.absoluteUrl(raw, mainUrl) ?: return null
+        return try {
+            val expectedHost = URI(mainUrl).host
+            val targetHost = URI(value).host
+            value.takeIf { targetHost.equals(expectedHost, ignoreCase = true) }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun getBaseUrl(url: String): String {
