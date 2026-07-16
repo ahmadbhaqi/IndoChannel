@@ -1,14 +1,29 @@
 package com.example
 
+import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
 import org.jsoup.Jsoup
 
 class ProviderHtmlParserTest {
+    @Suppress("DEPRECATION_ERROR")
+    private fun directExtractorLink(
+        source: String,
+        name: String,
+        url: String,
+        referer: String,
+        quality: Int,
+        type: ExtractorLinkType,
+        headers: Map<String, String>
+    ): ExtractorLink = ExtractorLink(source, name, url, referer, quality, type, headers, null)
+
     @Test
     fun `firstIframeSource reads lazy iframe attributes before src`() {
         val element = Jsoup.parse(
@@ -344,5 +359,61 @@ class ProviderHtmlParserTest {
         assertTrue(ProviderHtmlParser.isNonContentPage("SQLSTATE[HY000] [2006] MySQL server has gone away"))
         assertTrue(ProviderHtmlParser.isNonContentPage("   "))
         assertFalse(ProviderHtmlParser.isNonContentPage("<iframe src='https://video.example/embed'></iframe>"))
+    }
+
+    @Test
+    fun `resolution session emits direct hls only once`() = runBlocking {
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            directLinkFactory = { source, name, url, referer, quality, type, headers ->
+                directExtractorLink(source, name, url, referer, quality, type, headers)
+            },
+            pageFetcher = { _, _ -> error("direct media must not fetch a player page") },
+            extractorLoader = { _, _, _, _ -> false }
+        )
+
+        assertTrue(session.resolve("https://cdn.example/master.m3u8?token=abc", "https://provider.example/item"))
+        assertFalse(session.resolve("https://cdn.example/master.m3u8?token=abc", "https://provider.example/item"))
+        assertTrue(session.loaded)
+        assertEquals(1, links.size)
+        assertEquals(ExtractorLinkType.M3U8, links.single().type)
+        assertEquals("https://provider.example/item", links.single().referer)
+    }
+
+    @Test
+    fun `failed candidate does not prevent a later direct candidate`() = runBlocking {
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            directLinkFactory = { source, name, url, referer, quality, type, headers ->
+                directExtractorLink(source, name, url, referer, quality, type, headers)
+            },
+            pageFetcher = { _, _ -> "<title>Internet Positif</title>" },
+            extractorLoader = { _, _, _, _ -> false }
+        )
+
+        assertFalse(session.resolve("https://unsupported.example/embed", "https://provider.example/item"))
+        assertTrue(session.resolve("https://cdn.example/movie.mp4", "https://provider.example/item"))
+        assertEquals(listOf("https://cdn.example/movie.mp4"), links.map { it.url })
+    }
+
+    @Test
+    fun `resolution session rethrows cancellation`() {
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = {},
+            pageFetcher = { _, _ -> "" },
+            extractorLoader = { _, _, _, _ -> throw CancellationException("cancelled") }
+        )
+
+        assertFailsWith<CancellationException> {
+            runBlocking { session.resolve("https://unsupported.example/embed", null) }
+        }
     }
 }
