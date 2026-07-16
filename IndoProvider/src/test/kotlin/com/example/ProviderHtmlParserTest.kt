@@ -1,8 +1,11 @@
 package com.example
 
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import org.jsoup.Jsoup
 
 class ProviderHtmlParserTest {
@@ -296,5 +299,50 @@ class ProviderHtmlParserTest {
             ),
             IdlixApiParser.seasonEpisodes(json)
         )
+    }
+
+    @Test
+    fun `directMediaType reads media extension from uri path`() {
+        assertEquals(
+            ExtractorLinkType.M3U8,
+            directMediaType("https://cdn.example/video/MASTER.M3U8?token=abc")
+        )
+        assertEquals(
+            ExtractorLinkType.VIDEO,
+            directMediaType("https://cdn.example/video/movie.mp4?download=1")
+        )
+        assertNull(directMediaType("https://player.example/embed/123"))
+    }
+
+    @Test
+    fun `asiaStreamMasterUrl parses live sniff configuration`() {
+        val html = """
+            <script>
+                sniff("K8OFQSVM","7","51b7dae1031b20174cacc7e69d6e4bf0",null,
+                    [{"label":"","file":"/thumbnails.vtt","kind":"thumbnails"}],1,1,false);
+            </script>
+        """.trimIndent()
+
+        assertEquals(
+            "https://watch.asiastream.cc/m3u8/7/51b7dae1031b20174cacc7e69d6e4bf0/master.txt?s=1&cache=1",
+            InlineDataParser.asiaStreamMasterUrl(html, "https://watch.asiastream.cc/watch?v=K8OFQSVM")
+        )
+    }
+
+    @Test
+    fun `asiaStreamMasterUrl rejects malformed and cross scheme player urls`() {
+        val html = """sniff("slug","7","hash",null,[],1,1,false);"""
+
+        assertNull(InlineDataParser.asiaStreamMasterUrl("no player config", "https://watch.asiastream.cc/watch?v=x"))
+        assertNull(InlineDataParser.asiaStreamMasterUrl(html, "javascript:alert(1)"))
+    }
+
+    @Test
+    fun `isNonContentPage recognizes upstream interstitials and errors`() {
+        assertTrue(ProviderHtmlParser.isNonContentPage("<title>Internet Positif</title>"))
+        assertTrue(ProviderHtmlParser.isNonContentPage("<title>Just a moment...</title><script src='https://challenges.cloudflare.com/x'></script>"))
+        assertTrue(ProviderHtmlParser.isNonContentPage("SQLSTATE[HY000] [2006] MySQL server has gone away"))
+        assertTrue(ProviderHtmlParser.isNonContentPage("   "))
+        assertFalse(ProviderHtmlParser.isNonContentPage("<iframe src='https://video.example/embed'></iframe>"))
     }
 }

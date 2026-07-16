@@ -4,6 +4,10 @@ dependencies {
     testImplementation(kotlin("test-junit"))
 }
 
+configurations.named("testImplementation") {
+    extendsFrom(configurations.getByName("compileOnly"))
+}
+
 version = 1
 
 cloudstream {

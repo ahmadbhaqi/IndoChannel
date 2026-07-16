@@ -104,6 +104,19 @@ internal object ProviderHtmlParser {
         return (iframeSources + metaSources).distinct()
     }
 
+    fun isNonContentPage(html: String): Boolean {
+        val normalized = html.trim().lowercase()
+        if (normalized.isEmpty()) return true
+        return listOf(
+            "<title>internet positif</title>",
+            "<title>just a moment...</title>",
+            "challenges.cloudflare.com",
+            "enable javascript and cookies to continue",
+            "mysql server has gone away",
+            "sqlstate[hy000] [2006]"
+        ).any(normalized::contains)
+    }
+
     fun muviproAjaxRequests(document: Document): List<MuviproAjaxRequest> {
         val postId = document
             .selectFirst("div#muvipro_player_content_id")

@@ -15,6 +15,9 @@ internal object InlineDataParser {
     private val mapper = jacksonObjectMapper()
     private val urlRegex = Regex("""url:"(https?://[^"]+)"""")
     private val jsonLinkRegex = Regex(""""link":"(https?://[^"]+)"""")
+    private val asiaStreamSniffRegex = Regex(
+        """(?s)sniff\(\s*"[^"]*"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*(?:null|"[^"]*")\s*,\s*\[.*?]\s*,\s*(\d+)\s*,\s*\d+\s*,\s*(?:true|false)\s*\)"""
+    )
 
     fun decodeEscapedInlineData(html: String): String {
         return Parser.unescapeEntities(html, true)
@@ -61,6 +64,24 @@ internal object InlineDataParser {
             .flatMap { match -> jsonLinkRegex.findAll(match.groupValues[1]).map { it.groupValues[1] } }
             .distinct()
             .toList()
+    }
+
+    fun asiaStreamMasterUrl(html: String, playerUrl: String): String? {
+        val match = asiaStreamSniffRegex.find(html) ?: return null
+        val uid = match.groupValues[1].takeIf { it.matches(Regex("[A-Za-z0-9_-]+")) } ?: return null
+        val hash = match.groupValues[2].takeIf { it.matches(Regex("[A-Za-z0-9_-]+")) } ?: return null
+        val cache = match.groupValues[3]
+        return runCatching {
+            val player = java.net.URI(playerUrl)
+            if (player.scheme !in setOf("http", "https") || player.host.isNullOrBlank()) return null
+            java.net.URI(
+                player.scheme,
+                player.authority,
+                "/m3u8/$uid/$hash/master.txt",
+                "s=1&cache=$cache",
+                null
+            ).toString()
+        }.getOrNull()
     }
 
     fun playSobatUrls(html: String): List<String> {

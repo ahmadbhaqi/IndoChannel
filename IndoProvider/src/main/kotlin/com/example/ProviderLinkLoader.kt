@@ -5,9 +5,19 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.fixUrl
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.httpsify
 import com.lagradost.cloudstream3.utils.loadExtractor
 import java.net.URI
+
+internal fun directMediaType(url: String): ExtractorLinkType? {
+    val path = runCatching { URI(url).path.orEmpty().lowercase() }.getOrNull() ?: return null
+    return when {
+        path.endsWith(".m3u8") -> ExtractorLinkType.M3U8
+        path.endsWith(".mp4") -> ExtractorLinkType.VIDEO
+        else -> null
+    }
+}
 
 internal fun MainAPI.toPlayableUrl(raw: String?): String? {
     val value = raw?.trim()?.takeIf {
