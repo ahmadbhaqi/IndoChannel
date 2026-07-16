@@ -3,7 +3,9 @@ package com.example
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.*
+import kotlin.coroutines.cancellation.CancellationException
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
@@ -150,10 +152,11 @@ class FilmapikProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        val directUrls = mutableSetOf<String>()
         val pages = listOf(data.trimEnd('/') + "/play", data).distinct()
         pages.forEach { page ->
             try {
-                val fetch = app.get(page, referer = data)
+                val fetch = app.get(page, referer = data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
                 val document = fetch.document
                 val servers = (
                     ProviderHtmlParser.mediaSources(document) +
@@ -167,13 +170,51 @@ class FilmapikProvider : MainAPI() {
                             it.attr("href").takeIf { value -> value.isNotBlank() }
                         }
                     ).distinct()
-                servers.forEach { raw -> resolver.resolve(raw, fetch.url) }
-            } catch (error: kotlin.coroutines.cancellation.CancellationException) {
+                servers.forEach { raw ->
+                    resolvePlayer(raw, fetch.url, resolver, directUrls, callback)
+                }
+            } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
             }
         }
-        return resolver.loaded
+        return resolver.loaded || directUrls.isNotEmpty()
+    }
+
+    private suspend fun resolvePlayer(
+        raw: String?,
+        referer: String,
+        resolver: LinkResolutionSession,
+        directUrls: MutableSet<String>,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val playerUrl = ProviderHtmlParser.absoluteUrl(raw, referer) ?: return
+        if (resolver.resolve(playerUrl, referer)) return
+
+        try {
+            val html = app.get(
+                playerUrl,
+                referer = referer,
+                timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+            ).text
+            FilmapikPlayerParser.sources(html, playerUrl).forEach { source ->
+                if (directMediaType(source.url) != null) {
+                    resolver.resolve(source.url, playerUrl)
+                } else if (directUrls.add(source.url)) {
+                    callback(
+                        newExtractorLink(name, "$name ${source.label}", source.url, ExtractorLinkType.VIDEO) {
+                            this.referer = playerUrl
+                            quality = source.quality
+                            headers = mapOf("Referer" to playerUrl)
+                        }
+                    )
+                }
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            // A dead mirror must not suppress the working Efek server.
+        }
     }
 
     data class FilmapikSearchItem(
@@ -200,5 +241,59 @@ class FilmapikProvider : MainAPI() {
             .replace("Subtitle Indonesia", "")
             .replace("Sub Indo", "", ignoreCase = true)
             .trim()
+    }
+}
+
+internal data class FilmapikMediaSource(
+    val label: String,
+    val url: String,
+    val quality: Int
+)
+
+internal object FilmapikPlayerParser {
+    fun sources(html: String, playerUrl: String): List<FilmapikMediaSource> {
+        val document = Jsoup.parse(html, playerUrl)
+        val scripts = document.select("script").flatMap { script ->
+            val raw = script.data()
+            listOfNotNull(
+                raw,
+                raw.takeIf { it.contains("eval(function(p,a,c,k,e") }
+                    ?.let { runCatching { getAndUnpack(it) }.getOrNull() }
+            )
+        }
+
+        return scripts.flatMap { script ->
+            val normalized = script
+                .replace("\\'", "'")
+                .replace("\\\"", "\"")
+                .replace("\\/", "/")
+                .replace("\\u0026", "&")
+                .replace("&amp;", "&")
+            val fileRegex = Regex(
+                "(?i)[\\\"']?file[\\\"']?\\s*[:=]\\s*[\\\"']((?:https?:)?//[^\\\"']+|/[^\\\"']+)[\\\"']"
+            )
+            fileRegex.findAll(normalized).mapNotNull { match ->
+                val url = ProviderHtmlParser.absoluteUrl(match.groupValues[1], playerUrl)
+                    ?: return@mapNotNull null
+                val context = normalized.substring((match.range.first - 180).coerceAtLeast(0), match.range.first)
+                val declaredVideo = context.contains("video/mp4", ignoreCase = true)
+                val mediaLike = declaredVideo ||
+                    url.contains("/stream/", ignoreCase = true) ||
+                    directMediaType(url) != null
+                if (!mediaLike) return@mapNotNull null
+                val label = Regex("(?i)(\\d{3,4}p)")
+                    .findAll(context)
+                    .lastOrNull()
+                    ?.groupValues
+                    ?.getOrNull(1)
+                    ?: "Video"
+                FilmapikMediaSource(
+                    label = label,
+                    url = url,
+                    quality = Regex("\\d{3,4}").find(label)?.value?.toIntOrNull()
+                        ?: Qualities.Unknown.value
+                )
+            }.toList()
+        }.distinctBy { it.url }
     }
 }

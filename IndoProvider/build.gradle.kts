@@ -2,13 +2,17 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     testImplementation(kotlin("test-junit"))
+    // Cloudstream's extractor registry references these compile-only runtime
+    // helpers when the real network resolver is exercised from JVM tests.
+    testImplementation("org.mozilla:rhino:1.8.1")
+    testImplementation("me.xdrop:fuzzywuzzy:1.4.0")
 }
 
 configurations.named("testImplementation") {
     extendsFrom(configurations.getByName("compileOnly"))
 }
 
-version = 2
+version = 3
 
 cloudstream {
     description = "Kumpulan provider film dan anime berbahasa Indonesia."

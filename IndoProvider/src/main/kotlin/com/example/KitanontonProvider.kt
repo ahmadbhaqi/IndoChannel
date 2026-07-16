@@ -5,7 +5,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
-import java.util.Base64
 
 class KitanontonProvider : MainAPI() {
     override var mainUrl = "https://kitanonton2.surf"
@@ -135,7 +134,11 @@ class KitanontonProvider : MainAPI() {
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
         listOf(data.trimEnd('/') + "/play", data).distinct().forEach { page ->
             try {
-                val fetch = app.get(page, referer = data)
+                val fetch = app.get(
+                    page,
+                    referer = data,
+                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+                )
                 val document = fetch.document
                 ProviderHtmlParser.mediaSources(document).forEach { source ->
                     resolver.resolve(source, fetch.url)
@@ -154,8 +157,8 @@ class KitanontonProvider : MainAPI() {
     private fun String.decodeServerUrl(): String? {
         val value = trim().takeIf { it.isNotBlank() } ?: return null
         return runCatching {
-            val padded = value + "=".repeat((4 - value.length % 4) % 4)
-            String(Base64.getDecoder().decode(padded), Charsets.UTF_8)
+            val decoded = decodeBase64Compat(value) ?: return@runCatching null
+            String(decoded, Charsets.UTF_8)
                 .trim()
                 .takeIf { it.startsWith("http://") || it.startsWith("https://") }
         }.getOrNull()

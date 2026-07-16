@@ -112,7 +112,7 @@ class IndoxxiProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val fetch = app.get(data)
+        val fetch = app.get(data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
         val document = fetch.document
         val baseUrl = baseUrl(fetch.url)
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
@@ -125,7 +125,8 @@ class IndoxxiProvider : MainAPI() {
                     "$baseUrl/wp-admin/admin-ajax.php",
                     data = request.toPostData(),
                     referer = data,
-                    headers = mapOf("X-Requested-With" to "XMLHttpRequest")
+                    headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                 ).document
                 ProviderHtmlParser.iframeSources(response).forEach { resolvePlayer(it, data, resolver) }
             } catch (error: CancellationException) {
@@ -139,7 +140,11 @@ class IndoxxiProvider : MainAPI() {
             val playerUrl = ProviderHtmlParser.absoluteUrl(link.attr("href"), data) ?: return@forEach
             if (!playerUrl.startsWith("http")) return@forEach
             try {
-                val playerDocument = app.get(playerUrl, referer = data).document
+                val playerDocument = app.get(
+                    playerUrl,
+                    referer = data,
+                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+                ).document
                 ProviderHtmlParser.mediaSources(playerDocument).forEach {
                     resolvePlayer(it, playerUrl, resolver)
                 }
@@ -157,8 +162,12 @@ class IndoxxiProvider : MainAPI() {
         if (resolver.resolve(url, referer)) return
 
         try {
-            val html = app.get(url, referer = referer).text
-            packedMediaUrls(html, url).forEach { resolver.resolve(it, url) }
+            val html = app.get(
+                url,
+                referer = referer,
+                timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+            ).text
+            IndoxxiPlayerParser.mediaUrls(html, url).forEach { resolver.resolve(it, url) }
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
@@ -166,16 +175,27 @@ class IndoxxiProvider : MainAPI() {
         }
     }
 
-    private fun packedMediaUrls(html: String, playerUrl: String): List<String> {
+    private fun providerUrl(raw: String): String? = ProviderHtmlParser.absoluteUrl(raw, mainUrl)
+
+    private fun baseUrl(url: String): String = URI(url).let { "${it.scheme}://${it.host}" }
+}
+
+internal object IndoxxiPlayerParser {
+    fun mediaUrls(html: String, playerUrl: String): List<String> {
         val document = Jsoup.parse(html, playerUrl)
         val scriptBodies = document.select("script").flatMap { script ->
             val raw = script.data()
-            listOfNotNull(raw, raw.takeIf { it.contains("eval(function(p,a,c,k,e") }?.let(::getAndUnpack))
-        }
+            listOfNotNull(
+                raw,
+                raw.takeIf { it.contains("eval(function(p,a,c,k,e") }
+                    ?.let { runCatching { getAndUnpack(it) }.getOrNull() }
+            )
+        } + FreeonPlayerParser.unpackedScripts(html)
         val inlineUrls = scriptBodies.flatMap { script ->
-            Regex("(?i)[\\\"']?(?:file|src)[\\\"']?\\s*[:=]\\s*[\\\"']([^\\\"']+)[\\\"']")
-                .findAll(script)
-                .map { it.groupValues[1].decodeJsUrl() }
+            val normalized = script.decodeJsUrl()
+            Regex("(?i)[\\\"']?(?:file|src)[\\\"']?\\s*[:=]\\s*[\\\"'](https?://[^\\\"']+)[\\\"']")
+                .findAll(normalized)
+                .map { it.groupValues[1] }
                 .toList()
         }
         val sourceUrls = document.select("video[src], video source[src], source[src]").map { it.attr("src") }
@@ -184,11 +204,9 @@ class IndoxxiProvider : MainAPI() {
             .distinct()
     }
 
-    private fun String.decodeJsUrl(): String = replace("\\/", "/")
+    private fun String.decodeJsUrl(): String = replace("\\'", "'")
+        .replace("\\\"", "\"")
+        .replace("\\/", "/")
         .replace("\\u0026", "&")
         .replace("&amp;", "&")
-
-    private fun providerUrl(raw: String): String? = ProviderHtmlParser.absoluteUrl(raw, mainUrl)
-
-    private fun baseUrl(url: String): String = URI(url).let { "${it.scheme}://${it.host}" }
 }

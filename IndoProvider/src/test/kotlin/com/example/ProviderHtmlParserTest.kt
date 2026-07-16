@@ -9,6 +9,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.jsoup.Jsoup
 
@@ -118,6 +119,23 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `mediaSources includes Vidcuy direct video element`() {
+        val document = Jsoup.parse(
+            """
+            <video controls>
+                <source src="https://r2.cdnvidcuy.xyz/current/movie.mp4" type="video/mp4">
+            </video>
+            """.trimIndent(),
+            "https://crotvids.xyz/e/current"
+        )
+
+        assertEquals(
+            listOf("https://r2.cdnvidcuy.xyz/current/movie.mp4"),
+            ProviderHtmlParser.mediaSources(document)
+        )
+    }
+
+    @Test
     fun `muviproAjaxRequests returns post id and tab pairs`() {
         val document = Jsoup.parse(
             """
@@ -153,18 +171,6 @@ class ProviderHtmlParserTest {
         assertEquals(
             listOf("https://www.blogger.com/video.g?token=abc&expires=1"),
             InlineDataParser.oploverzStreamUrls(html, 1)
-        )
-    }
-
-    @Test
-    fun `miranimeSourceUrls reads escaped React flight source links`() {
-        val html = """
-            self.__next_f.push([1,"{\"sources\":[{\"link\":\"https:\/\/luluvid.com\/e\/abc\",\"provider\":\"Luluvid\"},{\"link\":\"https:\/\/kuro.example\/file.mp4\",\"provider\":\"GoogleDrive\"}]}"])
-        """.trimIndent()
-
-        assertEquals(
-            listOf("https://luluvid.com/e/abc", "https://kuro.example/file.mp4"),
-            InlineDataParser.miranimeSourceUrls(html)
         )
     }
 
@@ -218,103 +224,6 @@ class ProviderHtmlParserTest {
     }
 
     @Test
-    fun `idlixCatalogItems reads list and search responses`() {
-        val listJson = """
-            {
-                "data": [
-                    {
-                        "id": "movie-id",
-                        "contentType": "movie",
-                        "title": "The Furious",
-                        "slug": "the-furious-2026",
-                        "posterPath": "/poster.jpg",
-                        "releaseDate": "2026-06-10",
-                        "quality": "WEB-DL"
-                    }
-                ]
-            }
-        """.trimIndent()
-        val searchJson = """
-            {
-                "results": [
-                    {
-                        "id": "series-id",
-                        "contentType": "tv_series",
-                        "title": "Fast & Furious Spy Racers",
-                        "slug": "fast-and-furious-spy-racers-2019",
-                        "posterPath": "/series.jpg",
-                        "firstAirDate": "2019-12-26"
-                    }
-                ]
-            }
-        """.trimIndent()
-
-        assertEquals(
-            listOf(
-                IdlixCatalogItem(
-                    id = "movie-id",
-                    title = "The Furious",
-                    slug = "the-furious-2026",
-                    contentType = "movie",
-                    posterPath = "/poster.jpg",
-                    releaseDate = "2026-06-10",
-                    quality = "WEB-DL"
-                )
-            ),
-            IdlixApiParser.catalogItems(listJson)
-        )
-        assertEquals(
-            listOf(
-                IdlixCatalogItem(
-                    id = "series-id",
-                    title = "Fast & Furious Spy Racers",
-                    slug = "fast-and-furious-spy-racers-2019",
-                    contentType = "tv_series",
-                    posterPath = "/series.jpg",
-                    firstAirDate = "2019-12-26"
-                )
-            ),
-            IdlixApiParser.catalogItems(searchJson)
-        )
-    }
-
-    @Test
-    fun `idlixSeasonEpisodes reads episode ids for load links`() {
-        val json = """
-            {
-                "season": {
-                    "seasonNumber": 1,
-                    "episodes": [
-                        {
-                            "id": "episode-id",
-                            "episodeNumber": 2,
-                            "name": "Connecticut House",
-                            "overview": "Lisa's new career gets off to a dubious start.",
-                            "stillPath": "/still.jpg",
-                            "airDate": "2017-07-14"
-                        }
-                    ]
-                }
-            }
-        """.trimIndent()
-
-        assertEquals(
-            listOf(
-                IdlixEpisodeItem(
-                    id = "episode-id",
-                    seasonNumber = 1,
-                    episodeNumber = 2,
-                    name = "Connecticut House",
-                    overview = "Lisa's new career gets off to a dubious start.",
-                    stillPath = "/still.jpg",
-                    airDate = "2017-07-14"
-                )
-            ),
-            IdlixApiParser.seasonEpisodes(json)
-        )
-    }
-
-    @Test
     fun `directMediaType reads media extension from uri path`() {
         assertEquals(
             ExtractorLinkType.M3U8,
@@ -325,6 +234,48 @@ class ProviderHtmlParserTest {
             directMediaType("https://cdn.example/video/movie.mp4?download=1")
         )
         assertNull(directMediaType("https://player.example/embed/123"))
+        assertNull(
+            directMediaType("https://strcloud.in/e/DGpWQAxqqqtAB7/Love.You.So.Bad.2025.mp4")
+        )
+        assertEquals(
+            ExtractorLinkType.VIDEO,
+            directMediaType("https://cdn.example/media/embed/movie.mp4")
+        )
+    }
+
+    @Test
+    fun `streamtape parser decodes current robot link assignment`() {
+        val html = """
+            <div id="robotlink"></div>
+            <script>
+                document.getElementById('robotlink').innerHTML = '//strcloud.in/get_video'+ ('xcd?id=DGpWQAxqqqtAB7&expires=1784264233&token=abc').substring(2).substring(1);
+            </script>
+        """.trimIndent()
+
+        assertEquals(
+            "https://strcloud.in/get_video?id=DGpWQAxqqqtAB7&expires=1784264233&token=abc",
+            StreamTapePlayerParser.directUrl(
+                html,
+                "https://strcloud.in/e/DGpWQAxqqqtAB7/movie.mp4"
+            )
+        )
+    }
+
+    @Test
+    fun `streamtape parser evaluates fragments and substring in order`() {
+        val html = """
+            <div id="ideoolink"></div>
+            <script>
+                document.getElementById("ideoolink").innerHTML = 'not;a-video';
+                document.getElementById("ideoolink").innerHTML =
+                    '//strcloud.in/' + 'get_' + 'video' + ('xx?id=current').substring(2) + '&token=abc';
+            </script>
+        """.trimIndent()
+
+        assertEquals(
+            "https://strcloud.in/get_video?id=current&token=abc",
+            StreamTapePlayerParser.directUrl(html, "https://strcloud.in/e/current/movie.mp4")
+        )
     }
 
     @Test
@@ -377,6 +328,25 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `toPlayableUrl rejects local and private network targets`() {
+        val api = RebahinProvider()
+
+        assertNull(api.toPlayableUrl("http://127.0.0.1/video.mp4"))
+        assertNull(api.toPlayableUrl("http://10.0.0.8/video.mp4"))
+        assertNull(api.toPlayableUrl("http://169.254.169.254/latest/meta-data"))
+        assertNull(api.toPlayableUrl("http://[::1]/video.mp4"))
+        assertNull(api.toPlayableUrl("http://[0:0:0:0:0:0:0:1]/video.mp4"))
+        assertNull(api.toPlayableUrl("http://[::ffff:7f00:1]/video.mp4"))
+        assertNull(api.toPlayableUrl("http://[ff02::1]/video.mp4"))
+        assertNull(api.toPlayableUrl("http://127.1/video.mp4"))
+        assertNull(api.toPlayableUrl("http://2130706433/video.mp4"))
+        assertEquals(
+            "https://154.203.167.63/video.mp4",
+            api.toPlayableUrl("https://154.203.167.63/video.mp4")
+        )
+    }
+
+    @Test
     fun `isNonContentPage recognizes upstream interstitials and errors`() {
         assertTrue(ProviderHtmlParser.isNonContentPage("<title>Internet Positif</title>"))
         assertTrue(ProviderHtmlParser.isNonContentPage("<title>Just a moment...</title><script src='https://challenges.cloudflare.com/x'></script>"))
@@ -424,8 +394,7 @@ class ProviderHtmlParserTest {
         assertTrue(session.resolve("https://playsobat.xyz/embed/1", "https://provider.example/item"))
         assertEquals(
             listOf<Pair<String, String?>>(
-                "https://abysscdn.com/?v=UDPNmR2acq" to "https://playsobat.xyz/embed/1",
-                "https://filemoon.sx/e/v2dt7jq5kxpr" to "https://playsobat.xyz/embed/1"
+                "https://abysscdn.com/?v=UDPNmR2acq" to "https://playsobat.xyz/embed/1"
             ),
             extractorRequests
         )
@@ -514,8 +483,7 @@ class ProviderHtmlParserTest {
         assertEquals(
             listOf<Pair<String, String?>>(
                 "https://player.example/embed/1" to "https://provider.example/item",
-                "https://abysscdn.com/?v=UDPNmR2acq" to "https://playsobat.xyz/embed/1",
-                "https://filemoon.sx/e/v2dt7jq5kxpr" to "https://playsobat.xyz/embed/1"
+                "https://abysscdn.com/?v=UDPNmR2acq" to "https://playsobat.xyz/embed/1"
             ),
             extractorRequests
         )
@@ -640,6 +608,84 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `resolution session follows a two wrapper chain to media`() = runBlocking {
+        val links = mutableListOf<ExtractorLink>()
+        val fetched = mutableListOf<String>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                fetched += url
+                when (url) {
+                    "https://player.example/first" -> "<iframe src='/second'></iframe>"
+                    "https://player.example/second" -> "<source src='https://cdn.example/movie.mp4'>"
+                    else -> error("unexpected fetch: $url")
+                }
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            directLinkFactory = { source, name, url, referer, quality, type, headers ->
+                directExtractorLink(source, name, url, referer, quality, type, headers)
+            }
+        )
+
+        assertTrue(session.resolve("https://player.example/first", "https://provider.example/item"))
+        assertEquals(
+            listOf("https://player.example/first", "https://player.example/second"),
+            fetched
+        )
+        assertEquals("https://cdn.example/movie.mp4", links.single().url)
+    }
+
+    @Test
+    fun `same candidate can retry with a different referer`() = runBlocking {
+        val links = mutableListOf<ExtractorLink>()
+        val playerUrl = "https://player.example/embed/current"
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { _, referer ->
+                if (referer == "https://provider.example/good") {
+                    "<source src='https://cdn.example/movie.mp4'>"
+                } else {
+                    "<title>Internet Positif</title>"
+                }
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            directLinkFactory = { source, name, url, referer, quality, type, headers ->
+                directExtractorLink(source, name, url, referer, quality, type, headers)
+            }
+        )
+
+        assertFalse(session.resolve(playerUrl, "https://provider.example/bad"))
+        assertTrue(session.resolve(playerUrl, "https://provider.example/good"))
+        assertEquals("https://cdn.example/movie.mp4", links.single().url)
+    }
+
+    @Test
+    fun `same media url can be emitted with distinct referers`() = runBlocking {
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { _, _ -> error("direct media must not fetch a page") },
+            extractorLoader = { _, _, _, _ -> false },
+            directLinkFactory = { source, name, url, referer, quality, type, headers ->
+                directExtractorLink(source, name, url, referer, quality, type, headers)
+            }
+        )
+
+        assertTrue(session.resolve("https://cdn.example/movie.mp4", "https://provider.example/one"))
+        assertTrue(session.resolve("https://cdn.example/movie.mp4", "https://provider.example/two"))
+        assertEquals(
+            listOf("https://provider.example/one", "https://provider.example/two"),
+            links.map { it.referer }
+        )
+    }
+
+    @Test
     fun `resolution session bounds iframe cycles`() = runBlocking {
         var fetches = 0
         val session = LinkResolutionSession(
@@ -711,6 +757,69 @@ class ProviderHtmlParserTest {
 
         assertFailsWith<CancellationException> {
             runBlocking { session.resolve("https://unsupported.example/embed", null) }
+        }
+    }
+
+    @Test
+    fun `resolution session bounds a stalled candidate`() = runBlocking {
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = {},
+            pageFetcher = { _, _ ->
+                delay(1_000)
+                ""
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            candidateTimeoutMs = 25
+        )
+
+        assertFalse(session.resolve("https://player.example/embed/stalled", null))
+    }
+
+    @Test
+    fun `recursive media sources cannot target a local network address`() = runBlocking {
+        val fetched = mutableListOf<String>()
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                fetched += url
+                "<source src='http://127.0.0.1/private.mp4'>"
+            },
+            extractorLoader = { _, _, _, _ -> false }
+        )
+
+        assertFalse(session.resolve("https://player.example/embed/current", null))
+        assertEquals(listOf("https://player.example/embed/current"), fetched)
+        assertTrue(links.isEmpty())
+    }
+
+    @Test
+    fun `Freeon api fetch rethrows cancellation`() {
+        val playerUrl = "https://plyr.freeon.site/embed/id"
+        val apiUrl = "https://plyr.freeon.site/api/?signed=1"
+        val token0 = 161.toChar()
+        val token1 = 162.toChar()
+        val packed = """
+            eval(function(p,a,c,k,e,d){e=function(c){return(c<a?'':e(c/a))+String.fromCharCode(c%a+161)};return p}('$token0 $token1="//plyr.freeon.site/api/?signed=1";',95,2,'var|url'.split('|')))
+        """.trimIndent()
+        val session = LinkResolutionSession(
+            api = IndoxxiProvider(),
+            subtitleCallback = {},
+            callback = {},
+            pageFetcher = { url, _ ->
+                if (url == playerUrl) packed
+                else if (url == apiUrl) throw CancellationException("cancelled")
+                else error("unexpected fetch: $url")
+            },
+            extractorLoader = { _, _, _, _ -> false }
+        )
+
+        assertFailsWith<CancellationException> {
+            runBlocking { session.resolve(playerUrl, null) }
         }
     }
 }

@@ -118,30 +118,87 @@ class AnimeindoProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
+        val document = app.get(data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS).document
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
-        val candidates = buildList {
-            addAll(ProviderHtmlParser.iframeSources(document))
-            addAll(document.select("a.server[data-video]").map { it.attr("data-video") })
-        }.mapNotNull { ProviderHtmlParser.absoluteUrl(it, data) }.distinct()
+        val emittedDirect = mutableSetOf<String>()
+        var directLoaded = false
 
-        candidates.forEach { candidate ->
-            val resolved = resolver.resolve(candidate, data)
-            if (resolved) return@forEach
+        suspend fun emitDirectVideo(url: String, type: ExtractorLinkType, label: String) {
+            if (!emittedDirect.add(url)) return
+            callback(
+                newExtractorLink(name, "$name $label", url, type) {
+                    // Both Blogger and XtWap declare no-referrer. Their signed
+                    // media URLs are bound to the extraction IP, not a page URL.
+                    referer = ""
+                    quality = Qualities.Unknown.value
+                }
+            )
+            directLoaded = true
+        }
+
+        suspend fun resolvePlayerCandidate(raw: String, referer: String) {
+            val candidate = ProviderHtmlParser.absoluteUrl(raw, referer) ?: return
+            animeindoSourceType(candidate)?.let { type ->
+                emitDirectVideo(candidate, type, if (type == ExtractorLinkType.M3U8) "HLS" else "MP4")
+                return
+            }
+            if (resolver.resolve(candidate, referer)) return
 
             try {
-                val playerDocument = app.get(candidate, referer = data).document
+                val playerResponse = app.get(
+                    candidate,
+                    referer = referer,
+                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+                )
+                val playerDocument = playerResponse.document
+                val inlineSources = InlineDataParser.inlinePlayerSources(playerResponse.text)
+                val declaredHlsUrls = inlineSources
+                    .filter { it.isHls }
+                    .mapNotNull { ProviderHtmlParser.absoluteUrl(it.url, candidate) }
+                    .toSet()
                 val nested = buildList {
                     addAll(ProviderHtmlParser.mediaSources(playerDocument))
                     addAll(playerDocument.select("video[src], video source[src], source[src]").map { it.attr("src") })
+                    addAll(inlineSources.map { it.url })
                 }.mapNotNull { ProviderHtmlParser.absoluteUrl(it, candidate) }.distinct()
-                nested.forEach { resolver.resolve(it, candidate) }
+
+                nested.forEach { mediaUrl ->
+                    val type = animeindoSourceType(mediaUrl, mediaUrl in declaredHlsUrls)
+                    if (type != null) {
+                        emitDirectVideo(
+                            mediaUrl,
+                            type,
+                            if (type == ExtractorLinkType.M3U8) "HLS" else "MP4"
+                        )
+                    } else {
+                        resolver.resolve(mediaUrl, candidate)
+                    }
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
                 // A broken mirror must not prevent the remaining servers from loading.
             }
         }
-        return resolver.loaded
+
+        val candidates = buildList {
+            addAll(ProviderHtmlParser.iframeSources(document))
+            addAll(document.select("a.server[data-video]").map { it.attr("data-video") })
+        }.mapNotNull { ProviderHtmlParser.absoluteUrl(it, data) }.distinct()
+
+        candidates.forEach { candidate ->
+            resolvePlayerCandidate(candidate, data)
+        }
+        return directLoaded || resolver.loaded
     }
+}
+
+internal fun animeindoSourceType(
+    url: String,
+    sourceDeclaresHls: Boolean = false
+): ExtractorLinkType? = when {
+    InlineDataParser.isDirectHttpVideo(url) -> ExtractorLinkType.VIDEO
+    directMediaType(url) == ExtractorLinkType.M3U8 -> ExtractorLinkType.M3U8
+    sourceDeclaresHls -> ExtractorLinkType.M3U8
+    else -> null
 }

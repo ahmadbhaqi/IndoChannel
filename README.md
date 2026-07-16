@@ -10,13 +10,12 @@ Saat ini, IndoChannel mendukung berbagai sumber streaming lokal terpopuler, anta
 ### 🎬 Movie & TV Series
 - **Rebahin**
 - **LayarKaca (LK21)**
-- **Gomov**
 - **Ngefilm**
 - **Pusatfilm**
 - **Dutamovie**
-- **Idlix**
 - **JuraganFilm**
 - **Cgvindo**
+- **KitaNonton**
 - **Indoxxi**
 - **Filmapik**
 - **Indofilm**

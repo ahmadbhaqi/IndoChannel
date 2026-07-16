@@ -17,8 +17,6 @@ class IndoPlugin: Plugin() {
         registerMainAPI(RebahinProvider())
         registerMainAPI(CgvindoProvider())
         registerMainAPI(KitanontonProvider())
-        registerMainAPI(GomovProvider())
-        registerMainAPI(IdlixProvider())
         registerMainAPI(JuraganFilmProvider())
         registerMainAPI(IndoxxiProvider())
         registerMainAPI(FilmapikProvider())

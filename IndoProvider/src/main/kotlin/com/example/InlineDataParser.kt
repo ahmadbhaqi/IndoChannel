@@ -4,7 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import org.jsoup.parser.Parser
 import java.security.MessageDigest
-import java.util.Base64
+import java.net.URI
+import java.net.URLDecoder
+import java.net.URLEncoder
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -15,7 +17,6 @@ internal object InlineDataParser {
     private const val KURONIME_LEGACY_PASSPHRASE = "3&!Z0M,;dZWrawa=="
     private val mapper = jacksonObjectMapper()
     private val urlRegex = Regex("""url:"(https?://[^"]+)"""")
-    private val jsonLinkRegex = Regex(""""link":"(https?://[^"]+)"""")
     private val asiaStreamSniffRegex = Regex(
         """(?s)sniff\(\s*"[^"]*"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*(?:null|"[^"]*")\s*,\s*\[.*?]\s*,\s*(\d+)\s*,\s*\d+\s*,\s*(?:true|false)\s*\)"""
     )
@@ -27,6 +28,173 @@ internal object InlineDataParser {
             .replace("\\\"", "\"")
             .replace("\\n", "\n")
             .replace("\\r", "")
+    }
+
+    fun inlinePlayerSources(html: String): List<InlinePlayerSource> {
+        val data = decodeEscapedInlineData(html)
+        val sourceRegex = Regex(
+            """(?i)(?:[\"']?file[\"']?|[\"']?src[\"']?)\s*:\s*[\"']([^\"']+)[\"']"""
+        )
+        val mimeRegex = Regex(
+            """(?i)[\"']?(?:type|mimeType)[\"']?\s*:\s*[\"']([^\"']+)[\"']"""
+        )
+        return sourceRegex.findAll(data)
+            .mapNotNull { match ->
+                val url = match.groupValues[1].trim().takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
+                val objectStart = data.lastIndexOf('{', match.range.first)
+                val objectEnd = data.indexOf('}', match.range.last)
+                val context = if (objectStart >= 0 && objectEnd >= match.range.last && objectEnd - objectStart <= 2_000) {
+                    data.substring(objectStart, objectEnd + 1)
+                } else {
+                    data.substring(
+                        (match.range.first - 250).coerceAtLeast(0),
+                        (match.range.last + 251).coerceAtMost(data.length)
+                    )
+                }
+                InlinePlayerSource(
+                    url = url,
+                    mimeType = mimeRegex.find(context)?.groupValues?.getOrNull(1)?.trim()
+                )
+            }
+            .distinctBy { it.url }
+            .toList()
+    }
+
+    fun inlinePlayerUrls(html: String): List<String> = inlinePlayerSources(html).map { it.url }
+
+    fun isDirectHttpVideo(url: String): Boolean {
+        return runCatching {
+            val uri = URI(url)
+            if (uri.scheme !in setOf("http", "https")) return false
+            val path = uri.path.orEmpty().lowercase()
+            if (path.endsWith(".mp4") || path.endsWith("/videoplayback")) return true
+            val query = URLDecoder.decode(uri.rawQuery.orEmpty(), Charsets.UTF_8.name()).lowercase()
+            query.split('&').any { parameter ->
+                parameter == "mime=video/mp4" || parameter.startsWith("mime=video/")
+            }
+        }.getOrDefault(false)
+    }
+
+    fun bloggerToken(playerUrl: String): String? {
+        return runCatching {
+            val uri = URI(playerUrl)
+            val host = uri.host.orEmpty()
+            if (!(host.equals("blogger.com", ignoreCase = true) ||
+                    host.endsWith(".blogger.com", ignoreCase = true)) ||
+                uri.path != "/video.g"
+            ) return null
+            uri.rawQuery.orEmpty()
+                .split('&')
+                .mapNotNull { field ->
+                    val pieces = field.split('=', limit = 2)
+                    if (pieces.firstOrNull() != "token") null
+                    else pieces.getOrNull(1)?.let { URLDecoder.decode(it, Charsets.UTF_8.name()) }
+                }
+                .firstOrNull()
+                ?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+    }
+
+    fun bloggerBootstrap(html: String): BloggerBootstrap? {
+        val sid = Regex("""[\"']FdrFJe[\"']\s*:\s*[\"']([^\"']+)[\"']""")
+            .find(html)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        val buildLabel = Regex("""[\"']cfb2h[\"']\s*:\s*[\"']([^\"']+)[\"']""")
+            .find(html)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        return BloggerBootstrap(sid, buildLabel)
+    }
+
+    fun bloggerRpcPayload(token: String): String {
+        val inner = mapper.writeValueAsString(arrayOf<Any?>(token, null, 0))
+        return mapper.writeValueAsString(
+            arrayOf(
+                arrayOf(
+                    arrayOf<Any?>("WcwnYd", inner, null, "generic")
+                )
+            )
+        )
+    }
+
+    fun bloggerRpcFormBody(token: String): String {
+        val encoded = URLEncoder.encode(bloggerRpcPayload(token), Charsets.UTF_8.name())
+        // The current batchexecute handler requires the same trailing form
+        // separator emitted by Blogger's own player client.
+        return "f.req=$encoded&"
+    }
+
+    fun bloggerVideoUrls(response: String): List<String> {
+        val urls = mutableListOf<String>()
+
+        fun visit(node: JsonNode?) {
+            when {
+                node == null || node.isNull -> Unit
+                node.isArray -> {
+                    if (node.size() >= 3 &&
+                        node[0].asText() == "wrb.fr" &&
+                        node[1].asText() == "WcwnYd" &&
+                        node[2].isTextual
+                    ) {
+                        runCatching { mapper.readTree(node[2].asText()) }
+                            .getOrNull()
+                            ?.let { inner -> urls += collectUrls(inner).filter(::isDirectHttpVideo) }
+                    }
+                    node.forEach(::visit)
+                }
+                node.isObject -> node.fields().forEachRemaining { visit(it.value) }
+            }
+        }
+
+        response.lineSequence()
+            .map(String::trim)
+            .filter { it.startsWith("[[") }
+            .forEach { line -> runCatching { mapper.readTree(line) }.getOrNull()?.let(::visit) }
+
+        // Blogger's legacy response used an inline VIDEO_CONFIG object. Keeping
+        // this fallback lets old mirrors work while the current WcwnYd RPC is used.
+        balancedObjectAfter(response, Regex("""var\s+VIDEO_CONFIG\s*="""))
+            ?.let { json ->
+                runCatching { mapper.readTree(json) }.getOrNull()
+                    ?.let { urls += collectUrls(it).filter(::isDirectHttpVideo) }
+            }
+
+        return urls.distinct()
+    }
+
+    private fun balancedObjectAfter(input: String, marker: Regex): String? {
+        val markerEnd = marker.find(input)?.range?.last?.plus(1) ?: return null
+        val start = input.indexOf('{', markerEnd).takeIf { it >= 0 } ?: return null
+        var depth = 0
+        var quote: Char? = null
+        var escaped = false
+        for (index in start until input.length.coerceAtMost(start + 2_000_000)) {
+            val char = input[index]
+            if (quote != null) {
+                when {
+                    escaped -> escaped = false
+                    char == '\\' -> escaped = true
+                    char == quote -> quote = null
+                }
+                continue
+            }
+            when (char) {
+                '\'', '"' -> quote = char
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return input.substring(start, index + 1)
+                    if (depth < 0) return null
+                }
+            }
+        }
+        return null
     }
 
     fun oploverzStreamUrls(html: String, episode: Int?): List<String> {
@@ -58,15 +226,6 @@ internal object InlineDataParser {
             .distinct()
     }
 
-    fun miranimeSourceUrls(html: String): List<String> {
-        val data = decodeEscapedInlineData(html)
-        return Regex("""(?s)"sources":\[(.*?)]""")
-            .findAll(data)
-            .flatMap { match -> jsonLinkRegex.findAll(match.groupValues[1]).map { it.groupValues[1] } }
-            .distinct()
-            .toList()
-    }
-
     fun asiaStreamMasterUrl(html: String, playerUrl: String): String? {
         val match = asiaStreamSniffRegex.find(html) ?: return null
         val uid = match.groupValues[1].takeIf { it.matches(Regex("[A-Za-z0-9_-]+")) } ?: return null
@@ -96,7 +255,7 @@ internal object InlineDataParser {
 
         return try {
             val node = mapper.readTree(payload)
-            val iv = Base64.getDecoder().decode(node.path("iv").asText())
+            val iv = decodeBase64Compat(node.path("iv").asText()) ?: return emptyList()
             val decrypted = decryptAesCbcBase64(
                 data = node.path("data").asText(),
                 key = PLAY_SOBAT_KEY.toByteArray(Charsets.UTF_8),
@@ -114,7 +273,7 @@ internal object InlineDataParser {
     }
 
     fun kuronimeSourceId(html: String): String? {
-        return Regex("""var\s+_0xa100d42aa\s*=\s*"([^"]+)"""")
+        return Regex("""var\s+_0xa100d42aa\s*=\s*["']([^"']+)["']""")
             .find(html)
             ?.groupValues
             ?.getOrNull(1)
@@ -184,7 +343,8 @@ internal object InlineDataParser {
     }
 
     private fun decryptCryptoJsPassphrase(encrypted: String, passphrase: String): String {
-        val cipherJson = String(Base64.getDecoder().decode(encrypted), Charsets.UTF_8)
+        val cipherBytes = decodeBase64Compat(encrypted) ?: error("Invalid encrypted payload")
+        val cipherJson = String(cipherBytes, Charsets.UTF_8)
         val node = mapper.readTree(cipherJson)
         val salt = node.path("s").asText().takeIf { it.isNotBlank() }?.let { hexToBytes(it) } ?: ByteArray(0)
         val keyAndIv = evpBytesToKey(passphrase.toByteArray(Charsets.UTF_8), salt, 48)
@@ -198,7 +358,8 @@ internal object InlineDataParser {
     private fun decryptAesCbcBase64(data: String, key: ByteArray, iv: ByteArray): String {
         val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-        return String(cipher.doFinal(Base64.getDecoder().decode(data)), Charsets.UTF_8)
+        val encrypted = decodeBase64Compat(data) ?: error("Invalid encrypted data")
+        return String(cipher.doFinal(encrypted), Charsets.UTF_8)
     }
 
     private fun evpBytesToKey(password: ByteArray, salt: ByteArray, length: Int): ByteArray {
@@ -237,4 +398,17 @@ internal object InlineDataParser {
         visit(node)
         return urls.distinct()
     }
+}
+
+internal data class BloggerBootstrap(
+    val sid: String,
+    val buildLabel: String
+)
+
+internal data class InlinePlayerSource(
+    val url: String,
+    val mimeType: String?
+) {
+    val isHls: Boolean
+        get() = mimeType?.contains("mpegurl", ignoreCase = true) == true
 }

@@ -66,7 +66,7 @@ open class RebahinProvider : MainAPI() {
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val fetch = app.get(data)
+        val fetch = app.get(data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
         val document = fetch.document
         val pageUrl = fetch.url
         val directUrl = getBaseUrl(fetch.url)
@@ -82,7 +82,8 @@ open class RebahinProvider : MainAPI() {
                     "$directUrl/wp-admin/admin-ajax.php",
                     data = request.toPostData(),
                     referer = pageUrl,
-                    headers = mapOf("X-Requested-With" to "XMLHttpRequest")
+                    headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                 ).document.selectFirst("iframe")?.let { ProviderHtmlParser.firstIframeSource(it) }
                 resolver.resolve(iframe, "$directUrl/")
             } catch (error: kotlin.coroutines.cancellation.CancellationException) {
@@ -96,7 +97,8 @@ open class RebahinProvider : MainAPI() {
             if (href.isNotBlank()) {
                 try {
                     val playerUrl = fixProviderUrl(href) ?: return@forEach
-                    val iframe = app.get(playerUrl).document.selectFirst("iframe")
+                    val iframe = app.get(playerUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
+                        .document.selectFirst("iframe")
                         ?.let { ProviderHtmlParser.firstIframeSource(it) }
                     resolver.resolve(iframe, pageUrl)
                 } catch (error: kotlin.coroutines.cancellation.CancellationException) {

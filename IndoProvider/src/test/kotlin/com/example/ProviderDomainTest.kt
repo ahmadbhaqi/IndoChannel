@@ -15,20 +15,12 @@ class ProviderDomainTest {
     private fun source(fileName: String): String = File(sourceRoot, fileName).readText()
 
     @Test
-    fun `idlix uses requested active domain`() {
-        assertTrue(
-            source("IdlixProvider.kt").contains("""override var mainUrl = "https://z2.idlixku.com""""),
-            "IdlixProvider mainUrl should use https://z2.idlixku.com"
-        )
-    }
-
-    @Test
     fun `new movie providers use requested domains`() {
         val expectedDomains = mapOf(
             "LayarKacaProvider.kt" to """override var mainUrl = "https://tv.nontonfilm.red"""",
             "IndoxxiProvider.kt" to """override var mainUrl = "https://filmbioskop21.lk21.in.net"""",
             "FilmapikProvider.kt" to """override var mainUrl = "https://filmapik.college"""",
-            "IndofilmProvider.kt" to """override var mainUrl = "https://indofilm.fit"""",
+            "IndofilmProvider.kt" to """override var mainUrl = "https://indofilm.pics"""",
             "KitanontonProvider.kt" to """override var mainUrl = "https://kitanonton2.surf""""
         )
 
@@ -74,8 +66,6 @@ class ProviderDomainTest {
             "DutamovieProvider.kt",
             "PusatfilmProvider.kt",
             "RebahinProvider.kt",
-            "GomovProvider.kt",
-            "IdlixProvider.kt",
             "KitanontonProvider.kt",
             "FilmapikProvider.kt"
         )
@@ -103,8 +93,8 @@ class ProviderDomainTest {
         val plugin = source("IndoPlugin.kt")
         val expected = listOf(
             "LayarKacaProvider", "NgefilmProvider", "PusatfilmProvider", "DutamovieProvider",
-            "RebahinProvider", "CgvindoProvider", "KitanontonProvider", "GomovProvider",
-            "IdlixProvider", "JuraganFilmProvider", "IndoxxiProvider", "FilmapikProvider",
+            "RebahinProvider", "CgvindoProvider", "KitanontonProvider",
+            "JuraganFilmProvider", "IndoxxiProvider", "FilmapikProvider",
             "IndofilmProvider", "OtakudesuProvider", "SamehadakuProvider", "AnoboyProvider",
             "KuronimeProvider", "AnimeindoProvider", "OploverzProvider", "ZoronimeProvider"
         )
@@ -118,6 +108,18 @@ class ProviderDomainTest {
     fun `miranime is removed from source and registration`() {
         assertFalse(File(sourceRoot, "MiranimeProvider.kt").exists())
         assertFalse(source("IndoPlugin.kt").contains("MiranimeProvider"))
+    }
+
+    @Test
+    fun `idlix is removed because no non-browser playback endpoint is available`() {
+        assertFalse(File(sourceRoot, "IdlixProvider.kt").exists())
+        assertFalse(source("IndoPlugin.kt").contains("IdlixProvider"))
+    }
+
+    @Test
+    fun `gomov is removed because its upstream has no streaming player`() {
+        assertFalse(File(sourceRoot, "GomovProvider.kt").exists())
+        assertFalse(source("IndoPlugin.kt").contains("GomovProvider"))
     }
 
     @Test
@@ -144,6 +146,16 @@ class ProviderDomainTest {
     }
 
     @Test
+    fun `rebahin family builds main pages from each provider host`() {
+        listOf(CgvindoProvider(), JuraganFilmProvider()).forEach { provider ->
+            assertTrue(
+                provider.mainPage.all { request -> request.data.startsWith(provider.mainUrl) },
+                "${provider.name} main-page requests must stay on ${provider.mainUrl}"
+            )
+        }
+    }
+
+    @Test
     fun `plugin version is bumped for provider fixes`() {
         val moduleBuild = listOf(
             File("build.gradle.kts"),
@@ -151,7 +163,7 @@ class ProviderDomainTest {
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
         assertTrue(
-            Regex("""(?m)^version\s*=\s*2\s*$""").containsMatchIn(moduleBuild.readText()),
+            Regex("""(?m)^version\s*=\s*3\s*$""").containsMatchIn(moduleBuild.readText()),
             "Cloudstream must see these provider fixes as a new plugin release"
         )
     }
@@ -165,10 +177,6 @@ class ProviderDomainTest {
             ),
             "DutamovieProvider.kt" to listOf(
                 """app\s*\.\s*get\s*\(\s*fixUrl\s*\(\s*ele\s*\.\s*attr\s*\(\s*"href"\s*\)\s*\)\s*\)""",
-                """app\s*\.\s*post\s*\("""
-            ),
-            "GomovProvider.kt" to listOf(
-                """app\s*\.\s*get\s*\(\s*playerUrl""",
                 """app\s*\.\s*post\s*\("""
             )
         )

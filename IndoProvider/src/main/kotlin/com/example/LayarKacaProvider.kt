@@ -6,6 +6,8 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class LayarKacaProvider : MainAPI() {
@@ -119,19 +121,21 @@ class LayarKacaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
+        val document = app.get(data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS).document
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
 
         ProviderHtmlParser.mediaSources(document, "iframe, div.gmr-embed-responsive iframe")
-            .forEach { resolver.resolve(it, data) }
+            .forEach { resolvePlayer(it, data, resolver) }
 
-        document.select("ul.muvipro-player-tabs li a[href], ul#player-list li a[href]").forEach { link ->
-            val playerUrl = ProviderHtmlParser.absoluteUrl(link.attr("href"), data) ?: return@forEach
-            if (!playerUrl.startsWith("http")) return@forEach
+        LayarKacaPlayerParser.serverPageUrls(document, data).forEach { playerUrl ->
             try {
-                val playerDocument = app.get(playerUrl, referer = data).document
+                val playerDocument = app.get(
+                    playerUrl,
+                    referer = data,
+                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+                ).document
                 ProviderHtmlParser.mediaSources(playerDocument, "iframe, div.gmr-embed-responsive iframe")
-                    .forEach { resolver.resolve(it, playerUrl) }
+                    .forEach { resolvePlayer(it, playerUrl, resolver) }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
@@ -141,5 +145,62 @@ class LayarKacaProvider : MainAPI() {
         return resolver.loaded
     }
 
+    private suspend fun resolvePlayer(raw: String?, referer: String, resolver: LinkResolutionSession) {
+        val url = ProviderHtmlParser.absoluteUrl(raw, referer) ?: return
+        if (resolver.resolve(url, referer)) return
+
+        try {
+            val html = app.get(
+                url,
+                referer = referer,
+                timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+            ).text
+            LayarKacaPlayerParser.mediaUrls(html, url).forEach { resolver.resolve(it, url) }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            // Keep trying the remaining server tabs.
+        }
+    }
+
     private fun providerUrl(raw: String): String? = ProviderHtmlParser.absoluteUrl(raw, mainUrl)
+}
+
+internal object LayarKacaPlayerParser {
+    fun serverPageUrls(document: Document, detailUrl: String): List<String> {
+        return document.select(
+            "ul.gmr-player-nav a[href], ul.muvipro-player-tabs a[href], ul#player-list a[href]"
+        ).mapNotNull { link ->
+            ProviderHtmlParser.absoluteUrl(link.attr("href"), detailUrl)
+                ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+        }.distinct()
+    }
+
+    fun mediaUrls(html: String, playerUrl: String): List<String> {
+        val document = Jsoup.parse(html, playerUrl)
+        val scriptBodies = document.select("script").flatMap { script ->
+            val raw = script.data()
+            listOfNotNull(
+                raw,
+                raw.takeIf { it.contains("eval(function(p,a,c,k,e") }
+                    ?.let { runCatching { getAndUnpack(it) }.getOrNull() }
+            )
+        }
+        val inlineUrls = scriptBodies.flatMap { script ->
+            val normalized = script
+                .replace("\\'", "'")
+                .replace("\\\"", "\"")
+                .replace("\\/", "/")
+                .replace("\\u0026", "&")
+                .replace("&amp;", "&")
+            Regex("(?i)[\\\"']?(?:file|src)[\\\"']?\\s*[:=]\\s*[\\\"'](https?://[^\\\"']+)[\\\"']")
+                .findAll(normalized)
+                .map { it.groupValues[1] }
+                .toList()
+        }
+        val sourceUrls = document.select("video[src], video source[src], source[src]").map { it.attr("src") }
+        return (inlineUrls + sourceUrls)
+            .mapNotNull { ProviderHtmlParser.absoluteUrl(it, playerUrl) }
+            .distinct()
+    }
 }

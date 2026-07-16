@@ -145,7 +145,7 @@ open class KuronimeProvider : MainAPI() {
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val fetch = app.get(data)
+        val fetch = app.get(data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
         val document = fetch.document
         val html = fetch.text
         var loaded = false
@@ -160,7 +160,8 @@ open class KuronimeProvider : MainAPI() {
                         "Content-Type" to "application/json",
                         "Accept" to "application/json",
                         "Origin" to mainUrl
-                    )
+                    ),
+                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                 ).text
                 val apiUrls = InlineDataParser.kuronimeApiUrls(response)
                 var emittedKuroplayer = false

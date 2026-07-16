@@ -79,7 +79,14 @@ internal object ProviderHtmlParser {
                 meta.attr("content").trim().takeIf { it.isPlayableCandidate() }
             }
         }
-        return (iframeSources + metaSources).distinct()
+        val mediaElementSources = document
+            .select("video[src], video[data-src], video source[src], video source[data-src], source[src], source[data-src]")
+            .mapNotNull { element ->
+                iframeAttrs.firstNotNullOfOrNull { attr ->
+                    element.attr(attr).trim().takeIf { it.isPlayableCandidate() }
+                }
+            }
+        return (iframeSources + metaSources + mediaElementSources).distinct()
     }
 
     fun isNonContentPage(html: String): Boolean {
