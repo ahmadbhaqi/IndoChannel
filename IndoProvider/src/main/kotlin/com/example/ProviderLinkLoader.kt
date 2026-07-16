@@ -54,12 +54,12 @@ internal class LinkResolutionSession(
     suspend fun resolve(raw: String?, referer: String?): Boolean {
         val before = emittedUrls.size
         val url = api.toPlayableUrl(raw)?.takeUnless { it.isTrailerUrl() } ?: return false
-        resolveCandidate(url, referer, depth = 0)
+        resolveCandidate(url, referer, genericDepth = 0)
         return emittedUrls.size > before
     }
 
-    private suspend fun resolveCandidate(url: String, referer: String?, depth: Int) {
-        if (depth > maxDepth || !visitedCandidates.add(url)) return
+    private suspend fun resolveCandidate(url: String, referer: String?, genericDepth: Int) {
+        if (genericDepth > maxDepth || !visitedCandidates.add(url)) return
 
         try {
             directMediaType(url)?.let { type ->
@@ -72,7 +72,7 @@ internal class LinkResolutionSession(
                 val html = pageFetcher(url, referer)
                 if (ProviderHtmlParser.isNonContentPage(html)) return
                 InlineDataParser.playSobatUrls(html).forEach { nested ->
-                    api.toPlayableUrl(nested)?.let { resolveCandidate(it, url, depth + 1) }
+                    api.toPlayableUrl(nested)?.let { resolveCandidate(it, url, genericDepth) }
                 }
                 return
             }
@@ -88,20 +88,20 @@ internal class LinkResolutionSession(
 
             val beforeExtractor = emittedUrls.size
             extractorLoader(url, referer, subtitleCallback, ::emit)
-            if (emittedUrls.size > beforeExtractor || depth >= maxDepth) return
+            if (emittedUrls.size > beforeExtractor || genericDepth >= maxDepth) return
 
             val html = pageFetcher(url, referer)
             if (ProviderHtmlParser.isNonContentPage(html)) return
             val document = Jsoup.parse(html, url)
             ProviderHtmlParser.mediaSources(document).forEach { nested ->
                 ProviderHtmlParser.absoluteUrl(nested, url)?.let {
-                    resolveCandidate(it, url, depth + 1)
+                    resolveCandidate(it, url, genericDepth + 1)
                 }
             }
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
-            // Continue with other top-level candidates.
+            // Continue with sibling and later candidates.
         }
     }
 

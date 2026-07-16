@@ -409,6 +409,58 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `resolution session follows one generic iframe through PlaySobat adapter`() = runBlocking {
+        val links = mutableListOf<ExtractorLink>()
+        val extractorRequests = mutableListOf<Pair<String, String?>>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                if (url == "https://player.example/embed/1") {
+                    "<iframe src='https://playsobat.xyz/embed/1'></iframe>"
+                } else {
+                    """
+                        <script>
+                            window.payload = "{\"iv\":\"ABEiM0RVZneImaq7zN3u/w==\",\"data\":\"jcnQBUKMrJE5BkzD119j3/yizUSXLAM0pS062Yj0wREvec9ySwfrXuSq/IOVVCW6WvsAa7UwxT1hs+oWmuIpcd8GJ1sXubg1CEOd4Yovu7NoyuHwc3ZgZsX48VhsbWie\"}";
+                        </script>
+                    """.trimIndent()
+                }
+            },
+            extractorLoader = { url, referer, _, callback ->
+                extractorRequests += url to referer
+                if (url.startsWith("https://abysscdn.com/")) {
+                    callback(
+                        directExtractorLink(
+                            "test",
+                            "test",
+                            "https://cdn.example/master.m3u8",
+                            referer.orEmpty(),
+                            0,
+                            ExtractorLinkType.M3U8,
+                            emptyMap()
+                        )
+                    )
+                    true
+                } else {
+                    false
+                }
+            }
+        )
+
+        assertTrue(session.resolve("https://player.example/embed/1", "https://provider.example/item"))
+        assertEquals(
+            listOf<Pair<String, String?>>(
+                "https://player.example/embed/1" to "https://provider.example/item",
+                "https://abysscdn.com/?v=UDPNmR2acq" to "https://playsobat.xyz/embed/1",
+                "https://filemoon.sx/e/v2dt7jq5kxpr" to "https://playsobat.xyz/embed/1"
+            ),
+            extractorRequests
+        )
+        assertEquals("https://cdn.example/master.m3u8", links.single().url)
+    }
+
+    @Test
     fun `resolution session converts AsiaStream watch page to hls`() = runBlocking {
         val links = mutableListOf<ExtractorLink>()
         val session = LinkResolutionSession(
