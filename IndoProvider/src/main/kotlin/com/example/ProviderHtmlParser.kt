@@ -62,6 +62,16 @@ internal object ProviderHtmlParser {
             ?.firstNotNullOfOrNull { imageSource(it) }
     }
 
+    fun firstTitledLink(
+        element: Element?,
+        selector: String = "h2.entry-title > a[href], h2 > a[href], " +
+            "h3.mli-info h2 a[href], a[rel=bookmark][href]"
+    ): Element? {
+        return element?.select(selector)?.firstOrNull { link ->
+            link.text().isNotBlank() && link.attr("href").trim().isPlayableCandidate()
+        }
+    }
+
     fun absoluteUrl(raw: String?, baseUrl: String): String? {
         val value = raw?.trim()?.takeIf { it.isPlayableCandidate() } ?: return null
         return try {
@@ -70,6 +80,43 @@ internal object ProviderHtmlParser {
         } catch (_: Exception) {
             null
         }
+    }
+
+    /** Rehomes cached provider-owned URLs from known retired hosts onto the current host. */
+    fun normalizeProviderPageUrl(
+        raw: String?,
+        currentBaseUrl: String,
+        legacyHosts: Set<String> = emptySet()
+    ): String? {
+        val value = raw?.trim()?.takeIf { it.isPlayableCandidate() } ?: return null
+        return runCatching {
+            val current = URI(currentBaseUrl)
+            if (current.scheme?.lowercase() !in setOf("http", "https") || current.host.isNullOrBlank()) {
+                return@runCatching null
+            }
+            val parsed = URI(value)
+            val resolved = if (parsed.isAbsolute) {
+                parsed
+            } else {
+                URI(currentBaseUrl.trimEnd('/') + "/").resolve(parsed)
+            }
+            if (resolved.scheme?.lowercase() !in setOf("http", "https")) return@runCatching null
+            val normalizedHost = resolved.host?.lowercase()?.removePrefix("www.")
+                ?: return@runCatching null
+            val allowedHosts = (legacyHosts + current.host)
+                .map { it.lowercase().removePrefix("www.") }
+                .toSet()
+            if (normalizedHost !in allowedHosts) return@runCatching null
+
+            buildString {
+                append(current.scheme.lowercase())
+                append("://")
+                append(current.rawAuthority)
+                append(resolved.rawPath?.takeIf { it.isNotBlank() } ?: "/")
+                resolved.rawQuery?.let { append('?').append(it) }
+                resolved.rawFragment?.let { append('#').append(it) }
+            }
+        }.getOrNull()
     }
 
     fun mediaSources(document: Document, iframeSelector: String = "iframe"): List<String> {
@@ -97,6 +144,7 @@ internal object ProviderHtmlParser {
             "<title>just a moment...</title>",
             "challenges.cloudflare.com",
             "enable javascript and cookies to continue",
+            "<title>file error</title>",
             "mysql server has gone away",
             "sqlstate[hy000] [2006]"
         ).any(normalized::contains)

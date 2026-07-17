@@ -44,3 +44,33 @@ internal fun decodeBase64Compat(raw: String): ByteArray? {
     if (padding == 2 && symbols % 4 != 2) return null
     return output.copyOf(outputSize)
 }
+
+internal fun encodeBase64UrlNoPadding(input: ByteArray): String {
+    if (input.isEmpty()) return ""
+    val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    val output = StringBuilder((input.size * 4 + 2) / 3)
+    var index = 0
+    while (index + 2 < input.size) {
+        val bits = ((input[index].toInt() and 0xff) shl 16) or
+            ((input[index + 1].toInt() and 0xff) shl 8) or
+            (input[index + 2].toInt() and 0xff)
+        output.append(alphabet[(bits ushr 18) and 0x3f])
+        output.append(alphabet[(bits ushr 12) and 0x3f])
+        output.append(alphabet[(bits ushr 6) and 0x3f])
+        output.append(alphabet[bits and 0x3f])
+        index += 3
+    }
+    val remaining = input.size - index
+    if (remaining == 1) {
+        val bits = (input[index].toInt() and 0xff) shl 16
+        output.append(alphabet[(bits ushr 18) and 0x3f])
+        output.append(alphabet[(bits ushr 12) and 0x3f])
+    } else if (remaining == 2) {
+        val bits = ((input[index].toInt() and 0xff) shl 16) or
+            ((input[index + 1].toInt() and 0xff) shl 8)
+        output.append(alphabet[(bits ushr 18) and 0x3f])
+        output.append(alphabet[(bits ushr 12) and 0x3f])
+        output.append(alphabet[(bits ushr 6) and 0x3f])
+    }
+    return output.toString()
+}

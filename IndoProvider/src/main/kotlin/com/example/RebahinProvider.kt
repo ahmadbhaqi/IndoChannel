@@ -27,7 +27,9 @@ open class RebahinProvider : MainAPI() {
     }
 
     internal fun Element.toSearchResult(): SearchResponse? {
-        val title = selectFirst("h2 a, h3.mli-info h2")?.text()?.trim() ?: return null
+        val title = MovieMetadataParser.title(
+            selectFirst("h2 a, h3.mli-info h2")?.text()
+        ) ?: return null
         val href = fixProviderUrl(selectFirst("a")?.attr("href") ?: return null) ?: return null
         val posterUrl = fixUrlNull(ProviderHtmlParser.firstImageSource(this))
         val quality = selectFirst("span.mli-quality, div.gmr-qual")?.text()?.trim()
@@ -47,9 +49,21 @@ open class RebahinProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
-        val title = document.selectFirst("h1.entry-title, h3[itemprop=name]")?.text()?.trim().orEmpty()
+        val title = MovieMetadataParser.title(
+            document.selectFirst("h1.entry-title, h3[itemprop=name]")?.text()
+        ) ?: MovieMetadataParser.title(document.selectFirst("meta[property=og:title]")?.attr("content"))
+            ?: throw ErrorLoadingException("$name returned a page without a movie title")
         val poster = fixUrlNull(ProviderHtmlParser.imageSource(document.selectFirst("img.thumbnail, figure.pull-left > img")))
-        val description = document.selectFirst("div[itemprop=description], div.synopsis")?.text()?.trim()
+        val description = MovieMetadataParser.synopsis(
+            document,
+            directSelectors = listOf(
+                "[itemprop=reviewBody] p",
+                "div.synopsis p",
+                "div.synopsis",
+                "div.sinopsis p",
+                "div.sinopsis"
+            )
+        )
         val year = document.selectFirst("span.year, a[href*=/year/]")?.text()?.toIntOrNull()
         val tags = document.select("div.gmr-moviedata a[href*=/genre/], span.jptag a").map { it.text() }
         val tvType = if (document.select("div.vid-episodes a, div.gmr-listseries a").isNotEmpty()) TvType.TvSeries else TvType.Movie

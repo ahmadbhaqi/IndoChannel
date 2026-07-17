@@ -70,13 +70,14 @@ class FilmapikProvider : MainAPI() {
     private fun Element.toMovieResult(): SearchResponse? {
         val href = attr("href").takeIf { it.isNotBlank() } ?: return null
         val image = selectFirst("img")
-        val title = image?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
+        val rawTitle = image?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
             ?: selectFirst("h3")?.text()?.trim()?.takeIf { it.isNotBlank() }
             ?: return null
+        val title = MovieMetadataParser.title(rawTitle) ?: return null
         val poster = fixUrlNull(ProviderHtmlParser.imageSource(image))
         val quality = selectFirst(".badge-quality")?.text()?.trim()
         val type = if (href.contains("/tvshows/", ignoreCase = true)) TvType.TvSeries else TvType.Movie
-        return newMovieSearchResponse(title.cleanTitle(), fixUrl(href), type) {
+        return newMovieSearchResponse(title, fixUrl(href), type) {
             posterUrl = poster
             this.quality = getQualityFromString(quality)
         }
@@ -84,19 +85,16 @@ class FilmapikProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url).document
-        val title = document.selectFirst("h1, meta[property=og:title]")
-            ?.let { if (it.tagName() == "meta") it.attr("content") else it.text() }
-            ?.cleanTitle()
-            ?.takeIf { it.isNotBlank() }
-            ?: return null
+        val titleElement = document.selectFirst("h1, meta[property=og:title]")
+        val title = MovieMetadataParser.title(
+            titleElement?.let { if (it.tagName() == "meta") it.attr("content") else it.text() }
+        ) ?: return null
         val poster = document.selectFirst("script[type='application/ld+json']:contains(image)")
             ?.data()
             ?.let { Regex("\"image\"\\s*:\\s*\"([^\"]+)\"").find(it)?.groupValues?.getOrNull(1) }
             ?: document.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
             ?: fixUrlNull(ProviderHtmlParser.imageSource(document.selectFirst(".detail-poster img, img[alt*='Nonton']")))
-        val description = document.selectFirst("meta[property=og:description], meta[name=description]")
-            ?.attr("content")
-            ?.takeIf { it.isNotBlank() }
+        val description = MovieMetadataParser.synopsis(document)
         val year = Regex("""\((\d{4})\)""").find(title)?.groupValues?.getOrNull(1)?.toIntOrNull()
         val tags = document.select("meta[property=article:tag]").mapNotNull {
             it.attr("content").takeIf { tag -> tag.isNotBlank() }
@@ -224,7 +222,7 @@ class FilmapikProvider : MainAPI() {
     )
 
     private fun FilmapikSearchItem.toSearchResponse(): SearchResponse? {
-        val safeTitle = title?.cleanTitle()?.takeIf { it.isNotBlank() } ?: return null
+        val safeTitle = MovieMetadataParser.title(title) ?: return null
         val safeUrl = url?.takeIf { it.isNotBlank() } ?: return null
         val type = if (safeUrl.contains("/tvshows/", ignoreCase = true)) TvType.TvSeries else TvType.Movie
         return newMovieSearchResponse(safeTitle, safeUrl, type) {
@@ -232,16 +230,6 @@ class FilmapikProvider : MainAPI() {
         }
     }
 
-    private fun String.cleanTitle(): String {
-        return replace("&amp;", "&")
-            .replace("&#038;", "&")
-            .replace("&#8211;", "-")
-            .replace("Nonton Film", "")
-            .replace(Regex("""^Nonton\s+""", RegexOption.IGNORE_CASE), "")
-            .replace("Subtitle Indonesia", "")
-            .replace("Sub Indo", "", ignoreCase = true)
-            .trim()
-    }
 }
 
 internal data class FilmapikMediaSource(

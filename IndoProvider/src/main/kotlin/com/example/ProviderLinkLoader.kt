@@ -17,6 +17,9 @@ import java.net.InetAddress
 import java.net.URI
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.ResponseBody
 import org.jsoup.Jsoup
 
 internal typealias PlayerPageFetcher = suspend (url: String, referer: String?) -> String
@@ -43,6 +46,8 @@ internal const val PROVIDER_HTTP_TIMEOUT_SECONDS = 25L
 private const val SESSION_TIMEOUT_MS = 90_000L
 private const val MAX_RESOLUTION_CANDIDATES = 48
 private const val MAX_BYSE_API_RESPONSE_BYTES = 2_000_000
+private const val MAX_JUSTPLAY_API_RESPONSE_BYTES = 2_000_000
+private const val JSON_MEDIA_TYPE = "application/json;charset=UTF-8"
 
 private data class CandidateKey(
     val url: String,
@@ -64,6 +69,7 @@ internal class LinkResolutionSession(
         app.get(url, referer = referer, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS).text
     },
     private val byseApiFetcher: PlayerPageFetcher = ::fetchBoundedByseApi,
+    private val justPlayApiFetcher: JustPlayApiFetcher = ::fetchBoundedJustPlayApi,
     private val extractorLoader: CloudstreamExtractorLoader = ::loadExtractorWithResult,
     private val maxDepth: Int = 2,
     private val maxCandidates: Int = MAX_RESOLUTION_CANDIDATES,
@@ -111,6 +117,17 @@ internal class LinkResolutionSession(
             }
 
             val host = URI(url).host.orEmpty().lowercase()
+            ContentXPlayerParser.apiUrl(url, referer)?.let { apiUrl ->
+                val encrypted = pageFetcher(apiUrl, url)
+                ContentXPlayerParser.playback(encrypted, url)?.let { playback ->
+                    emitBysePlayback(playback, url)
+                }
+                // These fragment embeds require the encrypted API. Their HTML is
+                // only a JavaScript loading shell, so a generic extractor cannot
+                // recover a media URL when the API itself has no usable source.
+                return
+            }
+
             if (host == "freeon.site" || host.endsWith(".freeon.site")) {
                 val html = pageFetcher(url, referer)
                 cachedHtml = html
@@ -156,6 +173,30 @@ internal class LinkResolutionSession(
                 if (emittedLinks.size > beforeAdapter) return
             }
 
+            if (host == "kotakajaib.me" || host.endsWith(".kotakajaib.me")) {
+                val html = pageFetcher(url, referer)
+                cachedHtml = html
+                if (ProviderHtmlParser.isNonContentPage(html)) return
+                val beforeAdapter = emittedLinks.size
+                for (nested in KotakDataFrameParser.urls(html)) {
+                    if (emittedLinks.size > beforeAdapter) break
+                    resolveCandidate(nested, url, genericDepth)
+                }
+                if (emittedLinks.size > beforeAdapter) return
+            }
+
+            if (host == "emturbovid.com" || host.endsWith(".emturbovid.com") ||
+                host == "turbovidhls.com" || host.endsWith(".turbovidhls.com")
+            ) {
+                val html = cachedHtml ?: pageFetcher(url, referer).also { cachedHtml = it }
+                if (ProviderHtmlParser.isNonContentPage(html)) return
+                val beforeAdapter = emittedLinks.size
+                TurboVipPlayerParser.directUrl(html)?.let { direct ->
+                    emitDirect(direct, url, ExtractorLinkType.VIDEO)
+                }
+                if (emittedLinks.size > beforeAdapter) return
+            }
+
             if (host == "abyssplayer.com" || host.endsWith(".abyssplayer.com") ||
                 host == "abyss.to" || host.endsWith(".abyss.to")
             ) {
@@ -184,6 +225,19 @@ internal class LinkResolutionSession(
                 return
             }
 
+            if (JustPlayPlayerParser.supports(host)) {
+                val beforeAdapter = emittedLinks.size
+                val playback = try {
+                    JustPlayPlayerParser.resolve(url, referer, justPlayApiFetcher)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
+                playback?.let { emitBysePlayback(it, url) }
+                if (emittedLinks.size > beforeAdapter) return
+            }
+
             if (host == "bysebuho.com" || host.endsWith(".bysebuho.com")) {
                 val beforeAdapter = emittedLinks.size
                 val apiUrl = BysePlayerParser.apiUrl(url)
@@ -196,34 +250,7 @@ internal class LinkResolutionSession(
                         null
                     }
                 }
-                apiJson?.let(BysePlayerParser::playback)?.let { playback ->
-                    playback.tracks
-                        .filter { track ->
-                            track.kind.lowercase() in setOf("captions", "subtitle", "subtitles")
-                        }
-                        .filter { track -> isSafeRemoteHttpUrl(track.url) }
-                        .forEach { track ->
-                            subtitleCallback(
-                                newSubtitleFile(
-                                    track.label.ifBlank { track.language.ifBlank { "Subtitle" } },
-                                    track.url
-                                )
-                            )
-                        }
-                    playback.sources.forEach { source ->
-                        emit(
-                            directLinkFactory(
-                                api.name,
-                                "${api.name} ${source.label}",
-                                source.url,
-                                url,
-                                source.height ?: Qualities.Unknown.value,
-                                if (source.isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                                mapOf("Referer" to url)
-                            )
-                        )
-                    }
-                }
+                apiJson?.let(BysePlayerParser::playback)?.let { emitBysePlayback(it, url) }
                 if (emittedLinks.size > beforeAdapter) return
             }
 
@@ -288,6 +315,50 @@ internal class LinkResolutionSession(
         )
     }
 
+    private suspend fun emitBysePlayback(playback: BysePlayback, playerUrl: String) {
+        val mediaHeaders = linkedMapOf("Referer" to playerUrl)
+        runCatching {
+            val uri = URI(playerUrl)
+            if (uri.scheme?.lowercase() in setOf("http", "https") && !uri.host.isNullOrBlank()) {
+                mediaHeaders["Origin"] = URI(
+                    uri.scheme,
+                    null,
+                    uri.host,
+                    uri.port,
+                    null,
+                    null,
+                    null
+                ).toString().trimEnd('/')
+            }
+        }
+        playback.tracks
+            .filter { track ->
+                track.kind.lowercase() in setOf("captions", "subtitle", "subtitles")
+            }
+            .filter { track -> isSafeRemoteHttpUrl(track.url) }
+            .forEach { track ->
+                subtitleCallback(
+                    newSubtitleFile(
+                        track.label.ifBlank { track.language.ifBlank { "Subtitle" } },
+                        track.url
+                    )
+                )
+            }
+        playback.sources.forEach { source ->
+            emit(
+                directLinkFactory(
+                    api.name,
+                    "${api.name} ${source.label}",
+                    source.url,
+                    playerUrl,
+                    source.height ?: Qualities.Unknown.value,
+                    if (source.isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                    mediaHeaders
+                )
+            )
+        }
+    }
+
     private fun emit(link: ExtractorLink) {
         if (link.url.isBlank() || !isSafeRemoteHttpUrl(link.url)) return
         val key = EmittedLinkKey(
@@ -302,13 +373,46 @@ internal class LinkResolutionSession(
 
 private suspend fun fetchBoundedByseApi(url: String, referer: String?): String {
     val response = app.get(url, referer = referer, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
-    val body = response.body
+    return readBoundedBody(response.body, MAX_BYSE_API_RESPONSE_BYTES)
+}
+
+private suspend fun fetchBoundedJustPlayApi(request: JustPlayHttpRequest): String {
+    val playerUrl = request.headers["X-Embed-Parent"]
+    val uri = URI(request.url)
+    val origin = URI(uri.scheme, null, uri.host, uri.port, null, null, null).toString().trimEnd('/')
+    val headers = linkedMapOf(
+        "Accept" to "application/json",
+        "Origin" to origin,
+        "User-Agent" to JUSTPLAY_USER_AGENT
+    ).apply {
+        putAll(request.headers)
+        if (request.method == JustPlayHttpMethod.POST) put("Content-Type", JSON_MEDIA_TYPE)
+    }
+    val response = when (request.method) {
+        JustPlayHttpMethod.GET -> app.get(
+            request.url,
+            referer = playerUrl,
+            headers = headers,
+            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+        )
+        JustPlayHttpMethod.POST -> app.post(
+            request.url,
+            requestBody = request.body.orEmpty().toRequestBody(JSON_MEDIA_TYPE.toMediaType()),
+            referer = playerUrl,
+            headers = headers,
+            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+        )
+    }
+    return readBoundedBody(response.body, MAX_JUSTPLAY_API_RESPONSE_BYTES)
+}
+
+private fun readBoundedBody(body: ResponseBody, maxBytes: Int): String {
     val declaredSize = body.contentLength()
-    require(declaredSize < 0L || declaredSize <= MAX_BYSE_API_RESPONSE_BYTES)
+    require(declaredSize < 0L || declaredSize <= maxBytes)
 
     return body.byteStream().use { input ->
         val output = ByteArrayOutputStream(
-            declaredSize.coerceIn(0L, MAX_BYSE_API_RESPONSE_BYTES.toLong()).toInt()
+            declaredSize.coerceIn(0L, maxBytes.toLong()).toInt()
         )
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
         var total = 0
@@ -316,7 +420,7 @@ private suspend fun fetchBoundedByseApi(url: String, referer: String?): String {
             val count = input.read(buffer)
             if (count < 0) break
             total += count
-            require(total <= MAX_BYSE_API_RESPONSE_BYTES)
+            require(total <= maxBytes)
             output.write(buffer, 0, count)
         }
         output.toString(Charsets.UTF_8.name())
@@ -328,7 +432,12 @@ internal fun orderPlaySobatMirrorUrls(urls: List<String>): List<String> {
         .distinct()
         .filterNot { url ->
             runCatching { URI(url).host.orEmpty().lowercase() }
-                .getOrDefault("") in setOf("dintezuvio.com", "www.dintezuvio.com")
+                .getOrDefault("") in setOf(
+                    "dintezuvio.com",
+                    "www.dintezuvio.com",
+                    "omg10.com",
+                    "www.omg10.com"
+                )
         }
         .sortedBy { url ->
             val host = runCatching { URI(url).host.orEmpty().lowercase() }.getOrDefault("")

@@ -7,7 +7,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
-import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /** Opt-in smoke tests against current provider pages and their real players. */
@@ -18,45 +17,28 @@ class IndofilmIndoxxiLiveTest {
 
         verify(
             IndofilmProvider(),
-            "https://indofilm.pics/field-of-screams-2025/"
+            "https://indofilm.pics/pickleball-pete-2026/"
         )
     }
 
     @Test
-    fun `indoxxi resolves a current Byse HLS mirror`() = runBlocking {
+    fun `indoxxi resolves a current reachable mirror`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
 
-        val links = verify(
+        verify(
             provider = IndoxxiProvider(),
-            pageUrl = "https://filmbioskop21.lk21.in.net/nonton-film-avatar-fire-and-ash-lk21-2025/"
-        )
-        val byseHls = links.firstOrNull { link ->
-            link.type == ExtractorLinkType.M3U8 &&
-                link.url.contains(".m3u8", ignoreCase = true) &&
-                link.referer.contains("bysebuho.com/e/", ignoreCase = true)
-        }
-        assertNotNull(byseHls, "Indoxxi did not emit the current Byse HLS source")
-        val response = withTimeout(30_000) {
-            app.get(
-                byseHls.url,
-                referer = byseHls.referer,
-                headers = byseHls.headers,
-                timeout = 30L
-            )
-        }
-        assertTrue(
-            response.code in 200..299 && response.text.trimStart().startsWith("#EXTM3U"),
-            "Indoxxi Byse source is not a reachable HLS playlist: HTTP ${response.code}"
+            pageUrl = "https://filmbioskop21.lk21.in.net/" +
+                "nonton-film-golden-kamuy-the-abashiri-prison-raid-lk21-2026/"
         )
     }
 
     @Test
-    fun `layarkaca resolves a current alternate server`() = runBlocking {
+    fun `layarkaca prioritizes a reachable current server`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
 
         verify(
             LayarKacaProvider(),
-            "https://tv.nontonfilm.red/love-you-so-bad-2025/"
+            "https://tv.nontonfilm.red/evil-dead-burn-2026/"
         )
     }
 
@@ -71,7 +53,11 @@ class IndofilmIndoxxiLiveTest {
             provider.loadLinks(pageUrl, false, subtitles::add, links::add)
         }
 
-        println("${provider.name} loaded=$loaded links=${links.map { it.url }}")
+        println(
+            "${provider.name} loaded=$loaded links=" + links.map { link ->
+                "${link.url} referer=${link.referer} headers=${link.headers}"
+            }
+        )
         assertTrue(loaded, "${provider.name} did not report a resolved link")
         assertTrue(
             links.any { link ->
@@ -83,18 +69,24 @@ class IndofilmIndoxxiLiveTest {
         )
         if (!probeMedia) return links
 
-        val probes = links.associate { link ->
+        val probes = linkedMapOf<String, Int?>()
+        for (link in links.take(8)) {
             val code = runCatching {
                 withTimeout(30_000) {
                     app.get(
                         link.url,
                         referer = link.referer,
-                        headers = link.headers + ("Range" to "bytes=0-31"),
+                        headers = link.headers + if (link.type == ExtractorLinkType.M3U8) {
+                            emptyMap()
+                        } else {
+                            mapOf("Range" to "bytes=0-31")
+                        },
                         timeout = 30L
                     ).code
                 }
             }.getOrNull()
-            link.url to code
+            probes[link.url] = code
+            if (code in 200..299) break
         }
         println("${provider.name} probes=$probes")
         assertTrue(

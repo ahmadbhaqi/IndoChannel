@@ -39,10 +39,11 @@ class KitanontonProvider : MainAPI() {
     private fun Element.toMovieResult(): SearchResponse? {
         val link = selectFirst("a.ml-mask[href]") ?: return null
         val href = ProviderHtmlParser.absoluteUrl(link.attr("href"), mainUrl) ?: return null
-        val title = link.attr("title").trim().takeIf { it.isNotBlank() }
+        val rawTitle = link.attr("title").trim().takeIf { it.isNotBlank() }
             ?: selectFirst(".mli-info h2")?.text()?.trim()?.takeIf { it.isNotBlank() }
             ?: selectFirst("img")?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
             ?: return null
+        val title = MovieMetadataParser.title(rawTitle) ?: return null
         val poster = fixUrlNull(ProviderHtmlParser.imageSource(selectFirst("img")))
         val quality = selectFirst(".mli-quality")?.text()?.trim()
         val isSeries = href.contains("/episode/", ignoreCase = true) ||
@@ -50,7 +51,7 @@ class KitanontonProvider : MainAPI() {
             title.contains("Episode", ignoreCase = true)
 
         return newMovieSearchResponse(
-            title.cleanKitanontonTitle(),
+            title,
             href,
             if (isSeries) TvType.TvSeries else TvType.Movie
         ) {
@@ -61,11 +62,10 @@ class KitanontonProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url).document
-        val title = document.selectFirst("h1, h3[itemprop=name], meta[property=og:title]")
-            ?.let { if (it.tagName() == "meta") it.attr("content") else it.text() }
-            ?.cleanKitanontonTitle()
-            ?.takeIf { it.isNotBlank() }
-            ?: return null
+        val titleElement = document.selectFirst("h1, h3[itemprop=name], meta[property=og:title]")
+        val title = MovieMetadataParser.title(
+            titleElement?.let { if (it.tagName() == "meta") it.attr("content") else it.text() }
+        ) ?: return null
         val poster = document.selectFirst("meta[property=og:image]")
             ?.attr("content")
             ?.takeIf { it.isNotBlank() }
@@ -73,13 +73,15 @@ class KitanontonProvider : MainAPI() {
                 ?.attr("style")
                 ?.backgroundImageUrl()
                 ?.let(::fixUrlNull)
-        val description = document.selectFirst("meta[property=og:description], meta[name=description]")
-            ?.attr("content")
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: document.selectFirst(".sinopsis-indo, [itemprop=reviewBody] p, [itemprop=description] p")
-                ?.text()
-                ?.trim()
+        val description = MovieMetadataParser.synopsis(
+            document,
+            directSelectors = listOf(
+                "[itemprop=reviewBody] p",
+                ".sinopsis-indo p",
+                ".sinopsis-indo",
+                "[itemprop=description] p"
+            )
+        )
         val year = Regex("""\b(19|20)\d{2}\b""").find(title)?.value?.toIntOrNull()
         val tags = document.select("a[href*='/genre/']")
             .map { it.text().trim() }
@@ -171,12 +173,4 @@ class KitanontonProvider : MainAPI() {
             .takeIf { it.isNotBlank() }
     }
 
-    private fun String.cleanKitanontonTitle(): String {
-        return replace(Regex("""\s*[|–-]\s*KITA\s*NONTON.*$""", RegexOption.IGNORE_CASE), "")
-            .replace("Nonton Film", "", ignoreCase = true)
-            .replace("Sub Indo", "", ignoreCase = true)
-            .replace("Subtitle Indonesia", "", ignoreCase = true)
-            .replace(Regex("""\s+"""), " ")
-            .trim(' ', '-', '|')
-    }
 }

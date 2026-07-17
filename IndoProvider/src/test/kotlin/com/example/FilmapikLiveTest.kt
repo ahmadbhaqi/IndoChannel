@@ -18,7 +18,7 @@ class FilmapikLiveTest {
         val subtitles = mutableListOf<SubtitleFile>()
         val loaded = withTimeout(90_000) {
             FilmapikProvider().loadLinks(
-                "https://filmapik.college/nonton-film-summers-last-resort-2026-subtitle-indonesia",
+                "https://filmapik.college/nonton-film-backrooms-2026-subtitle-indonesia",
                 false,
                 subtitles::add,
                 links::add

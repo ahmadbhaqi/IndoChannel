@@ -24,10 +24,12 @@ class PlaySobatResolutionTest {
     )
 
     @Test
-    fun `PlaySobat mirrors put Abyss first and discard the dead Vidhide alias`() {
+    fun `PlaySobat mirrors put Abyss first and discard dead or advertising aliases`() {
         val urls = listOf(
             "https://mdfx9dc8n.net/e/mixdrop",
             "https://dintezuvio.com/embed/dead",
+            "https://omg10.com/redirect/ad",
+            "https://www.omg10.com/redirect/another-ad",
             "https://cloudplay.p2pstream.vip/#torrent",
             "https://dood.la/e/slow",
             "https://hglink.to/e/wish",

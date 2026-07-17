@@ -58,6 +58,10 @@ class AbyssPlayerParserTest {
     @Test
     fun `Abyss decoder accepts URL-safe Base64 on Android compatible path`() {
         assertContentEquals(byteArrayOf(0xfb.toByte(), 0xff.toByte()), decodeBase64Compat("-_8"))
+        val fixture = byteArrayOf(0, 1, 2, 0xfb.toByte(), 0xff.toByte())
+        val encoded = encodeBase64UrlNoPadding(fixture)
+        assertEquals("AAEC-_8", encoded)
+        assertContentEquals(fixture, decodeBase64Compat(encoded))
 
         val media = """
             {"mp4":{"sources":[{"label":"720p","size":10,"partSize":10,"url":"https://video.example","path":"full/movie.mp4"}]}}

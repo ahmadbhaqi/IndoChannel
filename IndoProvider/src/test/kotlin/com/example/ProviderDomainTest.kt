@@ -18,6 +18,9 @@ class ProviderDomainTest {
     fun `new movie providers use requested domains`() {
         val expectedDomains = mapOf(
             "LayarKacaProvider.kt" to """override var mainUrl = "https://tv.nontonfilm.red"""",
+            "NgefilmProvider.kt" to """override var mainUrl = "https://new38.ngefilm.site"""",
+            "PusatfilmProvider.kt" to """override var mainUrl = "https://v4.pusatfilm21info.com"""",
+            "DutamovieProvider.kt" to """override var mainUrl = "https://austincomputerworks.org"""",
             "IndoxxiProvider.kt" to """override var mainUrl = "https://filmbioskop21.lk21.in.net"""",
             "FilmapikProvider.kt" to """override var mainUrl = "https://filmapik.college"""",
             "IndofilmProvider.kt" to """override var mainUrl = "https://indofilm.pics"""",
@@ -105,6 +108,20 @@ class ProviderDomainTest {
     }
 
     @Test
+    fun `rotating movie providers use current catalog routes without shared redirect state`() {
+        val ngefilm = source("NgefilmProvider.kt")
+        val dutamovie = source("DutamovieProvider.kt")
+
+        assertTrue(ngefilm.contains("\"year/2026/page/%d/\" to \"Terbaru\""))
+        assertFalse(ngefilm.contains("private var directUrl"))
+        assertTrue(dutamovie.contains("\"box-office/page/%d/\" to \"Box Office\""))
+        assertTrue(dutamovie.contains("\"serial-tv/page/%d/\" to \"TV Series\""))
+        assertFalse(dutamovie.contains("category/box-office"))
+        assertFalse(dutamovie.contains("category/serial-tv"))
+        assertFalse(dutamovie.contains("private var directUrl"))
+    }
+
+    @Test
     fun `miranime is removed from source and registration`() {
         assertFalse(File(sourceRoot, "MiranimeProvider.kt").exists())
         assertFalse(source("IndoPlugin.kt").contains("MiranimeProvider"))
@@ -163,7 +180,7 @@ class ProviderDomainTest {
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
         assertTrue(
-            Regex("""(?m)^version\s*=\s*3\s*$""").containsMatchIn(moduleBuild.readText()),
+            Regex("""(?m)^version\s*=\s*4\s*$""").containsMatchIn(moduleBuild.readText()),
             "Cloudstream must see these provider fixes as a new plugin release"
         )
     }
@@ -172,11 +189,11 @@ class ProviderDomainTest {
     fun `per candidate provider fetches rethrow cancellation and skip ordinary failures`() {
         val providerFetches = mapOf(
             "NgefilmProvider.kt" to listOf(
-                """app\s*\.\s*get\s*\(\s*fixUrl\s*\(\s*ele\s*\.\s*attr\s*\(\s*"href"\s*\)\s*\)\s*\)""",
+                """app\s*\.\s*get\s*\(""",
                 """app\s*\.\s*post\s*\("""
             ),
             "DutamovieProvider.kt" to listOf(
-                """app\s*\.\s*get\s*\(\s*fixUrl\s*\(\s*ele\s*\.\s*attr\s*\(\s*"href"\s*\)\s*\)\s*\)""",
+                """app\s*\.\s*get\s*\(""",
                 """app\s*\.\s*post\s*\("""
             )
         )

@@ -101,6 +101,69 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `normalizeProviderPageUrl rewrites only provider-owned legacy hosts`() {
+        val current = "https://current.example"
+        val legacy = setOf("old.example", "www.older.example")
+
+        assertEquals(
+            "https://current.example/movie/current?server=2#play",
+            ProviderHtmlParser.normalizeProviderPageUrl(
+                "https://old.example/movie/current?server=2#play",
+                current,
+                legacy
+            )
+        )
+        assertEquals(
+            "https://current.example/movie/relative",
+            ProviderHtmlParser.normalizeProviderPageUrl("/movie/relative", current, legacy)
+        )
+        assertNull(
+            ProviderHtmlParser.normalizeProviderPageUrl(
+                "https://unrelated.example/movie/current",
+                current,
+                legacy
+            )
+        )
+        assertNull(ProviderHtmlParser.normalizeProviderPageUrl("javascript:alert(1)", current, legacy))
+    }
+
+    @Test
+    fun `cached movie URLs survive known provider domain rotations`() {
+        val cases = listOf(
+            Triple("https://comblank.com/movie/", "https://filmbioskop21.lk21.in.net", setOf("comblank.com")),
+            Triple("https://indofilm.fit/movie/", "https://indofilm.pics", setOf("indofilm.fit", "yuhhaber.com")),
+            Triple("https://yuhhaber.com/movie/", "https://indofilm.pics", setOf("indofilm.fit", "yuhhaber.com")),
+            Triple("https://parachutedrone.com/movie/", "https://tv.nontonfilm.red", setOf("parachutedrone.com", "tv10.lk21official.cc")),
+            Triple("https://tv10.lk21official.cc/movie/", "https://tv.nontonfilm.red", setOf("parachutedrone.com", "tv10.lk21official.cc"))
+        )
+
+        cases.forEach { (cachedUrl, currentBase, legacyHosts) ->
+            assertEquals(
+                "$currentBase/movie/",
+                ProviderHtmlParser.normalizeProviderPageUrl(cachedUrl, currentBase, legacyHosts)
+            )
+        }
+    }
+
+    @Test
+    fun `firstTitledLink skips an empty poster bookmark before the visible title`() {
+        val article = Jsoup.parse(
+            """
+            <article>
+              <a rel="bookmark" href="https://provider.example/movie"><img src="poster.jpg"></a>
+              <h2 class="entry-title">
+                <a rel="bookmark" href="https://provider.example/movie">Visible Movie (2026)</a>
+              </h2>
+            </article>
+            """.trimIndent()
+        ).selectFirst("article")
+
+        val link = ProviderHtmlParser.firstTitledLink(article)
+        assertEquals("Visible Movie (2026)", link?.text())
+        assertEquals("https://provider.example/movie", link?.attr("href"))
+    }
+
+    @Test
     fun `mediaSources includes playable og video url`() {
         val document = Jsoup.parse(
             """
@@ -351,6 +414,7 @@ class ProviderHtmlParserTest {
         assertTrue(ProviderHtmlParser.isNonContentPage("<title>Internet Positif</title>"))
         assertTrue(ProviderHtmlParser.isNonContentPage("<title>Just a moment...</title><script src='https://challenges.cloudflare.com/x'></script>"))
         assertTrue(ProviderHtmlParser.isNonContentPage("SQLSTATE[HY000] [2006] MySQL server has gone away"))
+        assertTrue(ProviderHtmlParser.isNonContentPage("<title>File Error</title><h3>Please try again later</h3>"))
         assertTrue(ProviderHtmlParser.isNonContentPage("   "))
         assertFalse(ProviderHtmlParser.isNonContentPage("<iframe src='https://video.example/embed'></iframe>"))
     }

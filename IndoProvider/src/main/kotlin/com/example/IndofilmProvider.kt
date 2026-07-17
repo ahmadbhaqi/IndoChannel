@@ -10,6 +10,7 @@ import org.jsoup.nodes.Element
 
 class IndofilmProvider : MainAPI() {
     override var mainUrl = "https://indofilm.pics"
+    private val legacyHosts = setOf("indofilm.fit", "yuhhaber.com")
     override var name = "Indofilm"
     override val hasMainPage = true
     override var lang = "id"
@@ -26,7 +27,7 @@ class IndofilmProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val items = app.get(request.data + page).document
-            .select("article.item-infinite, div.ml-item")
+            .select("article.item-infinite, article.item, div.ml-item")
             .mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, items)
     }
@@ -34,14 +35,13 @@ class IndofilmProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, Charsets.UTF_8.name())
         return app.get("$mainUrl/?s=$encodedQuery").document
-            .select("article.item-infinite, div.ml-item")
+            .select("article.item-infinite, article.item, div.ml-item")
             .mapNotNull { it.toSearchResult() }
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val anchor = selectFirst("h2.entry-title > a, h2 > a, h3.mli-info h2, a[rel=bookmark]")
-            ?: return null
-        val title = anchor.text().trim().takeIf { it.isNotBlank() } ?: return null
+        val anchor = ProviderHtmlParser.firstTitledLink(this) ?: return null
+        val title = MovieMetadataParser.title(anchor.text()) ?: return null
         val href = providerUrl(anchor.attr("href")) ?: return null
         val poster = fixUrlNull(ProviderHtmlParser.firstImageSource(this))
         val quality = selectFirst("div.gmr-quality-item, span.mli-quality, div.gmr-qual")?.text()?.trim()
@@ -61,16 +61,28 @@ class IndofilmProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val fetch = app.get(url)
+        val requestUrl = providerUrl(url) ?: return null
+        val fetch = app.get(requestUrl)
         val document = fetch.document
-        val title = document.selectFirst("h1.entry-title, h3[itemprop=name]")
-            ?.text()?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        val canonicalUrl = providerUrl(fetch.url) ?: requestUrl
+        val title = MovieMetadataParser.title(
+            document.selectFirst("h1.entry-title, h3[itemprop=name]")?.text()
+        ) ?: return null
         val poster = fixUrlNull(
             ProviderHtmlParser.imageSource(
                 document.selectFirst("img.thumbnail, figure.pull-left > img, img.img-thumbnail")
             )
         )
-        val description = document.selectFirst("div[itemprop=description], div.synopsis")?.text()?.trim()
+        val description = MovieMetadataParser.synopsis(
+            document,
+            directSelectors = listOf(
+                "[itemprop=reviewBody] p",
+                "div.synopsis p",
+                "div.synopsis",
+                "div.sinopsis p",
+                "div.sinopsis"
+            )
+        )
         val year = document.select("a[href*=/year/], span.year")
             .firstNotNullOfOrNull { Regex("(?:19|20)\\d{2}").find(it.text())?.value?.toIntOrNull() }
         val tags = document.select("div.gmr-moviedata a[href*=/category/], div.gmr-moviedata a[href*=/genre/], span.jptag a")
@@ -92,14 +104,14 @@ class IndofilmProvider : MainAPI() {
                     posterUrl = poster
                 }
             }
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+            newTvSeriesLoadResponse(title, canonicalUrl, TvType.TvSeries, episodes) {
                 posterUrl = poster
                 this.year = year
                 plot = description
                 this.tags = tags
             }
         } else {
-            newMovieLoadResponse(title, url, TvType.Movie, url) {
+            newMovieLoadResponse(title, canonicalUrl, TvType.Movie, canonicalUrl) {
                 posterUrl = poster
                 this.year = year
                 plot = description
@@ -114,24 +126,28 @@ class IndofilmProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val fetch = app.get(data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
+        val requestUrl = providerUrl(data) ?: return false
+        val fetch = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
         val document = fetch.document
-        val baseUrl = baseUrl(fetch.url)
+        val canonicalUrl = providerUrl(fetch.url) ?: requestUrl
+        val baseUrl = baseUrl(canonicalUrl)
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
 
         ProviderHtmlParser.mediaSources(document, "iframe, div.gmr-embed-responsive iframe")
-            .forEach { resolvePlayer(it, data, resolver) }
+            .forEach { resolvePlayer(it, canonicalUrl, resolver) }
 
         ProviderHtmlParser.muviproAjaxRequests(document).forEach { request ->
             try {
                 val response = app.post(
                     "$baseUrl/wp-admin/admin-ajax.php",
                     data = request.toPostData(),
-                    referer = data,
+                    referer = canonicalUrl,
                     headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
                     timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                 ).document
-                ProviderHtmlParser.iframeSources(response).forEach { resolvePlayer(it, data, resolver) }
+                ProviderHtmlParser.iframeSources(response).forEach {
+                    resolvePlayer(it, canonicalUrl, resolver)
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
@@ -140,12 +156,13 @@ class IndofilmProvider : MainAPI() {
         }
 
         document.select("ul#player-list > li a[href], ul.muvipro-player-tabs li a[href]").forEach { link ->
-            val playerUrl = ProviderHtmlParser.absoluteUrl(link.attr("href"), data) ?: return@forEach
+            val playerUrl = ProviderHtmlParser.absoluteUrl(link.attr("href"), canonicalUrl)
+                ?: return@forEach
             if (!playerUrl.startsWith("http")) return@forEach
             try {
                 val playerDocument = app.get(
                     playerUrl,
-                    referer = data,
+                    referer = canonicalUrl,
                     timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                 ).document
                 ProviderHtmlParser.mediaSources(playerDocument).forEach {
@@ -178,7 +195,8 @@ class IndofilmProvider : MainAPI() {
         }
     }
 
-    private fun providerUrl(raw: String): String? = ProviderHtmlParser.absoluteUrl(raw, mainUrl)
+    private fun providerUrl(raw: String?): String? =
+        ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, legacyHosts)
 
     private fun baseUrl(url: String): String = URI(url).let { "${it.scheme}://${it.host}" }
 }

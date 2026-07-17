@@ -12,6 +12,7 @@ import org.jsoup.nodes.Element
 
 class LayarKacaProvider : MainAPI() {
     override var mainUrl = "https://tv.nontonfilm.red"
+    private val legacyHosts = setOf("parachutedrone.com", "tv10.lk21official.cc")
     override var name = "LayarKaca"
     override val hasMainPage = true
     override var lang = "id"
@@ -28,7 +29,7 @@ class LayarKacaProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val items = app.get(request.data + page).document
-            .select("article.item-infinite")
+            .select("article.item-infinite, article.item, div.ml-item")
             .mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, items)
     }
@@ -36,13 +37,13 @@ class LayarKacaProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, Charsets.UTF_8.name())
         return app.get("$mainUrl/?s=$encodedQuery").document
-            .select("article.item-infinite")
+            .select("article.item-infinite, article.item, div.ml-item")
             .mapNotNull { it.toSearchResult() }
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val anchor = selectFirst("h2.entry-title > a, h2 > a, a[rel=bookmark]") ?: return null
-        val title = anchor.text().trim().takeIf { it.isNotBlank() } ?: return null
+        val anchor = ProviderHtmlParser.firstTitledLink(this) ?: return null
+        val title = MovieMetadataParser.title(anchor.text()) ?: return null
         val href = providerUrl(anchor.attr("href")) ?: return null
         val poster = fixUrlNull(ProviderHtmlParser.firstImageSource(this))
         val quality = selectFirst("div.gmr-quality-item, div.gmr-qual")?.text()?.trim()
@@ -62,16 +63,19 @@ class LayarKacaProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val fetch = app.get(url)
+        val requestUrl = providerUrl(url) ?: return null
+        val fetch = app.get(requestUrl)
         val document = fetch.document
-        val title = document.selectFirst("h1.entry-title, h3[itemprop=name]")
-            ?.text()?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        val canonicalUrl = providerUrl(fetch.url) ?: requestUrl
+        val title = MovieMetadataParser.title(
+            document.selectFirst("h1.entry-title, h3[itemprop=name]")?.text()
+        ) ?: return null
         val poster = fixUrlNull(
             ProviderHtmlParser.imageSource(
                 document.selectFirst("img.thumbnail, figure.pull-left > img, img.img-thumbnail")
             )
         )
-        val description = document.selectFirst("div[itemprop=description], div.synopsis")?.text()?.trim()
+        val description = MovieMetadataParser.synopsis(document)
         val year = document.select("a[href*=/year/], span.year")
             .firstNotNullOfOrNull { Regex("(?:19|20)\\d{2}").find(it.text())?.value?.toIntOrNull() }
         val tags = document.select("div.gmr-moviedata a[href*=/genre/], span.jptag a")
@@ -79,7 +83,13 @@ class LayarKacaProvider : MainAPI() {
             .filter { it.isNotBlank() }
         val actors = document.select("div.gmr-moviedata span[itemprop=actors] a").map { it.text().trim() }
         val trailer = document.selectFirst("a.gmr-trailer-popup")?.attr("href")
-        val episodeElements = document.select("div.vid-episodes a[href], div.gmr-listseries a[href], div.episode-list a[href]")
+        val episodeElements = document
+            .select("div.vid-episodes a[href], div.gmr-listseries a[href], div.episode-list a[href]")
+            .filter { episodeLink ->
+                val href = providerUrl(episodeLink.attr("href")) ?: return@filter false
+                val label = episodeLink.attr("title").ifBlank { episodeLink.text() }
+                LayarKacaPlayerParser.isEpisodeLink(href, label, canonicalUrl)
+            }
         val isSeries = fetch.url.contains("/tv/", ignoreCase = true) || episodeElements.isNotEmpty()
 
         return if (isSeries) {
@@ -95,7 +105,7 @@ class LayarKacaProvider : MainAPI() {
                     posterUrl = poster
                 }
             }
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+            newTvSeriesLoadResponse(title, canonicalUrl, TvType.TvSeries, episodes) {
                 posterUrl = poster
                 this.year = year
                 plot = description
@@ -104,7 +114,7 @@ class LayarKacaProvider : MainAPI() {
                 addTrailer(trailer)
             }
         } else {
-            newMovieLoadResponse(title, url, TvType.Movie, url) {
+            newMovieLoadResponse(title, canonicalUrl, TvType.Movie, canonicalUrl) {
                 posterUrl = poster
                 this.year = year
                 plot = description
@@ -121,25 +131,42 @@ class LayarKacaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS).document
+        val requestUrl = providerUrl(data) ?: return false
+        val fetch = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
+        val document = fetch.document
+        val canonicalUrl = providerUrl(fetch.url) ?: requestUrl
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        val serverPages = LayarKacaPlayerParser.serverPageUrls(document, canonicalUrl)
 
-        ProviderHtmlParser.mediaSources(document, "iframe, div.gmr-embed-responsive iframe")
-            .forEach { resolvePlayer(it, data, resolver) }
-
-        LayarKacaPlayerParser.serverPageUrls(document, data).forEach { playerUrl ->
+        for (playerUrl in serverPages.asReversed()) {
+            if (resolver.loaded) break
             try {
                 val playerDocument = app.get(
                     playerUrl,
-                    referer = data,
+                    referer = canonicalUrl,
                     timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                 ).document
-                ProviderHtmlParser.mediaSources(playerDocument, "iframe, div.gmr-embed-responsive iframe")
-                    .forEach { resolvePlayer(it, playerUrl, resolver) }
+                for (mediaUrl in ProviderHtmlParser.mediaSources(
+                    playerDocument,
+                    "iframe, div.gmr-embed-responsive iframe"
+                )) {
+                    if (resolver.loaded) break
+                    resolvePlayer(mediaUrl, playerUrl, resolver)
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
                 // One dead server must not hide the remaining mirrors.
+            }
+        }
+
+        if (!resolver.loaded) {
+            for (mediaUrl in ProviderHtmlParser.mediaSources(
+                document,
+                "iframe, div.gmr-embed-responsive iframe"
+            )) {
+                if (resolver.loaded) break
+                resolvePlayer(mediaUrl, canonicalUrl, resolver)
             }
         }
         return resolver.loaded
@@ -163,10 +190,16 @@ class LayarKacaProvider : MainAPI() {
         }
     }
 
-    private fun providerUrl(raw: String): String? = ProviderHtmlParser.absoluteUrl(raw, mainUrl)
+    private fun providerUrl(raw: String?): String? =
+        ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, legacyHosts)
 }
 
 internal object LayarKacaPlayerParser {
+    fun isEpisodeLink(url: String, label: String, detailUrl: String): Boolean {
+        if (label.contains("View All Episodes", ignoreCase = true)) return false
+        return normalizePageUrl(url) != normalizePageUrl(detailUrl)
+    }
+
     fun serverPageUrls(document: Document, detailUrl: String): List<String> {
         return document.select(
             "ul.gmr-player-nav a[href], ul.muvipro-player-tabs a[href], ul#player-list a[href]"
@@ -202,5 +235,9 @@ internal object LayarKacaPlayerParser {
         return (inlineUrls + sourceUrls)
             .mapNotNull { ProviderHtmlParser.absoluteUrl(it, playerUrl) }
             .distinct()
+    }
+
+    private fun normalizePageUrl(url: String): String {
+        return url.substringBefore('#').substringBefore('?').trimEnd('/')
     }
 }
