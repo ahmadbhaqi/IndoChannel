@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
 import kotlin.coroutines.cancellation.CancellationException
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -104,20 +105,18 @@ class DutamovieProvider : MainAPI() {
         val baseUrl = getBaseUrl(canonicalUrl)
         val id = document.selectFirst("div#muvipro_player_content_id")?.attr("data-id")
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
-        for (server in DutamoviePlayerParser.detailMediaUrls(document, canonicalUrl)) {
+        for (server in DutamoviePlayerParser.orderMediaUrls(
+            DutamoviePlayerParser.detailMediaUrls(document, canonicalUrl)
+        )) {
             if (!resolver.canContinue || resolver.resolve(server, canonicalUrl)) break
-        }
-        if (!resolver.loaded) {
-            for (download in ProviderHtmlParser.downloadCandidateUrls(document, canonicalUrl)) {
-                if (!resolver.canContinue || resolver.resolve(download, canonicalUrl)) break
-            }
         }
         if (id.isNullOrEmpty()) {
             val playerPages = document.select("ul.muvipro-player-tabs li a")
                 .mapNotNull { normalizePageUrl(it.attr("href")) }
                 .let(DutamoviePlayerParser::orderPlayerPages)
+            val players = mutableListOf<Pair<String, String>>()
             for (playerPage in playerPages) {
-                if (resolver.loaded || !resolver.canContinue) break
+                if (!resolver.canContinue) break
                 val player = try {
                     val response = app.get(
                         playerPage,
@@ -136,11 +135,16 @@ class DutamovieProvider : MainAPI() {
                     null
                 }
                     ?: continue
+                players += player
+            }
+            for (player in players.sortedBy { DutamoviePlayerParser.mediaPriority(it.first) }) {
+                if (resolver.loaded || !resolver.canContinue) break
                 resolver.resolve(player.first, player.second)
             }
         } else {
+            val players = mutableListOf<String>()
             for (ele in document.select("div.tab-content-ajax")) {
-                if (resolver.loaded || !resolver.canContinue) break
+                if (!resolver.canContinue) break
                 val server = try {
                     app.post(
                         "$baseUrl/wp-admin/admin-ajax.php",
@@ -156,7 +160,16 @@ class DutamovieProvider : MainAPI() {
                     null
                 }
                     ?: continue
+                players += server
+            }
+            for (server in DutamoviePlayerParser.orderMediaUrls(players)) {
+                if (resolver.loaded || !resolver.canContinue) break
                 resolver.resolve(server, canonicalUrl)
+            }
+        }
+        if (!resolver.loaded) {
+            for (download in ProviderHtmlParser.downloadCandidateUrls(document, canonicalUrl)) {
+                if (!resolver.canContinue || resolver.resolve(download, canonicalUrl)) break
             }
         }
         return resolver.loaded
@@ -181,21 +194,98 @@ internal object DutamoviePlayerParser {
     }
 
     fun orderPlayerPages(urls: List<String>): List<String> {
-        return urls.distinct().withIndex()
-            .sortedWith(compareBy<IndexedValue<String>> { priority(it.value) }.thenBy { it.index })
-            .map { it.value }
+        // Player numbers are only tab identifiers. Current pages assign the
+        // same host to different numbers per title, so preserve document order
+        // until the iframe host is known.
+        return urls.distinct()
     }
 
-    private fun priority(url: String): Int {
-        val player = runCatching { URI(url).rawQuery.orEmpty() }.getOrDefault("")
-            .let { Regex("(?:^|&)player=(\\d+)(?:&|$)").find(it) }
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toIntOrNull()
-        return when (player) {
-            2 -> 0 // Abyss currently exposes a complete seekable MP4.
-            7 -> 1 // LuluStream is the healthy HLS fallback.
-            else -> 2
+    fun orderMediaUrls(urls: List<String>): List<String> =
+        urls.distinct().withIndex()
+            .sortedWith(compareBy<IndexedValue<String>> { mediaPriority(it.value) }.thenBy { it.index })
+            .map { it.value }
+
+    fun mediaPriority(url: String): Int {
+        val host = runCatching { URI(url).host.orEmpty().lowercase() }.getOrDefault("")
+        return when {
+            host == "morencius.com" || host.endsWith(".morencius.com") -> 0
+            host == "embedpyrox.xyz" || host.endsWith(".embedpyrox.xyz") -> 1
+            host.contains("voe") || host.contains("lulu") -> 2
+            host.contains("hgcloud") || host.contains("streamwish") -> 3
+            host == "abyssplayer.com" || host.endsWith(".abyssplayer.com") ||
+                host == "abyss.to" || host.endsWith(".abyss.to") -> 9
+            host.contains("p2p") || host.contains("4meplayer") -> 7
+            else -> 4
         }
+    }
+}
+
+internal object MorenciusPlayerParser {
+    private data class Candidate(
+        val label: String,
+        val url: String,
+        val index: Int
+    )
+
+    fun supports(host: String): Boolean =
+        host == "morencius.com" || host.endsWith(".morencius.com")
+
+    fun mediaUrls(html: String, playerUrl: String): List<String> {
+        val scripts = mutableListOf(html)
+        Jsoup.parse(html, playerUrl).select("script").forEach { script ->
+            val raw = script.data()
+            if (raw.isBlank()) return@forEach
+            scripts += raw
+            if (raw.contains("eval(function(p,a,c,k,e")) {
+                runCatching { getAndUnpack(raw) }
+                    .getOrNull()
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let(scripts::add)
+            }
+        }
+
+        val candidates = mutableListOf<Candidate>()
+        scripts.forEach { script ->
+            val normalized = script
+                .replace("\\/", "/")
+                .replace("\\u0026", "&")
+                .replace("&amp;", "&")
+            Regex("""(?i)["']?(hls\d+)["']?\s*[:=]\s*["']([^"']+)["']""")
+                .findAll(normalized)
+                .forEach { match ->
+                    candidates += Candidate(
+                        label = match.groupValues[1],
+                        url = match.groupValues[2],
+                        index = match.range.first
+                    )
+                }
+            Regex("""(?i)["']?file["']?\s*:\s*["']([^"']+)["']""")
+                .findAll(normalized)
+                .forEach { match ->
+                    candidates += Candidate(
+                        label = "file",
+                        url = match.groupValues[1],
+                        index = match.range.first
+                    )
+                }
+        }
+
+        return candidates
+            .filter { candidate ->
+                candidate.url.contains(".m3u8", ignoreCase = true) ||
+                    candidate.url.contains("master.txt", ignoreCase = true)
+            }
+            .sortedWith(
+                compareBy<Candidate> { candidate ->
+                    when (candidate.label.lowercase()) {
+                        "hls4" -> 0
+                        "hls3" -> 1
+                        "hls2" -> 2
+                        else -> 3
+                    }
+                }.thenBy { it.index }
+            )
+            .mapNotNull { ProviderHtmlParser.absoluteUrl(it.url, playerUrl) }
+            .distinct()
     }
 }

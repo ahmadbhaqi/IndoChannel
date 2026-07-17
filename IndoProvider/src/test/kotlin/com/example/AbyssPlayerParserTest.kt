@@ -14,7 +14,7 @@ class AbyssPlayerParserTest {
     private val mapper = jacksonObjectMapper()
 
     @Test
-    fun `Abyss decoder emits only complete direct MP4 sources`() {
+    fun `Abyss decoder emits every source with a concrete URL and path`() {
         val media = """
             {
               "mp4": {
@@ -49,6 +49,11 @@ class AbyssPlayerParserTest {
                     label = "480p",
                     url = "https://video.example/full/movie.mp4",
                     quality = 480
+                ),
+                AbyssMediaSource(
+                    label = "1080p",
+                    url = "https://video.example/partial/movie.mp4",
+                    quality = 1080
                 )
             ),
             AbyssPlayerParser.sources(abyssPage(media))
@@ -70,6 +75,28 @@ class AbyssPlayerParserTest {
             listOf(AbyssMediaSource("720p", "https://video.example/full/movie.mp4", 720)),
             AbyssPlayerParser.sources(abyssPage(media, urlSafe = true))
         )
+    }
+
+    @Test
+    fun `Abyss decoder rejects current encrypted chunk backing storage`() {
+        val media = """
+            {
+              "mp4": {
+                "sources": [{
+                  "label": "720p",
+                  "res_id": 4,
+                  "size": 406038866,
+                  "partSize": 0,
+                  "sub": "current-subdomain",
+                  "url": "https://storage.example",
+                  "path": "3/f/b/encrypted.4"
+                }],
+                "domains": ["current-subdomain.storage.example"]
+              }
+            }
+        """.trimIndent()
+
+        assertEquals(emptyList(), AbyssPlayerParser.sources(abyssPage(media)))
     }
 
     private fun abyssPage(media: String, urlSafe: Boolean = false): String {

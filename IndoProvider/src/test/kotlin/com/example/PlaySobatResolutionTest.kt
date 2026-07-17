@@ -24,7 +24,7 @@ class PlaySobatResolutionTest {
     )
 
     @Test
-    fun `PlaySobat mirrors put Abyss first and discard dead or advertising aliases`() {
+    fun `PlaySobat mirrors defer Abyss chunks and discard dead advertising aliases`() {
         val urls = listOf(
             "https://mdfx9dc8n.net/e/mixdrop",
             "https://dintezuvio.com/embed/dead",
@@ -38,11 +38,11 @@ class PlaySobatResolutionTest {
 
         assertEquals(
             listOf(
-                "https://abyssplayer.com/current",
                 "https://hglink.to/e/wish",
                 "https://mdfx9dc8n.net/e/mixdrop",
                 "https://dood.la/e/slow",
-                "https://cloudplay.p2pstream.vip/#torrent"
+                "https://cloudplay.p2pstream.vip/#torrent",
+                "https://abyssplayer.com/current"
             ),
             orderPlaySobatMirrorUrls(urls)
         )

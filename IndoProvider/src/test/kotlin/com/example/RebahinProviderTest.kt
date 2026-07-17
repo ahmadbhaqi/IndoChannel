@@ -8,11 +8,11 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class RebahinProviderTest {
-    private val mainUrl = "https://154.203.167.63"
+    private val mainUrl = "https://rebahinxxi3.lol"
 
     @Test
     fun `cached Rebahin URLs rehome only confirmed historical hosts`() {
-        listOf("178.62.115.110", "156.244.7.27").forEach { historicalHost ->
+        listOf("154.203.167.63", "178.62.115.110", "156.244.7.27").forEach { historicalHost ->
             assertEquals(
                 "$mainUrl/movie/example/?server=2#watch",
                 RebahinPageParser.normalizePageUrl(
@@ -123,4 +123,108 @@ class RebahinProviderTest {
             RebahinPageParser.mediaSources(document)
         )
     }
+
+    @Test
+    fun `current Rebahin cards and detail poster shape are parsed`() {
+        val provider = RebahinProvider()
+        val card = Jsoup.parse(
+            """
+            <div class="ml-item">
+              <a href="$mainUrl/nonton-aku-sebelum-aku-2026-sub-indo/"
+                 title="Aku Sebelum Aku (2026)">
+                <img data-original="https://image.example/aku.jpg">
+                <span class="mli-info"><h2>Aku Sebelum Aku (2026)</h2></span>
+              </a>
+            </div>
+            """.trimIndent(),
+            mainUrl
+        ).selectFirst(".ml-item")!!
+        val result = provider.run { card.toSearchResult() }
+        assertEquals("Aku Sebelum Aku (2026)", result?.name)
+        assertEquals(
+            "$mainUrl/nonton-aku-sebelum-aku-2026-sub-indo/",
+            result?.url
+        )
+
+        val detail = Jsoup.parse(
+            """
+            <html><head>
+              <meta property="og:image" content="https://image.example/current.jpg">
+            </head><body>
+              <a class="thumb mvi-cover" href="/nonton-aku/play/"></a>
+            </body></html>
+            """.trimIndent(),
+            "$mainUrl/nonton-aku/"
+        )
+        assertEquals(
+            "https://image.example/current.jpg",
+            RebahinPageParser.posterUrl(detail)
+        )
+        assertEquals(
+            "$mainUrl/nonton-aku/play/",
+            RebahinPageParser.playPageUrl(detail, detail.location())
+        )
+        assertEquals(
+            "$mainUrl/wp-content/uploads/2020/01/jashin.jpg",
+            RebahinPageParser.normalizePosterUrl(
+                "http://198.54.124.245/wp-content/uploads/2020/01/jashin.jpg",
+                mainUrl
+            )
+        )
+        assertNull(
+            RebahinPageParser.normalizePosterUrl(
+                "https://rebahin.shop/wp-content/uploads/fb-capture.png",
+                mainUrl
+            )
+        )
+    }
+
+    @Test
+    fun `current Rebahin player decodes Base64 mirrors and defers Abyss chunks`() {
+        val ipMirror = "https://178.211.139.171/embed/current"
+        val abyssMirror = "https://abyssplayer.com/current"
+        val document = Jsoup.parse(
+            """
+            <div class="server" data-iframe="${encoded(ipMirror)}"></div>
+            <div class="server" data-iframe="${encoded(abyssMirror)}"></div>
+            """.trimIndent()
+        )
+
+        assertEquals(
+            listOf(ipMirror, abyssMirror),
+            RebahinPageParser.mediaSources(document)
+        )
+    }
+
+    @Test
+    fun `current Rebahin series episode payload round trips safely`() {
+        val detail = "$mainUrl/series/example/"
+        val watch = "$mainUrl/series/example/watch/"
+        val data = RebahinPageParser.encodeEpisodeData(detail, watch, 7)
+
+        assertEquals(
+            RebahinEpisodeRequest(detail, watch, 7),
+            RebahinPageParser.decodeEpisodeData(data)
+        )
+        val watchPage = Jsoup.parse(
+            """
+            <div id="list-eps">
+              <a class="btn-eps" data-iframe="${encoded("https://abyssplayer.com/ep7")}">EP 7</a>
+              <a class="btn-eps" data-iframe="${encoded("https://178.211.139.171/ep7")}">EP 7</a>
+              <a class="btn-eps" data-iframe="${encoded("https://abyssplayer.com/ep8")}">EP 8</a>
+            </div>
+            """.trimIndent()
+        )
+        assertEquals(listOf(7, 8), RebahinPageParser.watchEpisodes(watchPage))
+        assertEquals(
+            listOf(
+                "https://178.211.139.171/ep7",
+                "https://abyssplayer.com/ep7"
+            ),
+            RebahinPageParser.episodePlayerUrls(watchPage, 7)
+        )
+    }
+
+    private fun encoded(value: String): String =
+        java.util.Base64.getEncoder().encodeToString(value.toByteArray())
 }

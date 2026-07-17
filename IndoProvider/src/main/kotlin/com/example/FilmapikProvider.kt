@@ -203,7 +203,10 @@ class FilmapikProvider : MainAPI() {
         directUrls: MutableSet<String>
     ) {
         val playerUrl = ProviderHtmlParser.absoluteUrl(raw, referer) ?: return
-        if (resolver.resolve(playerUrl, referer)) return
+        if (!FilmapikPlayerParser.isEfekPlayerUrl(playerUrl)) {
+            resolver.resolve(playerUrl, referer)
+            return
+        }
 
         try {
             val html = resolver.withinBudget {
@@ -213,23 +216,28 @@ class FilmapikProvider : MainAPI() {
                     timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                 ).text
             } ?: return
-            FilmapikPlayerParser.sources(html, playerUrl).forEach { source ->
-                if (directMediaType(source.url) != null) {
-                    resolver.resolve(source.url, playerUrl)
-                } else if (directUrls.add(source.url)) {
-                    resolver.emitResolved(
-                        newExtractorLink(name, "$name ${source.label}", source.url, ExtractorLinkType.VIDEO) {
-                            this.referer = playerUrl
-                            quality = source.quality
-                            headers = mapOf("Referer" to playerUrl)
-                        }
-                    )
+            for (source in FilmapikPlayerParser.sources(html, playerUrl)) {
+                for (mediaUrl in FilmapikPlayerParser.mediaUrlCandidates(source.url)) {
+                    if (resolver.loaded || !resolver.canContinue) break
+                    if (!directUrls.add(mediaUrl)) continue
+                    val attempts = if (FilmapikPlayerParser.isEfekStorageUrl(mediaUrl)) 2 else 1
+                    repeat(attempts) {
+                        if (resolver.loaded || !resolver.canContinue) return@repeat
+                        resolver.emitResolved(
+                            newExtractorLink(name, "$name ${source.label}", mediaUrl, ExtractorLinkType.VIDEO) {
+                                this.referer = playerUrl
+                                quality = source.quality
+                                headers = mapOf("Referer" to playerUrl)
+                            }
+                        )
+                        if (resolver.loaded) return
+                    }
                 }
             }
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
-            // A dead mirror must not suppress the working Efek server.
+            // A dead Efek player must not suppress a later server button.
         }
     }
 
@@ -261,6 +269,7 @@ internal data class FilmapikMediaSource(
 
 internal object FilmapikPlayerParser {
     private val legacyHosts = setOf("filmapik.to", "filmapik.fitness")
+    private val efekHostRegex = Regex("""(?i)^([vs])(\d+)\.efek\.stream$""")
 
     fun normalizePageUrl(raw: String?, currentBaseUrl: String): String? {
         return ProviderHtmlParser.normalizeProviderPageUrl(raw, currentBaseUrl, legacyHosts)
@@ -327,5 +336,47 @@ internal object FilmapikPlayerParser {
                 )
             }.toList()
         }.distinctBy { it.url }
+    }
+
+    fun isEfekPlayerUrl(url: String): Boolean {
+        val host = runCatching { URI(url).host.orEmpty() }.getOrDefault("")
+        return efekHostRegex.matchEntire(host)?.groupValues?.getOrNull(1)
+            ?.equals("v", ignoreCase = true) == true
+    }
+
+    fun isEfekStorageUrl(url: String): Boolean {
+        val host = runCatching { URI(url).host.orEmpty() }.getOrDefault("")
+        return efekHostRegex.matchEntire(host)?.groupValues?.getOrNull(1)
+            ?.equals("s", ignoreCase = true) == true
+    }
+
+    /**
+     * Efek separates its player (`vN`) and storage (`sN`) hosts. The current
+     * player sometimes exposes its v-host in the packed file URL, while the
+     * same-numbered s-host serves the ranged MP4 bytes.
+     */
+    fun mediaUrlCandidates(url: String): List<String> {
+        if (!isSafeRemoteHttpUrl(url)) return emptyList()
+        val uri = runCatching { URI(url) }.getOrNull() ?: return emptyList()
+        val match = efekHostRegex.matchEntire(uri.host.orEmpty()) ?: return listOf(url)
+        val shard = match.groupValues[2].toIntOrNull()?.takeIf { it in 1..9 }
+            ?: return listOf(url)
+        val storageUrl = replaceRawAuthorityHost(uri, "s$shard.efek.stream")
+        return listOfNotNull(storageUrl, url).distinct()
+    }
+
+    private fun replaceRawAuthorityHost(uri: URI, host: String): String? {
+        return runCatching {
+            buildString {
+                append(uri.scheme)
+                append("://")
+                uri.rawUserInfo?.let { append(it).append('@') }
+                append(host)
+                if (uri.port >= 0) append(':').append(uri.port)
+                append(uri.rawPath.orEmpty().ifBlank { "/" })
+                uri.rawQuery?.let { append('?').append(it) }
+                uri.rawFragment?.let { append('#').append(it) }
+            }.takeIf(::isSafeRemoteHttpUrl)
+        }.getOrNull()
     }
 }

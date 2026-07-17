@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.fixUrl
 import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkPlayList
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.httpsify
@@ -23,12 +24,14 @@ import okhttp3.ResponseBody
 import org.jsoup.Jsoup
 
 internal typealias PlayerPageFetcher = suspend (url: String, referer: String?) -> String
+internal typealias InlineSourceParser = (html: String, playerUrl: String) -> List<String>
 internal typealias CloudstreamExtractorLoader = suspend (
     url: String,
     referer: String?,
     subtitleCallback: (SubtitleFile) -> Unit,
     callback: (ExtractorLink) -> Unit
 ) -> Boolean
+internal typealias MediaLinkProbe = suspend (ExtractorLink) -> ExtractorLink?
 internal typealias DirectLinkFactory = suspend (
     source: String,
     name: String,
@@ -41,12 +44,14 @@ internal typealias DirectLinkFactory = suspend (
 internal typealias PlaySobatUrlParser = (html: String) -> List<String>
 
 private const val PLAY_SOBAT_MIRROR_TIMEOUT_MS = 12_000L
-private const val CANDIDATE_TIMEOUT_MS = 25_000L
+private const val CANDIDATE_TIMEOUT_MS = 40_000L
 internal const val PROVIDER_HTTP_TIMEOUT_SECONDS = 25L
 private const val SESSION_TIMEOUT_MS = 90_000L
 private const val MAX_RESOLUTION_CANDIDATES = 48
 private const val MAX_BYSE_API_RESPONSE_BYTES = 2_000_000
 private const val MAX_JUSTPLAY_API_RESPONSE_BYTES = 2_000_000
+private const val MAX_MEDIA_PROBE_BYTES = 65_536
+private const val MEDIA_PROBE_TIMEOUT_SECONDS = 10L
 private const val JSON_MEDIA_TYPE = "application/json;charset=UTF-8"
 
 private data class CandidateKey(
@@ -71,12 +76,14 @@ internal class LinkResolutionSession(
     private val byseApiFetcher: PlayerPageFetcher = ::fetchBoundedByseApi,
     private val justPlayApiFetcher: JustPlayApiFetcher = ::fetchBoundedJustPlayApi,
     private val extractorLoader: CloudstreamExtractorLoader = ::loadExtractorWithResult,
+    private val inlineSourceParser: InlineSourceParser? = null,
     private val maxDepth: Int = 2,
     private val maxCandidates: Int = MAX_RESOLUTION_CANDIDATES,
     private val candidateTimeoutMs: Long = CANDIDATE_TIMEOUT_MS,
     sessionTimeoutMs: Long = SESSION_TIMEOUT_MS,
     private val playSobatUrlParser: PlaySobatUrlParser = InlineDataParser::playSobatUrls,
     private val playSobatMirrorTimeoutMs: Long = PLAY_SOBAT_MIRROR_TIMEOUT_MS,
+    private val mediaLinkProbe: MediaLinkProbe = ::probeExtractorLink,
     private val directLinkFactory: DirectLinkFactory = { source, name, url, referer, quality, type, headers ->
         newExtractorLink(source, name, url, type) {
             this.referer = referer
@@ -122,8 +129,9 @@ internal class LinkResolutionSession(
         try {
             var cachedHtml: String? = null
             directMediaType(url)?.let { type ->
+                val beforeDirect = emittedLinks.size
                 emitDirect(url, referer, type)
-                return
+                if (emittedLinks.size > beforeDirect) return
             }
 
             val host = URI(url).host.orEmpty().lowercase()
@@ -155,7 +163,7 @@ internal class LinkResolutionSession(
                         val type = if (source.mimeType.contains("mpegurl", ignoreCase = true) ||
                             source.url.contains(".m3u8", ignoreCase = true)
                         ) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        emit(
+                        emitVerified(
                             directLinkFactory(
                                 api.name,
                                 "${api.name} ${source.label}",
@@ -215,7 +223,7 @@ internal class LinkResolutionSession(
                 if (ProviderHtmlParser.isNonContentPage(html)) return
                 val beforeAdapter = emittedLinks.size
                 AbyssPlayerParser.sources(html).forEach { source ->
-                    emit(
+                    emitVerified(
                         directLinkFactory(
                             api.name,
                             "${api.name} ${source.label}",
@@ -235,8 +243,30 @@ internal class LinkResolutionSession(
                 return
             }
 
-            if (host.matches(Regex("""\d{1,3}(?:\.\d{1,3}){3}"""))) {
+            if (MorenciusPlayerParser.supports(host)) {
                 val html = pageFetcher(url, referer)
+                cachedHtml = html
+                if (ProviderHtmlParser.isNonContentPage(html)) return
+                val beforeAdapter = emittedLinks.size
+                for (mediaUrl in MorenciusPlayerParser.mediaUrls(html, url)) {
+                    if (emittedLinks.size > beforeAdapter) break
+                    emitDirect(mediaUrl, url, ExtractorLinkType.M3U8)
+                }
+                if (emittedLinks.size > beforeAdapter) return
+            }
+
+            if (host.matches(Regex("""\d{1,3}(?:\.\d{1,3}){3}"""))) {
+                var playerPageUrl = url
+                val html = try {
+                    pageFetcher(url, referer)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (httpsError: Exception) {
+                    val httpFallback = publicIpHttpFallback(url)
+                        ?: throw httpsError
+                    playerPageUrl = httpFallback
+                    pageFetcher(httpFallback, referer)
+                }
                 cachedHtml = html
                 if (ProviderHtmlParser.isNonContentPage(html)) return
                 val beforeAdapter = emittedLinks.size
@@ -245,15 +275,15 @@ internal class LinkResolutionSession(
                         subtitleCallback(newSubtitleFile(track.label, track.url))
                     }
                     playback.media.forEach { media ->
-                        emit(
+                        emitVerified(
                             directLinkFactory(
                                 api.name,
                                 "${api.name} JuicyCodes ${media.label}",
                                 media.url,
-                                url,
+                                playerPageUrl,
                                 media.quality,
                                 if (media.isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                                linkedMapOf("Referer" to url).apply {
+                                linkedMapOf("Referer" to playerPageUrl).apply {
                                     media.userAgent?.let { put("User-Agent", it) }
                                 }
                             )
@@ -273,14 +303,30 @@ internal class LinkResolutionSession(
                 } catch (_: Exception) {
                     null
                 }
-                playback?.let { emitBysePlayback(it, url) }
+                playback?.let {
+                    emitBysePlayback(
+                        it,
+                        url,
+                        mapOf("User-Agent" to JUSTPLAY_USER_AGENT)
+                    )
+                }
                 if (emittedLinks.size > beforeAdapter) return
             }
 
-            if (host == "bysebuho.com" || host.endsWith(".bysebuho.com")) {
+            val byseApiUrl = BysePlayerParser.apiUrl(url)
+            val looksLikeByseHost = host == "bysebuho.com" ||
+                host.endsWith(".bysebuho.com") ||
+                host.startsWith("byse")
+            val looksLikeBysePage = if (byseApiUrl != null && !looksLikeByseHost) {
+                val html = cachedHtml ?: pageFetcher(url, referer).also { cachedHtml = it }
+                !ProviderHtmlParser.isNonContentPage(html) &&
+                    BysePlayerParser.isFrontendPage(html)
+            } else {
+                false
+            }
+            if (byseApiUrl != null && (looksLikeByseHost || looksLikeBysePage)) {
                 val beforeAdapter = emittedLinks.size
-                val apiUrl = BysePlayerParser.apiUrl(url)
-                val apiJson = apiUrl?.let { endpoint ->
+                val apiJson = byseApiUrl.let { endpoint ->
                     try {
                         byseApiFetcher(endpoint, url)
                     } catch (error: CancellationException) {
@@ -321,7 +367,23 @@ internal class LinkResolutionSession(
             }
 
             val beforeExtractor = emittedLinks.size
-            extractorLoader(url, referer, subtitleCallback, ::emit)
+            val extractedLinks = mutableListOf<ExtractorLink>()
+            try {
+                extractorLoader(url, referer, subtitleCallback, extractedLinks::add)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: LinkageError) {
+                // An optional extractor dependency missing at runtime must not
+                // prevent the provider from trying a healthy sibling mirror.
+            } catch (_: Exception) {
+                // Some extractors emit one or more callbacks before a later
+                // request fails. Keep and verify those callbacks, then continue
+                // through the cached HTML fallback instead of discarding them.
+            }
+            for (link in extractedLinks) {
+                if (!canContinue) break
+                emitVerified(link)
+            }
             if (emittedLinks.size > beforeExtractor || genericDepth >= maxDepth) return
 
             val html = cachedHtml ?: pageFetcher(url, referer)
@@ -332,7 +394,7 @@ internal class LinkResolutionSession(
                     subtitleCallback(newSubtitleFile(track.label, track.url))
                 }
                 playback.media.forEach { media ->
-                    emit(
+                    emitVerified(
                         directLinkFactory(
                             api.name,
                             "${api.name} JuicyCodes ${media.label}",
@@ -349,6 +411,15 @@ internal class LinkResolutionSession(
             }
             if (emittedLinks.size > beforeJuicyCodes) return
             if (JuicyCodesPlayerParser.recognizes(html)) return
+            inlineSourceParser
+                ?.let { parser -> runCatching { parser(html, url) }.getOrDefault(emptyList()) }
+                .orEmpty()
+                .forEach { nested ->
+                    ProviderHtmlParser.absoluteUrl(nested, url)?.let {
+                        resolveCandidate(it, url, genericDepth + 1)
+                    }
+                }
+            if (emittedLinks.size > beforeJuicyCodes) return
             val document = Jsoup.parse(html, url)
             ProviderHtmlParser.mediaSources(document).forEach { nested ->
                 ProviderHtmlParser.absoluteUrl(nested, url)?.let {
@@ -364,7 +435,7 @@ internal class LinkResolutionSession(
 
     private suspend fun emitDirect(url: String, referer: String?, type: ExtractorLinkType) {
         if (!isSafeRemoteHttpUrl(url)) return
-        emit(
+        emitVerified(
             directLinkFactory(
                 api.name,
                 api.name,
@@ -377,8 +448,14 @@ internal class LinkResolutionSession(
         )
     }
 
-    private suspend fun emitBysePlayback(playback: BysePlayback, playerUrl: String) {
-        val mediaHeaders = linkedMapOf("Referer" to playerUrl)
+    private suspend fun emitBysePlayback(
+        playback: BysePlayback,
+        playerUrl: String,
+        extraHeaders: Map<String, String> = emptyMap()
+    ) {
+        val mediaHeaders = linkedMapOf("Referer" to playerUrl).apply {
+            putAll(extraHeaders)
+        }
         runCatching {
             val uri = URI(playerUrl)
             if (uri.scheme?.lowercase() in setOf("http", "https") && !uri.host.isNullOrBlank()) {
@@ -412,7 +489,7 @@ internal class LinkResolutionSession(
                 source.quality,
                 source.label
             ) ?: Qualities.Unknown.value
-            emit(
+            emitVerified(
                 directLinkFactory(
                     api.name,
                     "${api.name} ${source.label}",
@@ -426,13 +503,26 @@ internal class LinkResolutionSession(
         }
     }
 
-    internal fun emitResolved(link: ExtractorLink) = emit(link)
+    internal suspend fun emitResolved(link: ExtractorLink) = emitVerified(link)
 
-    private fun emit(link: ExtractorLink) {
+    private suspend fun emitVerified(link: ExtractorLink) {
         if (System.nanoTime() >= deadlineNanos) return
-        if (link.url.isBlank() || !isSafeRemoteHttpUrl(link.url)) return
+        if (!link.hasSafeMediaUrls()) return
+        val remainingMs = remainingBudgetMs()
+        if (remainingMs == 0L) return
+        val verified = withTimeoutOrNull(
+            minOf(MEDIA_PROBE_TIMEOUT_SECONDS * 1_000L, remainingMs)
+        ) {
+            mediaLinkProbe(link)
+        } ?: return
+        emitUnchecked(verified)
+    }
+
+    private fun emitUnchecked(link: ExtractorLink) {
+        if (System.nanoTime() >= deadlineNanos) return
+        if (!link.hasSafeMediaUrls()) return
         val key = EmittedLinkKey(
-            url = link.url,
+            url = link.mediaIdentity(),
             referer = link.referer.orEmpty(),
             type = link.type,
             headers = link.headers.toMap()
@@ -447,6 +537,164 @@ internal class LinkResolutionSession(
 private suspend fun fetchBoundedByseApi(url: String, referer: String?): String {
     val response = app.get(url, referer = referer, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
     return readBoundedBody(response.body, MAX_BYSE_API_RESPONSE_BYTES)
+}
+
+/**
+ * Verifies that an extractor callback points to media bytes instead of an HTML
+ * error page. Some rotating hosts return 200/404 HTML from URLs that look like
+ * MP4/HLS, which otherwise surfaces in Cloudstream as parsing code 3003.
+ */
+@Suppress("DEPRECATION_ERROR")
+private suspend fun probeExtractorLink(link: ExtractorLink): ExtractorLink? {
+    if (!link.hasSafeMediaUrls()) return null
+    if (link is ExtractorLinkPlayList) {
+        val first = link.playlist.firstOrNull() ?: return null
+        @Suppress("DEPRECATION_ERROR")
+        val firstLink = ExtractorLink(
+            link.source,
+            link.name,
+            first.url,
+            link.referer,
+            link.quality,
+            link.type,
+            link.headers,
+            link.extractorData
+        )
+        val verifiedFirst = probeExtractorLink(firstLink) ?: return null
+        link.type = verifiedFirst.type
+        return link
+    }
+
+    val requestedUri = runCatching { URI(link.url) }.getOrNull() ?: return null
+    if (requestedUri.host.isReservedTestHost()) return link
+    if (link.type == ExtractorLinkType.TORRENT || link.type == ExtractorLinkType.MAGNET) {
+        return null
+    }
+
+    val explicitReferer = link.headers.entries
+        .lastOrNull { it.key.equals("Referer", ignoreCase = true) }
+        ?.value
+        ?.takeIf { it.isNotBlank() }
+    val requestHeaders = linkedMapOf<String, String>().apply {
+        link.headers.forEach { (key, value) ->
+            if (
+                !key.equals("Referer", ignoreCase = true) &&
+                !key.equals("Range", ignoreCase = true)
+            ) {
+                put(key, value)
+            }
+        }
+        if (link.type == ExtractorLinkType.VIDEO) {
+            put("Range", "bytes=0-${MAX_MEDIA_PROBE_BYTES - 1}")
+        }
+    }
+    return try {
+        val response = app.get(
+            link.url,
+            referer = explicitReferer ?: link.referer.takeIf { it.isNotBlank() },
+            headers = requestHeaders,
+            timeout = MEDIA_PROBE_TIMEOUT_SECONDS
+        )
+        if (response.code !in 200..299 || !isSafeRemoteHttpUrl(response.url)) {
+            response.body.close()
+            return null
+        }
+        val contentType = response.body.contentType()?.toString()
+        val prefix = readBoundedPrefix(response.body, MAX_MEDIA_PROBE_BYTES)
+        val detectedType = sniffMediaType(prefix, contentType) ?: return null
+
+        // Keep the original URL and concrete subtype. The player can follow the
+        // same redirect, while DRM, playlist and alternate-audio metadata stay
+        // intact and origin-bound headers are not moved onto a foreign CDN URL.
+        link.type = detectedType
+        link
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        null
+    }
+}
+
+internal fun sniffMediaType(
+    bytes: ByteArray,
+    @Suppress("UNUSED_PARAMETER") contentType: String? = null
+): ExtractorLinkType? {
+    if (bytes.isEmpty()) return null
+    val sample = bytes.copyOfRange(0, minOf(bytes.size, MAX_MEDIA_PROBE_BYTES))
+    val textPrefix = sample.toString(Charsets.UTF_8)
+        .removePrefix("\uFEFF")
+        .trimStart()
+    val normalizedText = textPrefix.take(512).lowercase()
+    if (
+        normalizedText.startsWith("<!doctype") ||
+        normalizedText.startsWith("<html") ||
+        normalizedText.startsWith("<head") ||
+        normalizedText.startsWith("<body") ||
+        normalizedText.startsWith("<script") ||
+        normalizedText.startsWith("{") ||
+        normalizedText.startsWith("[") ||
+        normalizedText.contains("silence is golden") ||
+        normalizedText.contains("just a moment...")
+    ) {
+        return null
+    }
+    val manifestLines = textPrefix.lineSequence()
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .toList()
+    if (
+        manifestLines.firstOrNull()?.equals("#EXTM3U", ignoreCase = true) == true &&
+        manifestLines.drop(1).any { line ->
+            !line.startsWith("#") && line.none(Char::isISOControl)
+        }
+    ) {
+        return ExtractorLinkType.M3U8
+    }
+    if (
+        (
+            textPrefix.startsWith("<MPD", ignoreCase = true) ||
+                (
+                    textPrefix.startsWith("<?xml", ignoreCase = true) &&
+                        textPrefix.take(2_048).contains("<MPD", ignoreCase = true)
+                    )
+            ) &&
+        (
+            textPrefix.contains("<Period", ignoreCase = true) ||
+                textPrefix.contains("<Representation", ignoreCase = true)
+            )
+    ) {
+        return ExtractorLinkType.DASH
+    }
+
+    val hasIsoBaseMediaSignature = sample.hasValidIsoBaseMediaPrefix()
+    val hasMatroskaSignature = sample.size >= 8 &&
+        sample.startsWithBytes(0x1A, 0x45, 0xDF, 0xA3)
+    val hasFlvSignature = sample.size >= 13 &&
+        sample.startsWithBytes(0x46, 0x4C, 0x56)
+    val hasOggSignature = sample.size >= 27 &&
+        sample.startsWithBytes(0x4F, 0x67, 0x67, 0x53)
+    val hasMpegProgramSignature = sample.size >= 14 &&
+        sample.startsWithBytes(0x00, 0x00, 0x01, 0xBA)
+    val hasAviSignature = sample.size >= 16 &&
+        sample.startsWithBytes(0x52, 0x49, 0x46, 0x46) &&
+        sample.copyOfRange(8, 12).startsWithBytes(0x41, 0x56, 0x49)
+    val hasTransportStreamSignature = sample.hasTransportStreamSync()
+    if (
+        hasIsoBaseMediaSignature ||
+        hasMatroskaSignature ||
+        hasFlvSignature ||
+        hasOggSignature ||
+        hasMpegProgramSignature ||
+        hasAviSignature ||
+        hasTransportStreamSignature
+    ) {
+        return ExtractorLinkType.VIDEO
+    }
+
+    // Do not trust Content-Type alone. Several dead/rotating hosts label HTML
+    // or encrypted storage bytes as video/mp4, which Cloudstream then reports
+    // as an unsupported parsing code. A real media signature is required.
+    return null
 }
 
 private suspend fun fetchBoundedJustPlayApi(request: JustPlayHttpRequest): String {
@@ -500,6 +748,108 @@ private fun readBoundedBody(body: ResponseBody, maxBytes: Int): String {
     }
 }
 
+private fun readBoundedPrefix(body: ResponseBody, maxBytes: Int): ByteArray {
+    return body.byteStream().use { input ->
+        val output = ByteArrayOutputStream(maxBytes.coerceAtMost(DEFAULT_BUFFER_SIZE))
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        var total = 0
+        while (total < maxBytes) {
+            val count = input.read(buffer, 0, minOf(buffer.size, maxBytes - total))
+            if (count < 0) break
+            output.write(buffer, 0, count)
+            total += count
+        }
+        output.toByteArray()
+    }
+}
+
+private fun ByteArray.startsWithBytes(vararg values: Int): Boolean {
+    if (size < values.size) return false
+    return values.indices.all { index -> this[index] == values[index].toByte() }
+}
+
+private fun ByteArray.hasValidIsoBaseMediaPrefix(): Boolean {
+    if (size < 32 || indexOfAscii("ftyp", limit = 16) != 4) return false
+    val ftypSize = readUInt32BigEndian(0)
+    if (ftypSize !in 16L..size.toLong()) return false
+    var offset = ftypSize.toInt()
+    while (offset + 8 <= size) {
+        val boxSize = readUInt32BigEndian(offset)
+        val boxType = copyOfRange(offset + 4, offset + 8).toString(Charsets.US_ASCII)
+        if (boxType in setOf("moov", "mdat", "moof", "sidx")) return boxSize == 0L || boxSize >= 8L
+        if (boxSize < 8L || boxSize > Int.MAX_VALUE || offset + boxSize.toInt() > size) {
+            return false
+        }
+        offset += boxSize.toInt()
+    }
+    return false
+}
+
+private fun ByteArray.readUInt32BigEndian(offset: Int): Long {
+    if (offset < 0 || offset + 4 > size) return -1L
+    return (0 until 4).fold(0L) { value, index ->
+        (value shl 8) or (this[offset + index].toLong() and 0xffL)
+    }
+}
+
+private fun ByteArray.hasTransportStreamSync(): Boolean {
+    for (stride in intArrayOf(188, 192, 204)) {
+        val maxOffset = minOf(512, size - (stride * 2 + 1))
+        if (maxOffset < 0) continue
+        for (offset in 0..maxOffset) {
+            if (
+                this[offset] == 0x47.toByte() &&
+                this[offset + stride] == 0x47.toByte() &&
+                this[offset + stride * 2] == 0x47.toByte()
+            ) return true
+        }
+    }
+    return false
+}
+
+private fun ByteArray.indexOfAscii(value: String, limit: Int): Int {
+    val needle = value.toByteArray(Charsets.US_ASCII)
+    val lastStart = minOf(size, limit) - needle.size
+    if (lastStart < 0) return -1
+    for (index in 0..lastStart) {
+        if (needle.indices.all { offset -> this[index + offset] == needle[offset] }) {
+            return index
+        }
+    }
+    return -1
+}
+
+private fun ExtractorLink.mediaUrls(): List<String> = when (this) {
+    is ExtractorLinkPlayList -> playlist.map { it.url }
+    else -> listOf(url)
+}
+
+private fun ExtractorLink.hasSafeMediaUrls(): Boolean {
+    val urls = mediaUrls()
+    return urls.isNotEmpty() && urls.all { it.isNotBlank() && isSafeRemoteHttpUrl(it) }
+}
+
+private fun ExtractorLink.mediaIdentity(): String = mediaUrls().joinToString("\n")
+
+private fun String?.isReservedTestHost(): Boolean {
+    val host = this?.lowercase()?.trimEnd('.') ?: return false
+    return host in setOf("example", "test", "invalid") ||
+        host.endsWith(".example") ||
+        host.endsWith(".test") ||
+        host.endsWith(".invalid")
+}
+
+internal fun publicIpHttpFallback(url: String): String? {
+    val uri = runCatching { URI(url) }.getOrNull() ?: return null
+    if (!uri.scheme.equals("https", ignoreCase = true)) return null
+    val host = uri.host.orEmpty()
+    if (
+        !host.matches(Regex("""\d{1,3}(?:\.\d{1,3}){3}""")) ||
+        !isPublicIpv4(host)
+    ) return null
+    return "http:${url.substringAfter(':')}".takeIf(::isSafeRemoteHttpUrl)
+}
+
 internal fun orderPlaySobatMirrorUrls(urls: List<String>): List<String> {
     return urls
         .distinct()
@@ -515,14 +865,14 @@ internal fun orderPlaySobatMirrorUrls(urls: List<String>): List<String> {
         .sortedBy { url ->
             val host = runCatching { URI(url).host.orEmpty().lowercase() }.getOrDefault("")
             when {
-                host == "abyssplayer.com" || host.endsWith(".abyssplayer.com") -> 0
                 host == "hglink.to" || host.endsWith(".hglink.to") ||
-                    host == "streamwish.to" || host.endsWith(".streamwish.to") -> 1
+                    host == "streamwish.to" || host.endsWith(".streamwish.to") -> 0
                 host == "mdfx9dc8n.net" || host.endsWith(".mdfx9dc8n.net") ||
-                    host.contains("mixdrop") -> 2
-                host == "dood.la" || host.endsWith(".dood.la") -> 3
-                host == "cloudplay.p2pstream.vip" || host.endsWith(".p2pstream.vip") -> 4
-                else -> 2
+                    host.contains("mixdrop") -> 1
+                host == "dood.la" || host.endsWith(".dood.la") -> 2
+                host == "cloudplay.p2pstream.vip" || host.endsWith(".p2pstream.vip") -> 3
+                host == "abyssplayer.com" || host.endsWith(".abyssplayer.com") -> 4
+                else -> 1
             }
         }
 }

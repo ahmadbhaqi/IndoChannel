@@ -178,6 +178,7 @@ internal object ProviderHtmlParser {
 
     fun mediaSources(document: Document, iframeSelector: String = "iframe"): List<String> {
         val iframeSources = iframeSources(document, iframeSelector)
+        val encodedServerSources = decodedDataIframeSources(document)
         val metaSources = mediaMetaSelectors.flatMap { selector ->
             document.select(selector).mapNotNull { meta ->
                 meta.attr("content").trim().takeIf { it.isPlayableCandidate() }
@@ -190,7 +191,26 @@ internal object ProviderHtmlParser {
                     element.attr(attr).trim().takeIf { it.isPlayableCandidate() }
                 }
             }
-        return (iframeSources + metaSources + mediaElementSources).distinct()
+        return (iframeSources + encodedServerSources + metaSources + mediaElementSources).distinct()
+    }
+
+    /** Decodes the Base64 server buttons used by current Rebahin/KitaNonton pages. */
+    fun decodedDataIframeSources(document: Document): List<String> {
+        return document.select("[data-iframe]").mapNotNull { element ->
+            val value = element.attr("data-iframe").trim()
+                .takeIf { it.isNotBlank() && it.length <= MAX_ENCODED_SERVER_URL_SIZE }
+                ?: return@mapNotNull null
+            if (isSafeRemoteHttpUrl(value)) return@mapNotNull value
+            runCatching {
+                val decoded = decodeBase64Compat(value)
+                    ?.takeIf { it.size <= MAX_DECODED_SERVER_URL_SIZE }
+                    ?: return@runCatching null
+                String(decoded, Charsets.UTF_8)
+                    .trim()
+                    .takeIf { it.length <= MAX_DECODED_SERVER_URL_SIZE }
+                    ?.takeIf(::isSafeRemoteHttpUrl)
+            }.getOrNull()
+        }.distinct()
     }
 
     fun isNonContentPage(html: String): Boolean {
@@ -202,6 +222,7 @@ internal object ProviderHtmlParser {
             "challenges.cloudflare.com",
             "enable javascript and cookies to continue",
             "<title>file error</title>",
+            "router.parklogic.com",
             "mysql server has gone away",
             "sqlstate[hy000] [2006]"
         ).any(normalized::contains)
@@ -286,4 +307,7 @@ internal object ProviderHtmlParser {
                 )
         }.getOrDefault(false)
     }
+
+    private const val MAX_ENCODED_SERVER_URL_SIZE = 16_384
+    private const val MAX_DECODED_SERVER_URL_SIZE = 8_192
 }

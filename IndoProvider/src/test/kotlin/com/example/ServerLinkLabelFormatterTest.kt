@@ -1,16 +1,37 @@
 package com.example
 
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkPlayList
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.PlayListItem
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class ServerLinkLabelFormatterTest {
+    @Test
+    fun `server renaming preserves playlist subtype and entries`() {
+        val playlist = ExtractorLinkPlayList(
+            source = "Raw Extractor",
+            name = "Raw Extractor",
+            playlist = listOf(PlayListItem("https://media.example/part.mp4", 1_000_000L)),
+            referer = "https://player.example/",
+            quality = 720,
+            headers = emptyMap(),
+            extractorData = null,
+            type = ExtractorLinkType.VIDEO,
+            audioTracks = emptyList()
+        )
+
+        assertSame(playlist, playlist.withSimpleServerName("KitaNonton"))
+        assertEquals("https://media.example/part.mp4", playlist.playlist.single().url)
+    }
+
     @Test
     fun `uses player brand and appends known resolution once`() {
         assertEquals(
@@ -225,7 +246,8 @@ class ServerLinkLabelFormatterTest {
                     }
                 )
                 true
-            }
+            },
+            mediaLinkProbe = { it }
         )
 
         assertTrue(session.resolve("https://unknown.example/embed/id", "https://kitanonton2.surf/movie"))

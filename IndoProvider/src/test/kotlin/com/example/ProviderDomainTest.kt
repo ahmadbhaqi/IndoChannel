@@ -24,7 +24,7 @@ class ProviderDomainTest {
             "IndoxxiProvider.kt" to """override var mainUrl = "https://filmbioskop21.lk21.in.net"""",
             "FilmapikProvider.kt" to """override var mainUrl = "https://filmapik.college"""",
             "KitanontonProvider.kt" to """override var mainUrl = "https://kitanonton2.surf"""",
-            "RebahinProvider.kt" to """override var mainUrl = "https://154.203.167.63""""
+            "RebahinProvider.kt" to """override var mainUrl = "https://rebahinxxi3.lol""""
         )
 
         expectedDomains.forEach { (fileName, expected) ->
@@ -205,7 +205,7 @@ class ProviderDomainTest {
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
         assertTrue(
-            Regex("""(?m)^version\s*=\s*7\s*$""").containsMatchIn(moduleBuild.readText()),
+            Regex("""(?m)^version\s*=\s*8\s*$""").containsMatchIn(moduleBuild.readText()),
             "Cloudstream must see these provider fixes as a new plugin release"
         )
     }

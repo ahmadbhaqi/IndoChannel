@@ -1,6 +1,8 @@
 package com.example
 
 import java.util.Base64
+import java.io.IOException
+import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -33,14 +35,74 @@ class JuicyCodesPlayerParserTest {
     }
 
     @Test
-    fun `recognizes but rejects current token bound groovy cdn`() {
+    fun `accepts current token bound groovy CDN for runtime media verification`() {
+        val userAgent = "Mozilla/5.0 (Linux; Android 14) Chrome/126.0.0.0"
+        val token = Base64.getEncoder().encodeToString(
+            "203.0.113.10~~$userAgent".toByteArray(Charsets.UTF_8)
+        )
         val config = """
-            var config = {"sources":{"type":"video/mp4","file":"https://daisy.groovy.monster/stream/dead?token=Zm9v"}};jwplayer.key = 'key';
+            var config = {"sources":{"type":"application/x-mpegURL","file":"https://daisy.groovy.monster/stream/master.m3u8?token=$token"}};jwplayer.key = 'key';
         """.trimIndent()
         val html = """<script>_juicycodes("${encode(config)}");</script>"""
 
         assertTrue(JuicyCodesPlayerParser.recognizes(html))
-        assertNull(JuicyCodesPlayerParser.playback(html))
+        val media = JuicyCodesPlayerParser.playback(html)!!.media.single()
+        assertEquals(
+            "https://daisy.groovy.monster/stream/master.m3u8?token=$token",
+            media.url
+        )
+        assertTrue(media.isHls)
+        assertEquals(userAgent, media.userAgent)
+    }
+
+    @Test
+    fun `Juicy IP player retries HTTP without disabling TLS verification`() = runBlocking {
+        val mediaUrl = "https://daisy.groovy.monster/stream/master.m3u8"
+        val config = """
+            var config = {"sources":{"type":"application/x-mpegURL","file":"$mediaUrl"}};jwplayer.key = 'key';
+        """.trimIndent()
+        val html = """<script>_juicycodes("${encode(config)}");</script>"""
+        val requests = mutableListOf<String>()
+        val links = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                requests += url
+                if (url.startsWith("https://")) throw IOException("untrusted IP certificate")
+                html
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { it }
+        )
+
+        assertTrue(
+            session.resolve(
+                "https://178.211.139.171/embed/current",
+                "https://rebahinxxi3.lol/item/"
+            )
+        )
+        assertEquals(
+            listOf(
+                "https://178.211.139.171/embed/current",
+                "http://178.211.139.171/embed/current"
+            ),
+            requests
+        )
+        assertEquals(mediaUrl, links.single().url)
+        assertEquals("http://178.211.139.171/embed/current", links.single().referer)
+    }
+
+    @Test
+    fun `IP player HTTP fallback preserves encoded path and query`() {
+        assertEquals(
+            "http://178.211.139.171/embed/a%2Fb?token=x%2Fy",
+            publicIpHttpFallback(
+                "https://178.211.139.171/embed/a%2Fb?token=x%2Fy"
+            )
+        )
+        assertNull(publicIpHttpFallback("https://192.168.1.3/embed/current"))
     }
 
     private fun encode(decoded: String, salt: Int = 681): String {

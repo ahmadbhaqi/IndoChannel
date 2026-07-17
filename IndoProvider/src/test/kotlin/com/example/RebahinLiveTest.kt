@@ -28,7 +28,12 @@ class RebahinLiveTest {
         var playableSample: String? = null
         val attempts = mutableListOf<String>()
         for (sample in catalog.take(8)) {
-            val detail = withTimeoutOrNull(35_000) { provider.load(sample.url) } ?: continue
+            val detail = try {
+                withTimeoutOrNull(35_000) { provider.load(sample.url) }
+            } catch (error: Exception) {
+                attempts += "${sample.name}: detail=${error::class.simpleName}:${error.message}"
+                null
+            } ?: continue
             if (detail.name.isBlank()) continue
 
             val links = mutableListOf<ExtractorLink>()

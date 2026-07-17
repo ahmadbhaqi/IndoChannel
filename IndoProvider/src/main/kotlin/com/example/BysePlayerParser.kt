@@ -65,6 +65,21 @@ internal object BysePlayerParser {
         URI(scheme, null, uri.host, uri.port, "/api/videos/$code", null, null).toString()
     }.getOrNull()
 
+    /**
+     * Byse rotates frontend domains. Identify the bounded page shape so a new
+     * hostname can still use the same same-origin encrypted playback API.
+     */
+    fun isFrontendPage(html: String): Boolean {
+        if (html.isBlank() || html.length > MAX_API_RESPONSE_SIZE) return false
+        val normalized = html.lowercase()
+        return normalized.contains("<title>byse frontend</title>") ||
+            (
+                normalized.contains("/api/videos/") &&
+                    normalized.contains("playback") &&
+                    normalized.contains("byse")
+                )
+    }
+
     /** Validates, decrypts, and parses an API response. Invalid envelopes fail closed. */
     fun playback(apiJson: String): BysePlayback? {
         if (apiJson.length > MAX_API_RESPONSE_SIZE) return null

@@ -121,19 +121,35 @@ class IndoxxiProvider : MainAPI() {
         val document = fetch.document
         val canonicalUrl = providerUrl(fetch.url) ?: return false
         val baseUrl = baseUrl(canonicalUrl)
-        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        val resolver = LinkResolutionSession(
+            this,
+            subtitleCallback,
+            callback,
+            inlineSourceParser = IndoxxiPlayerParser::mediaUrls,
+            candidateTimeoutMs = 50_000L,
+            sessionTimeoutMs = 100_000L
+        )
 
-        ProviderHtmlParser.mediaSources(document).forEach { resolvePlayer(it, canonicalUrl, resolver) }
-        if (!resolver.loaded) {
-            for (downloadUrl in ProviderHtmlParser.downloadCandidateUrls(document, canonicalUrl)) {
-                if (!resolver.canContinue) break
-                resolvePlayer(downloadUrl, canonicalUrl, resolver)
-                if (resolver.loaded) break
-            }
+        for (source in ProviderHtmlParser.mediaSources(document)) {
+            if (!resolver.canContinue || resolver.loaded) break
+            resolvePlayer(source, canonicalUrl, resolver)
         }
+        if (resolver.loaded) return true
 
-        for (request in ProviderHtmlParser.muviproAjaxRequests(document)) {
-            if (!resolver.canContinue) break
+        // Older Indonesia titles often retain a working Gofile/OpenDrive
+        // fallback after their embedded BestX/Abyss mirrors have expired.
+        // Try explicit, allow-listed download mirrors before spending the
+        // session budget on those rotating player tabs.
+        for (downloadUrl in ProviderHtmlParser.downloadCandidateUrls(document, canonicalUrl)) {
+            if (!resolver.canContinue || resolver.loaded) break
+            resolvePlayer(downloadUrl, canonicalUrl, resolver)
+        }
+        if (resolver.loaded) return true
+
+        for (request in IndoxxiPlayerParser.orderAjaxRequests(
+            ProviderHtmlParser.muviproAjaxRequests(document)
+        )) {
+            if (!resolver.canContinue || resolver.loaded) break
             try {
                 val response = app.post(
                     "$baseUrl/wp-admin/admin-ajax.php",
@@ -142,8 +158,9 @@ class IndoxxiProvider : MainAPI() {
                     headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
                     timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                 ).document
-                ProviderHtmlParser.mediaSources(response).forEach {
-                    resolvePlayer(it, canonicalUrl, resolver)
+                for (source in ProviderHtmlParser.mediaSources(response)) {
+                    if (!resolver.canContinue || resolver.loaded) break
+                    resolvePlayer(source, canonicalUrl, resolver)
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -151,9 +168,10 @@ class IndoxxiProvider : MainAPI() {
                 // Continue with the other configured servers.
             }
         }
+        if (resolver.loaded) return true
 
         for (link in document.select("ul#player-list > li a[href], ul.muvipro-player-tabs li a[href]")) {
-            if (!resolver.canContinue) break
+            if (!resolver.canContinue || resolver.loaded) break
             val playerUrl = ProviderHtmlParser.absoluteUrl(link.attr("href"), canonicalUrl)
                 ?: continue
             if (!playerUrl.startsWith("http")) continue
@@ -163,8 +181,9 @@ class IndoxxiProvider : MainAPI() {
                     referer = canonicalUrl,
                     timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                 ).document
-                ProviderHtmlParser.mediaSources(playerDocument).forEach {
-                    resolvePlayer(it, playerUrl, resolver)
+                for (source in ProviderHtmlParser.mediaSources(playerDocument)) {
+                    if (!resolver.canContinue || resolver.loaded) break
+                    resolvePlayer(source, playerUrl, resolver)
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -177,22 +196,7 @@ class IndoxxiProvider : MainAPI() {
 
     private suspend fun resolvePlayer(raw: String?, referer: String, resolver: LinkResolutionSession) {
         val url = ProviderHtmlParser.absoluteUrl(raw, referer) ?: return
-        if (resolver.resolve(url, referer)) return
-
-        try {
-            val html = resolver.withinBudget {
-                app.get(
-                    url,
-                    referer = referer,
-                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-                ).text
-            } ?: return
-            IndoxxiPlayerParser.mediaUrls(html, url).forEach { resolver.resolve(it, url) }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Exception) {
-            // A broken player cannot suppress a working sibling server.
-        }
+        resolver.resolve(url, referer)
     }
 
     private fun providerUrl(raw: String?): String? =
@@ -202,6 +206,22 @@ class IndoxxiProvider : MainAPI() {
 }
 
 internal object IndoxxiPlayerParser {
+    fun orderAjaxRequests(requests: List<MuviproAjaxRequest>): List<MuviproAjaxRequest> {
+        return requests.distinct().withIndex()
+            .sortedWith(
+                compareBy<IndexedValue<MuviproAjaxRequest>> { request ->
+                    val tab = request.value.tab.lowercase()
+                    when {
+                        Regex("""(?:^|\D)(?:p|player)?1(?:\D|$)""").containsMatchIn(tab) -> 0
+                        Regex("""(?:^|\D)(?:p|player)?3(?:\D|$)""").containsMatchIn(tab) -> 1
+                        Regex("""(?:^|\D)(?:p|player)?2(?:\D|$)""").containsMatchIn(tab) -> 3
+                        else -> 2
+                    }
+                }.thenBy { it.index }
+            )
+            .map { it.value }
+    }
+
     fun mediaUrls(html: String, playerUrl: String): List<String> {
         val document = Jsoup.parse(html, playerUrl)
         val scriptBodies = document.select("script").flatMap { script ->

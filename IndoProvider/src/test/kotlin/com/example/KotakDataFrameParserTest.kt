@@ -97,7 +97,8 @@ class KotakDataFrameParserTest {
             pageFetcher = { url, _ ->
                 if (url == player) "<script>var urlPlay = '$direct';</script>" else error(url)
             },
-            extractorLoader = { _, _, _, _ -> error("Generic extractor should not run") }
+            extractorLoader = { _, _, _, _ -> error("Generic extractor should not run") },
+            mediaLinkProbe = { it }
         )
 
         assertTrue(session.resolve(player, "https://kotakajaib.me/embed/current"))

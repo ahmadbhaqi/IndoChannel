@@ -6,6 +6,32 @@ import kotlin.test.assertNull
 
 class FilmapikPlayerParserTest {
     @Test
+    fun `Efek player host is rehomed to its storage shard before fallbacks`() {
+        assertEquals(
+            listOf(
+                "https://s2.efek.stream/stream/720/current/__001?token=x",
+                "https://v2.efek.stream/stream/720/current/__001?token=x"
+            ),
+            FilmapikPlayerParser.mediaUrlCandidates(
+                "https://v2.efek.stream/stream/720/current/__001?token=x"
+            )
+        )
+    }
+
+    @Test
+    fun `Efek authority rewrite preserves encoded path query and fragment`() {
+        assertEquals(
+            listOf(
+                "https://s2.efek.stream/stream/a%2Fb/__001?token=x%2Fy#part%2F1",
+                "https://v2.efek.stream/stream/a%2Fb/__001?token=x%2Fy#part%2F1"
+            ),
+            FilmapikPlayerParser.mediaUrlCandidates(
+                "https://v2.efek.stream/stream/a%2Fb/__001?token=x%2Fy#part%2F1"
+            )
+        )
+    }
+
+    @Test
     fun `cached detail URLs are rehomed to the current Filmapik domain`() {
         val current = "https://filmapik.college"
 

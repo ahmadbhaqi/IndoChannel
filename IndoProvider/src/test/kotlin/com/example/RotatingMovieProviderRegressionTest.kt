@@ -95,17 +95,58 @@ class RotatingMovieProviderRegressionTest {
     }
 
     @Test
-    fun `dutamovie prioritizes its reachable Abyss and Lulu servers`() {
+    fun `dutamovie does not infer mirror host from mutable player numbers`() {
         val pages = listOf(
             "https://austincomputerworks.org/movie/?player=1",
-            "https://austincomputerworks.org/movie/?player=7",
-            "https://austincomputerworks.org/movie/?player=2",
-            "https://austincomputerworks.org/movie/?player=4"
+            "https://austincomputerworks.org/movie/?player=6",
+            "https://austincomputerworks.org/movie/?player=8",
+            "https://austincomputerworks.org/movie/?player=4",
+            "https://austincomputerworks.org/movie/?player=7"
         )
 
         assertEquals(
-            listOf(pages[2], pages[1], pages[0], pages[3]),
+            pages,
             DutamoviePlayerParser.orderPlayerPages(pages)
+        )
+    }
+
+    @Test
+    fun `dutamovie prioritizes discovered Morencius host and defers Abyss`() {
+        val urls = listOf(
+            "https://abyssplayer.com/current",
+            "https://playerp2p.example/embed/current",
+            "https://morencius.com/embed/current",
+            "https://embedpyrox.xyz/player/current",
+            "https://voe.sx/e/current"
+        )
+
+        assertEquals(
+            listOf(urls[2], urls[3], urls[4], urls[1], urls[0]),
+            DutamoviePlayerParser.orderMediaUrls(urls)
+        )
+    }
+
+    @Test
+    fun `Morencius parser follows hls4 fallback expression before dead hls2`() {
+        val playerUrl = "https://morencius.com/embed/current"
+        val html = """
+            <script>
+              var links={
+                "hls2":"https://edge.acek-cdn.com/hls2/current/master.m3u8?t=signed",
+                "hls4":"/stream/token/server/123/456/master.m3u8"
+              };
+              jwplayer("vplayer").setup({
+                sources:[{file:links.hls4||links.hls3||links.hls2,type:"hls"}]
+              });
+            </script>
+        """.trimIndent()
+
+        assertEquals(
+            listOf(
+                "https://morencius.com/stream/token/server/123/456/master.m3u8",
+                "https://edge.acek-cdn.com/hls2/current/master.m3u8?t=signed"
+            ),
+            MorenciusPlayerParser.mediaUrls(html, playerUrl)
         )
     }
 

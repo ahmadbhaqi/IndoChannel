@@ -217,6 +217,10 @@ internal fun ExtractorLink.withSimpleServerName(providerName: String): Extractor
     )
     return if (formattedName == name) {
         this
+    } else if (javaClass != ExtractorLink::class.java) {
+        // Rebuilding a subtype would discard DRM keys, playlist entries, or
+        // other subtype-specific playback state. Preserve it unchanged.
+        this
     } else {
         // Extractor callbacks are synchronous while newExtractorLink is suspend.
         // Rebuild only to replace the immutable display name and preserve every
@@ -227,9 +231,10 @@ internal fun ExtractorLink.withSimpleServerName(providerName: String): Extractor
             url,
             referer,
             quality,
-            type,
             headers,
-            extractorData
+            extractorData,
+            type,
+            audioTracks
         )
     }
 }

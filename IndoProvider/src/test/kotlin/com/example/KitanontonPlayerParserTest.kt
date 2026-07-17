@@ -9,13 +9,13 @@ import kotlin.test.assertTrue
 
 class KitanontonPlayerParserTest {
     @Test
-    fun `orders a complete abyss mirror ahead of browser coded players`() {
+    fun `orders current Abyss chunk players after conventional mirrors`() {
         val juicy = "https://178.211.139.171/embed/code"
         val unknown = "https://unknown.example/embed/code"
         val abyss = "https://abyssplayer.com/working"
 
         assertEquals(
-            listOf(abyss, unknown, juicy),
+            listOf(unknown, juicy, abyss),
             KitanontonPlayerParser.orderPlayerUrls(listOf(juicy, unknown, abyss))
         )
     }
@@ -31,7 +31,7 @@ class KitanontonPlayerParserTest {
             visited += url
         }
 
-        assertEquals(listOf(abyss, unknown, juicy), visited)
+        assertEquals(listOf(unknown, juicy, abyss), visited)
     }
 
     @Test

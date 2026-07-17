@@ -12,7 +12,7 @@ configurations.named("testImplementation") {
     extendsFrom(configurations.getByName("compileOnly"))
 }
 
-version = 7
+version = 8
 
 cloudstream {
     description = "Kumpulan provider film dan anime berbahasa Indonesia."

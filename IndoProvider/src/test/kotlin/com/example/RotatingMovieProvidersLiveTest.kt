@@ -36,7 +36,7 @@ class RotatingMovieProvidersLiveTest {
             org.junit.Assume.assumeTrue(false)
             return@runBlocking
         }
-        verify(DutamovieProvider(), "https://austincomputerworks.org/ghost-in-the-cell-2026/")
+        verify(DutamovieProvider(), "https://austincomputerworks.org/lunok-2026/")
     }
 
     private suspend fun verify(provider: MainAPI, pageUrl: String) {

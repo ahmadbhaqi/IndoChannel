@@ -198,7 +198,9 @@ class KitanontonProvider : MainAPI() {
                 KitanontonPlayerParser.resolveAll(
                     KitanontonPlayerParser.episodePlayerUrls(fetch.document, request.episode)
                 ) { source ->
-                    resolver.resolve(source, fetch.url)
+                    if (!resolver.loaded && resolver.canContinue) {
+                        resolver.resolve(source, fetch.url)
+                    }
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -209,9 +211,11 @@ class KitanontonProvider : MainAPI() {
         }
 
         val detailUrl = ProviderHtmlParser.normalizeProviderPageUrl(data, mainUrl) ?: return false
-        KitanontonPlayerParser.resolvePages(
-            listOfNotNull(KitanontonPlayerParser.playPageUrl(detailUrl), detailUrl)
-        ) { page ->
+        for (page in listOfNotNull(
+            KitanontonPlayerParser.playPageUrl(detailUrl),
+            detailUrl
+        ).distinct()) {
+            if (resolver.loaded || !resolver.canContinue) break
             try {
                 val fetch = app.get(
                     page,
@@ -223,7 +227,8 @@ class KitanontonProvider : MainAPI() {
                     document.select("[data-iframe]").mapNotNull { server ->
                         KitanontonPlayerParser.decodeServerUrl(server.attr("data-iframe"))
                     }
-                KitanontonPlayerParser.resolveAll(playerUrls) { source ->
+                for (source in KitanontonPlayerParser.orderPlayerUrls(playerUrls)) {
+                    if (resolver.loaded || !resolver.canContinue) break
                     resolver.resolve(source, fetch.url)
                 }
             } catch (error: kotlin.coroutines.cancellation.CancellationException) {
@@ -413,15 +418,15 @@ internal object KitanontonPlayerParser {
     private fun priority(url: String): Int {
         val host = runCatching { URI(url).host.orEmpty().lowercase() }.getOrDefault("")
         return when {
-            host == "abyssplayer.com" || host.endsWith(".abyssplayer.com") ||
-                host == "abyss.to" || host.endsWith(".abyss.to") -> 0
             host == "freeon.site" || host.endsWith(".freeon.site") ||
                 host == "justplay.cam" || host.endsWith(".justplay.cam") ||
                 host == "bysebuho.com" || host.endsWith(".bysebuho.com") ||
                 host == "asiastream.cc" || host.endsWith(".asiastream.cc") ||
-                host == "playsobat.xyz" || host.endsWith(".playsobat.xyz") -> 1
-            host.matches(Regex("""\d{1,3}(?:\.\d{1,3}){3}""")) -> 3
-            else -> 2
+                host == "playsobat.xyz" || host.endsWith(".playsobat.xyz") -> 0
+            host == "abyssplayer.com" || host.endsWith(".abyssplayer.com") ||
+                host == "abyss.to" || host.endsWith(".abyss.to") -> 3
+            host.matches(Regex("""\d{1,3}(?:\.\d{1,3}){3}""")) -> 2
+            else -> 1
         }
     }
 

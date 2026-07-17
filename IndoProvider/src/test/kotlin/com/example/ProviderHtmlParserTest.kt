@@ -289,6 +289,70 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `mediaSources decodes bounded Base64 data iframe buttons`() {
+        val playerUrl = "https://abyssplayer.com/current"
+        val encoded = java.util.Base64.getEncoder()
+            .encodeToString(playerUrl.toByteArray(Charsets.UTF_8))
+        val document = Jsoup.parse(
+            """
+            <button data-iframe="$encoded"></button>
+            <button data-iframe="not base64!"></button>
+            """.trimIndent()
+        )
+
+        assertEquals(listOf(playerUrl), ProviderHtmlParser.mediaSources(document))
+    }
+
+    @Test
+    fun `media sniffer rejects HTML errors and recognizes actual manifests and MP4`() {
+        assertNull(
+            sniffMediaType(
+                "<html><body>silence is golden !</body></html>".toByteArray(),
+                "video/mp4"
+            )
+        )
+        assertEquals(
+            ExtractorLinkType.M3U8,
+            sniffMediaType(
+                "#EXTM3U\n#EXT-X-VERSION:3\nsegment-001.ts\n".toByteArray(),
+                "text/plain"
+            )
+        )
+        val mp4 = byteArrayOf(
+            0x00, 0x00, 0x00, 0x18,
+            0x66, 0x74, 0x79, 0x70,
+            0x69, 0x73, 0x6f, 0x6d,
+            0x00, 0x00, 0x00, 0x00,
+            0x69, 0x73, 0x6f, 0x6d,
+            0x6d, 0x70, 0x34, 0x32,
+            0x00, 0x00, 0x00, 0x00,
+            0x6d, 0x64, 0x61, 0x74
+        )
+        assertEquals(
+            ExtractorLinkType.VIDEO,
+            sniffMediaType(mp4, "application/octet-stream")
+        )
+        assertNull(
+            sniffMediaType(
+                byteArrayOf(
+                    0x99.toByte(), 0x61, 0xe8.toByte(), 0x32,
+                    0x91.toByte(), 0x05, 0xaf.toByte(), 0xc4.toByte()
+                ),
+                "video/mp4"
+            ),
+            "An asserted video Content-Type must not make encrypted/random bytes playable"
+        )
+        assertNull(
+            sniffMediaType("#EXTM3U\n#EXT-X-VERSION:3\n".toByteArray()),
+            "An HLS header without a media or variant URI is not playable"
+        )
+        assertNull(
+            sniffMediaType(mp4.copyOfRange(0, 12), "video/mp4"),
+            "A truncated ftyp header is not a playable MP4"
+        )
+    }
+
+    @Test
     fun `muviproAjaxRequests returns post id and tab pairs`() {
         val document = Jsoup.parse(
             """
@@ -507,6 +571,11 @@ class ProviderHtmlParserTest {
         assertTrue(ProviderHtmlParser.isNonContentPage("<title>Just a moment...</title><script src='https://challenges.cloudflare.com/x'></script>"))
         assertTrue(ProviderHtmlParser.isNonContentPage("SQLSTATE[HY000] [2006] MySQL server has gone away"))
         assertTrue(ProviderHtmlParser.isNonContentPage("<title>File Error</title><h3>Please try again later</h3>"))
+        assertTrue(
+            ProviderHtmlParser.isNonContentPage(
+                "<title>Redirecting...</title><script>fetch('https://router.parklogic.com/file/id')</script>"
+            )
+        )
         assertTrue(ProviderHtmlParser.isNonContentPage("   "))
         assertFalse(ProviderHtmlParser.isNonContentPage("<iframe src='https://video.example/embed'></iframe>"))
     }
@@ -746,6 +815,58 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `extractor callback survives a later extractor exception`() = runBlocking {
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { _, _ -> error("verified extractor callback must stop HTML fallback") },
+            extractorLoader = { _, _, _, callback ->
+                callback(
+                    directExtractorLink(
+                        "test",
+                        "test",
+                        "https://cdn.example/master.m3u8",
+                        "",
+                        0,
+                        ExtractorLinkType.M3U8,
+                        emptyMap()
+                    )
+                )
+                error("later extractor request failed")
+            }
+        )
+
+        assertTrue(session.resolve("https://player.example/embed/1", null))
+        assertEquals("https://cdn.example/master.m3u8", links.single().url)
+    }
+
+    @Test
+    fun `inline source parser reuses the resolver player fetch`() = runBlocking {
+        val playerUrl = "https://player.example/embed/1"
+        val mediaUrl = "https://cdn.example/movie.mp4"
+        var playerFetches = 0
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = IndoxxiProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                assertEquals(playerUrl, url)
+                playerFetches++
+                """<script>window.player = {file: "$mediaUrl"};</script>"""
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            inlineSourceParser = IndoxxiPlayerParser::mediaUrls
+        )
+
+        assertTrue(session.resolve(playerUrl, "https://provider.example/item"))
+        assertEquals(1, playerFetches)
+        assertEquals(mediaUrl, links.single().url)
+    }
+
+    @Test
     fun `resolution session follows one relative nested iframe`() = runBlocking {
         val links = mutableListOf<ExtractorLink>()
         val session = LinkResolutionSession(
@@ -914,6 +1035,29 @@ class ProviderHtmlParserTest {
         assertFailsWith<CancellationException> {
             runBlocking { session.resolve("https://unsupported.example/embed", null) }
         }
+    }
+
+    @Test
+    fun `failed direct suffix probe falls through an HTML wrapper`() = runBlocking {
+        val wrapper = "https://wrapper.example/current.mp4"
+        val media = "https://cdn.example/current.mp4"
+        val fetched = mutableListOf<String>()
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                fetched += url
+                """<iframe src="$media"></iframe>"""
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { link -> link.takeIf { it.url == media } }
+        )
+
+        assertTrue(session.resolve(wrapper, "https://provider.example/item"))
+        assertEquals(listOf(wrapper), fetched)
+        assertEquals(media, links.single().url)
     }
 
     @Test

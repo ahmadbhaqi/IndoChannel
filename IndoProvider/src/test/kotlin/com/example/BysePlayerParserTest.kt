@@ -17,6 +17,19 @@ class BysePlayerParserTest {
     private val mapper = jacksonObjectMapper()
 
     @Test
+    fun `Byse frontend detection supports rotating embed domains`() {
+        assertTrue(
+            BysePlayerParser.isFrontendPage(
+                "<html><head><title>Byse Frontend</title></head></html>"
+            )
+        )
+        assertEquals(
+            "https://byseqekaho.com/api/videos/current",
+            BysePlayerParser.apiUrl("https://byseqekaho.com/e/current")
+        )
+    }
+
+    @Test
     fun `derives same-origin API URL from first embed path segment`() {
         assertEquals(
             "https://bysebuho.com/api/videos/mjhbffdhls01",

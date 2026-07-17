@@ -107,8 +107,6 @@ internal object JuicyCodesPlayerParser {
 
     private fun media(source: JsonNode): JuicyCodesMedia? {
         val url = source.path("file").asText().trim().takeIf(::isSafeRemoteHttpUrl) ?: return null
-        val host = runCatching { URI(url).host.orEmpty().lowercase() }.getOrDefault("")
-        if (host == "groovy.monster" || host.endsWith(".groovy.monster")) return null
         val label = source.path("label").asText().trim().ifBlank { "JuicyCodes" }
         val type = source.path("type").asText().lowercase()
         return JuicyCodesMedia(

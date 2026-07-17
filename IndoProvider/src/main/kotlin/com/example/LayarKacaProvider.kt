@@ -136,7 +136,12 @@ class LayarKacaProvider : MainAPI() {
         val fetch = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
         val document = fetch.document
         val canonicalUrl = providerUrl(fetch.url) ?: return false
-        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        val resolver = LinkResolutionSession(
+            this,
+            subtitleCallback,
+            callback,
+            inlineSourceParser = LayarKacaPlayerParser::mediaUrls
+        )
         val serverPages = LayarKacaPlayerParser.serverPageUrls(document, canonicalUrl)
         for (mediaUrl in ProviderHtmlParser.mediaSources(
             document,
@@ -145,12 +150,6 @@ class LayarKacaProvider : MainAPI() {
             if (!resolver.canContinue || resolver.loaded) break
             resolvePlayer(mediaUrl, canonicalUrl, resolver)
         }
-        if (!resolver.loaded) {
-            for (download in ProviderHtmlParser.downloadCandidateUrls(document, canonicalUrl)) {
-                if (!resolver.canContinue || resolver.resolve(download, canonicalUrl)) break
-            }
-        }
-
         for (playerUrl in serverPages.asReversed()) {
             if (resolver.loaded || !resolver.canContinue) break
             try {
@@ -202,27 +201,18 @@ class LayarKacaProvider : MainAPI() {
             }
         }
 
+        if (!resolver.loaded) {
+            for (download in ProviderHtmlParser.downloadCandidateUrls(document, canonicalUrl)) {
+                if (!resolver.canContinue || resolver.resolve(download, canonicalUrl)) break
+            }
+        }
+
         return resolver.loaded
     }
 
     private suspend fun resolvePlayer(raw: String?, referer: String, resolver: LinkResolutionSession) {
         val url = ProviderHtmlParser.absoluteUrl(raw, referer) ?: return
-        if (resolver.resolve(url, referer)) return
-
-        try {
-            val html = resolver.withinBudget {
-                app.get(
-                    url,
-                    referer = referer,
-                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-                ).text
-            } ?: return
-            LayarKacaPlayerParser.mediaUrls(html, url).forEach { resolver.resolve(it, url) }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Exception) {
-            // Keep trying the remaining server tabs.
-        }
+        resolver.resolve(url, referer)
     }
 
     private fun providerUrl(raw: String?): String? =

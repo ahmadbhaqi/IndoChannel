@@ -69,17 +69,28 @@ internal object AbyssPlayerParser {
     }
 
     private fun parseSources(root: JsonNode): List<AbyssMediaSource> {
-        val sources = root.path("mp4").path("sources")
+        val mp4 = root.path("mp4")
+        val sources = mp4.path("sources")
         if (!sources.isArray) return emptyList()
+
+        // Current Abyss payloads describe encrypted backing storage plus a
+        // browser-only /sora chunk protocol. source.url + source.path is not a
+        // playable MP4 even though it answers ranged requests. Do not pass
+        // those ciphertext bytes to Cloudstream; advance to the next mirror.
+        val domains = mp4.path("domains")
+        val usesChunkProtocol =
+            (domains.isArray && domains.size() > 0) ||
+                sources.any { source ->
+                    source.path("sub").asText().isNotBlank() &&
+                        source.path("res_id").canConvertToInt()
+                }
+        if (usesChunkProtocol) return emptyList()
 
         return sources.take(MAX_SOURCE_COUNT).mapNotNull { source ->
             val baseUrl = source.path("url").asText().trim().takeIf { it.startsWith("http") }
                 ?: return@mapNotNull null
             val path = source.path("path").asText().trim().takeIf { it.isNotBlank() }
                 ?: return@mapNotNull null
-            val size = source.path("size").asLong(0L)
-            val partSize = source.path("partSize").asLong(0L)
-            if (size > 0L && partSize > 0L && partSize < size) return@mapNotNull null
             val label = source.path("label").asText().trim().ifBlank { "Abyss" }
             AbyssMediaSource(
                 label = label,
