@@ -12,15 +12,10 @@ class IndoPlugin: Plugin() {
         // Movie & TV Series
         registerMainAPI(LayarKacaProvider())
         registerMainAPI(NgefilmProvider())
-        registerMainAPI(PusatfilmProvider())
         registerMainAPI(DutamovieProvider())
-        registerMainAPI(RebahinProvider())
-        registerMainAPI(CgvindoProvider())
         registerMainAPI(KitanontonProvider())
-        registerMainAPI(JuraganFilmProvider())
         registerMainAPI(IndoxxiProvider())
         registerMainAPI(FilmapikProvider())
-        registerMainAPI(IndofilmProvider())
         
         // Anime
         registerMainAPI(OtakudesuProvider())

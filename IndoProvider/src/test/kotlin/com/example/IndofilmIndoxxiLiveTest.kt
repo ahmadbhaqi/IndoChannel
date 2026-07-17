@@ -9,18 +9,8 @@ import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
-/** Opt-in smoke tests against current provider pages and their real players. */
-class IndofilmIndoxxiLiveTest {
-    @Test
-    fun `indofilm resolves a current player`() = runBlocking {
-        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
-
-        verify(
-            IndofilmProvider(),
-            "https://indofilm.pics/pickleball-pete-2026/"
-        )
-    }
-
+/** Opt-in smoke tests against current active provider pages and their real players. */
+class IndoxxiLayarKacaLiveTest {
     @Test
     fun `indoxxi resolves a current reachable mirror`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
@@ -29,6 +19,16 @@ class IndofilmIndoxxiLiveTest {
             provider = IndoxxiProvider(),
             pageUrl = "https://filmbioskop21.lk21.in.net/" +
                 "nonton-film-golden-kamuy-the-abashiri-prison-raid-lk21-2026/"
+        )
+    }
+
+    @Test
+    fun `indoxxi resolves current Indonesia category movie`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
+
+        verify(
+            provider = IndoxxiProvider(),
+            pageUrl = "https://filmbioskop21.lk21.in.net/nonton-film-mothernet-lk21-2026/"
         )
     }
 

@@ -3,12 +3,49 @@ package com.example
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import java.net.URI
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
 class ProviderLiveDiagnosticTest {
+    @Test
+    fun `kitanonton resolves current catalog samples`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
+
+        val page = "https://kitanonton2.surf/nonton-one-piece-heroines-2026-sub-indo/"
+        val links = mutableListOf<ExtractorLink>()
+        val loaded = withTimeout(35_000) {
+            KitanontonProvider().loadLinks(page, false, {}, links::add)
+        }
+        println(
+            "KitaNonton page=$page loaded=$loaded links=" +
+                links.map { "${it.url.safeHost()} headers=${it.headers.keys}" }
+        )
+        assertTrue(loaded && links.isNotEmpty(), "KitaNonton failed current page $page")
+        val probes = linkedMapOf<String, Int?>()
+        for (link in links.take(8)) {
+            val code = runCatching {
+                withTimeout(20_000) {
+                    app.get(
+                        link.url,
+                        referer = link.referer,
+                        headers = link.headers + ("Range" to "bytes=0-31"),
+                        timeout = 20L
+                    ).code
+                }
+            }.getOrNull()
+            probes[link.url.safeHost()] = code
+            if (code in 200..299) break
+        }
+        println("KitaNonton current probes=$probes")
+        assertTrue(
+            probes.values.any { it in 200..299 },
+            "KitaNonton current media returned no reachable source: $probes"
+        )
+    }
+
     @Test
     fun `kitanonton emits a real link`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
@@ -22,7 +59,7 @@ class ProviderLiveDiagnosticTest {
             links::add
         )
 
-        println("KitaNonton loaded=$loaded links=${links.map { it.url }}")
+        println("KitaNonton loaded=$loaded links=${links.map { it.url.safeHost() }}")
         assertTrue(
             loaded && links.any { it.url.contains(".sssrr.org/") },
             "KitaNonton did not decode a complete Abyss MP4 source"
@@ -38,7 +75,7 @@ class ProviderLiveDiagnosticTest {
                     ).code
                 }
             }.getOrNull()
-            link.url to code
+            link.url.safeHost() to code
         }
         println("KitaNonton probes=$probes")
         assertTrue(
@@ -46,4 +83,7 @@ class ProviderLiveDiagnosticTest {
             "KitaNonton emitted no reachable Abyss media URL: $probes"
         )
     }
+
+    private fun String.safeHost(): String = runCatching { URI(this).host.orEmpty() }
+        .getOrDefault("invalid")
 }

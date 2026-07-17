@@ -2,6 +2,7 @@ package com.example
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import java.net.URI
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
@@ -134,7 +135,9 @@ class KitanontonProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
-        listOf(data.trimEnd('/') + "/play", data).distinct().forEach { page ->
+        KitanontonPlayerParser.resolvePages(
+            listOf(data.trimEnd('/') + "/play", data)
+        ) { page ->
             try {
                 val fetch = app.get(
                     page,
@@ -142,11 +145,12 @@ class KitanontonProvider : MainAPI() {
                     timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                 )
                 val document = fetch.document
-                ProviderHtmlParser.mediaSources(document).forEach { source ->
+                val playerUrls = ProviderHtmlParser.mediaSources(document) +
+                    document.select("[data-iframe]").mapNotNull { server ->
+                        server.attr("data-iframe").decodeServerUrl()
+                    }
+                KitanontonPlayerParser.resolveAll(playerUrls) { source ->
                     resolver.resolve(source, fetch.url)
-                }
-                document.select("[data-iframe]").forEach { server ->
-                    resolver.resolve(server.attr("data-iframe").decodeServerUrl(), fetch.url)
                 }
             } catch (error: kotlin.coroutines.cancellation.CancellationException) {
                 throw error
@@ -173,4 +177,35 @@ class KitanontonProvider : MainAPI() {
             .takeIf { it.isNotBlank() }
     }
 
+}
+
+internal object KitanontonPlayerParser {
+    suspend fun resolvePages(pages: List<String>, resolve: suspend (String) -> Unit) {
+        for (page in pages.distinct()) resolve(page)
+    }
+
+    suspend fun resolveAll(urls: List<String>, resolve: suspend (String) -> Unit) {
+        for (url in orderPlayerUrls(urls)) resolve(url)
+    }
+
+    fun orderPlayerUrls(urls: List<String>): List<String> {
+        return urls.distinct().withIndex()
+            .sortedWith(compareBy<IndexedValue<String>> { priority(it.value) }.thenBy { it.index })
+            .map { it.value }
+    }
+
+    private fun priority(url: String): Int {
+        val host = runCatching { URI(url).host.orEmpty().lowercase() }.getOrDefault("")
+        return when {
+            host == "abyssplayer.com" || host.endsWith(".abyssplayer.com") ||
+                host == "abyss.to" || host.endsWith(".abyss.to") -> 0
+            host == "freeon.site" || host.endsWith(".freeon.site") ||
+                host == "justplay.cam" || host.endsWith(".justplay.cam") ||
+                host == "bysebuho.com" || host.endsWith(".bysebuho.com") ||
+                host == "asiastream.cc" || host.endsWith(".asiastream.cc") ||
+                host == "playsobat.xyz" || host.endsWith(".playsobat.xyz") -> 1
+            host.matches(Regex("""\d{1,3}(?:\.\d{1,3}){3}""")) -> 3
+            else -> 2
+        }
+    }
 }

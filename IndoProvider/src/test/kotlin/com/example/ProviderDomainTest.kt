@@ -23,7 +23,6 @@ class ProviderDomainTest {
             "DutamovieProvider.kt" to """override var mainUrl = "https://austincomputerworks.org"""",
             "IndoxxiProvider.kt" to """override var mainUrl = "https://filmbioskop21.lk21.in.net"""",
             "FilmapikProvider.kt" to """override var mainUrl = "https://filmapik.college"""",
-            "IndofilmProvider.kt" to """override var mainUrl = "https://indofilm.pics"""",
             "KitanontonProvider.kt" to """override var mainUrl = "https://kitanonton2.surf""""
         )
 
@@ -51,7 +50,6 @@ class ProviderDomainTest {
         val expectedRegistrations = listOf(
             "registerMainAPI(IndoxxiProvider())",
             "registerMainAPI(FilmapikProvider())",
-            "registerMainAPI(IndofilmProvider())",
             "registerMainAPI(AnimeindoProvider())",
             "registerMainAPI(OploverzProvider())",
             "registerMainAPI(ZoronimeProvider())"
@@ -68,7 +66,6 @@ class ProviderDomainTest {
             "NgefilmProvider.kt",
             "DutamovieProvider.kt",
             "PusatfilmProvider.kt",
-            "RebahinProvider.kt",
             "KitanontonProvider.kt",
             "FilmapikProvider.kt"
         )
@@ -95,16 +92,42 @@ class ProviderDomainTest {
     fun `plugin keeps every provider registered`() {
         val plugin = source("IndoPlugin.kt")
         val expected = listOf(
-            "LayarKacaProvider", "NgefilmProvider", "PusatfilmProvider", "DutamovieProvider",
-            "RebahinProvider", "CgvindoProvider", "KitanontonProvider",
-            "JuraganFilmProvider", "IndoxxiProvider", "FilmapikProvider",
-            "IndofilmProvider", "OtakudesuProvider", "SamehadakuProvider", "AnoboyProvider",
+            "LayarKacaProvider", "NgefilmProvider", "DutamovieProvider",
+            "KitanontonProvider", "IndoxxiProvider", "FilmapikProvider",
+            "OtakudesuProvider", "SamehadakuProvider", "AnoboyProvider",
             "KuronimeProvider", "AnimeindoProvider", "OploverzProvider", "ZoronimeProvider"
         )
 
         expected.forEach { provider ->
             assertTrue(plugin.contains("registerMainAPI($provider())"), "$provider must remain visible")
         }
+    }
+
+    @Test
+    fun `sohib21 clones are not registered as independent providers`() {
+        val plugin = source("IndoPlugin.kt")
+        val cloneProviders = listOf(
+            "RebahinProvider",
+            "CgvindoProvider",
+            "IndofilmProvider",
+            "JuraganFilmProvider"
+        )
+
+        cloneProviders.forEach { provider ->
+            assertFalse(
+                plugin.contains("registerMainAPI($provider())"),
+                "$provider must stay disabled while it exposes the shared invalid Sohib21 catalog"
+            )
+        }
+    }
+
+    @Test
+    fun `pusatfilm stays disabled while its only upstream has no files`() {
+        val plugin = source("IndoPlugin.kt")
+        assertFalse(
+            plugin.contains("registerMainAPI(PusatfilmProvider())"),
+            "Pusatfilm must stay disabled while every Kotakajaib file returns File Error"
+        )
     }
 
     @Test
@@ -180,7 +203,7 @@ class ProviderDomainTest {
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
         assertTrue(
-            Regex("""(?m)^version\s*=\s*4\s*$""").containsMatchIn(moduleBuild.readText()),
+            Regex("""(?m)^version\s*=\s*5\s*$""").containsMatchIn(moduleBuild.readText()),
             "Cloudstream must see these provider fixes as a new plugin release"
         )
     }

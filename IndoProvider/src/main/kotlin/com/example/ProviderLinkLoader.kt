@@ -225,6 +225,35 @@ internal class LinkResolutionSession(
                 return
             }
 
+            if (host.matches(Regex("""\d{1,3}(?:\.\d{1,3}){3}"""))) {
+                val html = pageFetcher(url, referer)
+                cachedHtml = html
+                if (ProviderHtmlParser.isNonContentPage(html)) return
+                val beforeAdapter = emittedLinks.size
+                JuicyCodesPlayerParser.playback(html)?.let { playback ->
+                    playback.tracks.forEach { track ->
+                        subtitleCallback(newSubtitleFile(track.label, track.url))
+                    }
+                    playback.media.forEach { media ->
+                        emit(
+                            directLinkFactory(
+                                api.name,
+                                "${api.name} ${media.label}",
+                                media.url,
+                                url,
+                                media.quality,
+                                if (media.isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                                linkedMapOf("Referer" to url).apply {
+                                    media.userAgent?.let { put("User-Agent", it) }
+                                }
+                            )
+                        )
+                    }
+                }
+                if (emittedLinks.size > beforeAdapter) return
+                if (JuicyCodesPlayerParser.recognizes(html)) return
+            }
+
             if (JustPlayPlayerParser.supports(host)) {
                 val beforeAdapter = emittedLinks.size
                 val playback = try {
@@ -287,6 +316,29 @@ internal class LinkResolutionSession(
 
             val html = cachedHtml ?: pageFetcher(url, referer)
             if (ProviderHtmlParser.isNonContentPage(html)) return
+            val beforeJuicyCodes = emittedLinks.size
+            JuicyCodesPlayerParser.playback(html)?.let { playback ->
+                playback.tracks.forEach { track ->
+                    subtitleCallback(newSubtitleFile(track.label, track.url))
+                }
+                playback.media.forEach { media ->
+                    emit(
+                        directLinkFactory(
+                            api.name,
+                            "${api.name} ${media.label}",
+                            media.url,
+                            url,
+                            media.quality,
+                            if (media.isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                            linkedMapOf("Referer" to url).apply {
+                                media.userAgent?.let { put("User-Agent", it) }
+                            }
+                        )
+                    )
+                }
+            }
+            if (emittedLinks.size > beforeJuicyCodes) return
+            if (JuicyCodesPlayerParser.recognizes(html)) return
             val document = Jsoup.parse(html, url)
             ProviderHtmlParser.mediaSources(document).forEach { nested ->
                 ProviderHtmlParser.absoluteUrl(nested, url)?.let {

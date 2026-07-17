@@ -26,14 +26,9 @@ class MovieProviderPipelineLiveTest {
         val failures = mutableListOf<String>()
         listOf(
             IndoxxiProvider(),
-            IndofilmProvider(),
             LayarKacaProvider(),
             NgefilmProvider(),
-            PusatfilmProvider(),
             DutamovieProvider(),
-            RebahinProvider(),
-            CgvindoProvider(),
-            JuraganFilmProvider(),
             KitanontonProvider(),
             FilmapikProvider()
         ).forEach { provider ->
@@ -76,12 +71,6 @@ class MovieProviderPipelineLiveTest {
                 "Avatar: Fire and Ash"
             ),
             DetailCase(
-                IndofilmProvider(),
-                "https://indofilm.pics/pickleball-pete-2026/",
-                "Pickleball Pete",
-                requiresSynopsis = false
-            ),
-            DetailCase(
                 LayarKacaProvider(),
                 "https://tv.nontonfilm.red/caught-in-the-net-2026/",
                 "Caught in the Net"
@@ -92,32 +81,9 @@ class MovieProviderPipelineLiveTest {
                 "Gangland"
             ),
             DetailCase(
-                PusatfilmProvider(),
-                "https://v4.pusatfilm21info.com/royal-2025/",
-                "Royal"
-            ),
-            DetailCase(
                 DutamovieProvider(),
                 "https://austincomputerworks.org/bagong-tukso-2-2026/",
                 "Bagong Tukso 2"
-            ),
-            DetailCase(
-                RebahinProvider(),
-                "https://154.203.167.63/pickleball-pete-2026/",
-                "Pickleball Pete",
-                requiresSynopsis = false
-            ),
-            DetailCase(
-                CgvindoProvider(),
-                "http://154.93.73.168/pickleball-pete-2026/",
-                "Pickleball Pete",
-                requiresSynopsis = false
-            ),
-            DetailCase(
-                JuraganFilmProvider(),
-                "https://juraganfilm1.lol/pickleball-pete-2026/",
-                "Pickleball Pete",
-                requiresSynopsis = false
             ),
             DetailCase(
                 KitanontonProvider(),
