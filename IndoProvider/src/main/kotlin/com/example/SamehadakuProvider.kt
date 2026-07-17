@@ -104,7 +104,12 @@ class SamehadakuProvider : MainAPI() {
                     headers = mapOf("X-Requested-With" to "XMLHttpRequest")
                 ).document.selectFirst("iframe")?.attr("src")?.let { fixIframeUrl(it) }
                 if (!embed.isNullOrBlank()) {
-                    loaded = loadExtractorWithResult(embed, "$mainUrl/", subtitleCallback, callback) || loaded
+                    loaded = loadResolvedExtractorWithResult(
+                        embed,
+                        "$mainUrl/",
+                        subtitleCallback,
+                        callback
+                    ) || loaded
                 }
             } catch (_: Exception) {}
         }
@@ -114,7 +119,16 @@ class SamehadakuProvider : MainAPI() {
             el.select("a").forEach {
                 loadExtractor(fixUrl(it.attr("href")), "$mainUrl/", subtitleCallback) { link ->
                     loaded = true
-                    runBlocking { callback.invoke(newExtractorLink(link.name, link.name, link.url, link.type) { this.referer = link.referer; this.quality = el.select("strong").text().fixQuality(); this.headers = link.headers }) }
+                    runBlocking {
+                        callback.invoke(
+                            newExtractorLink(link.source, link.name, link.url, link.type) {
+                                this.referer = link.referer
+                                this.quality = el.select("strong").text().fixQuality()
+                                this.headers = link.headers
+                                this.extractorData = link.extractorData
+                            }.withSimpleServerName(name)
+                        )
+                    }
                 }
             }
         }

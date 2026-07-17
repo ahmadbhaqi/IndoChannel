@@ -238,7 +238,7 @@ internal class LinkResolutionSession(
                         emit(
                             directLinkFactory(
                                 api.name,
-                                "${api.name} ${media.label}",
+                                "${api.name} JuicyCodes ${media.label}",
                                 media.url,
                                 url,
                                 media.quality,
@@ -325,7 +325,7 @@ internal class LinkResolutionSession(
                     emit(
                         directLinkFactory(
                             api.name,
-                            "${api.name} ${media.label}",
+                            "${api.name} JuicyCodes ${media.label}",
                             media.url,
                             url,
                             media.quality,
@@ -395,21 +395,28 @@ internal class LinkResolutionSession(
                         track.url
                     )
                 )
-            }
+        }
         playback.sources.forEach { source ->
+            val resolution = ServerLinkLabelFormatter.resolution(
+                source.height ?: Qualities.Unknown.value,
+                source.quality,
+                source.label
+            ) ?: Qualities.Unknown.value
             emit(
                 directLinkFactory(
                     api.name,
                     "${api.name} ${source.label}",
                     source.url,
                     playerUrl,
-                    source.height ?: Qualities.Unknown.value,
+                    resolution,
                     if (source.isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
                     mediaHeaders
                 )
             )
         }
     }
+
+    internal fun emitResolved(link: ExtractorLink) = emit(link)
 
     private fun emit(link: ExtractorLink) {
         if (link.url.isBlank() || !isSafeRemoteHttpUrl(link.url)) return
@@ -419,7 +426,7 @@ internal class LinkResolutionSession(
             type = link.type,
             headers = link.headers.toMap()
         )
-        if (emittedLinks.add(key)) callback(link)
+        if (emittedLinks.add(key)) callback(link.withSimpleServerName(api.name))
     }
 }
 

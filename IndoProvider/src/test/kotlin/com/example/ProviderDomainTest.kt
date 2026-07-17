@@ -203,7 +203,7 @@ class ProviderDomainTest {
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
         assertTrue(
-            Regex("""(?m)^version\s*=\s*5\s*$""").containsMatchIn(moduleBuild.readText()),
+            Regex("""(?m)^version\s*=\s*6\s*$""").containsMatchIn(moduleBuild.readText()),
             "Cloudstream must see these provider fixes as a new plugin release"
         )
     }
@@ -251,5 +251,12 @@ class ProviderDomainTest {
             Regex("""\bselectFirst\s*\(""").containsMatchIn(loadLinksSource),
             "PusatfilmProvider loadLinks should not stop at the first iframe"
         )
+    }
+
+    @Test
+    fun `filmapik reports success only after resolver emits a safe link`() {
+        val provider = source("FilmapikProvider.kt")
+        assertTrue(provider.contains("return resolver.loaded"))
+        assertFalse(provider.contains("resolver.loaded || directUrls.isNotEmpty()"))
     }
 }

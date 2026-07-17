@@ -21,9 +21,19 @@ class ProviderLiveDiagnosticTest {
         }
         println(
             "KitaNonton page=$page loaded=$loaded links=" +
-                links.map { "${it.url.safeHost()} headers=${it.headers.keys}" }
+                links.map { "${it.name}@${it.url.safeHost()} headers=${it.headers.keys}" }
         )
         assertTrue(loaded && links.isNotEmpty(), "KitaNonton failed current page $page")
+        assertTrue(
+            links.none { it.name.contains("KitaNonton", ignoreCase = true) },
+            "KitaNonton provider prefix was not removed: ${links.map { it.name }}"
+        )
+        assertTrue(
+            links.all { link ->
+                link.quality !in STANDARD_RESOLUTIONS || link.name.contains("${link.quality}p")
+            },
+            "KitaNonton known resolution is missing from server name: ${links.map { it.name to it.quality }}"
+        )
         val probes = linkedMapOf<String, Int?>()
         for (link in links.take(8)) {
             val code = runCatching {
@@ -86,4 +96,10 @@ class ProviderLiveDiagnosticTest {
 
     private fun String.safeHost(): String = runCatching { URI(this).host.orEmpty() }
         .getOrDefault("invalid")
+
+    private companion object {
+        val STANDARD_RESOLUTIONS = setOf(
+            144, 180, 240, 288, 360, 480, 540, 576, 720, 900, 1080, 1440, 2160, 4320
+        )
+    }
 }

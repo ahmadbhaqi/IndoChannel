@@ -168,6 +168,7 @@ class BysePlayerParserTest {
         assertEquals("https://media.example/current/master.m3u8", links.single().url)
         assertEquals(playerUrl, links.single().referer)
         assertEquals(720, links.single().quality)
+        assertEquals("Byse • 720p", links.single().name)
         assertEquals(ExtractorLinkType.M3U8, links.single().type)
         assertEquals(playerUrl, links.single().headers["Referer"])
     }

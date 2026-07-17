@@ -131,7 +131,7 @@ class AnimeindoProvider : MainAPI() {
                     // media URLs are bound to the extraction IP, not a page URL.
                     referer = ""
                     quality = Qualities.Unknown.value
-                }
+                }.withSimpleServerName(name)
             )
             directLoaded = true
         }

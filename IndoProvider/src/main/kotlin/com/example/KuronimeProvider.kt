@@ -72,7 +72,7 @@ open class KuronimeProvider : MainAPI() {
                     "Origin" to KUROPLAYER_ORIGIN,
                     "Referer" to KUROPLAYER_REFERER
                 )
-            }
+            }.withSimpleServerName(name)
         )
         return true
     }

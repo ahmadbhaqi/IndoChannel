@@ -102,7 +102,16 @@ class OtakudesuProvider : MainAPI() {
         val server = toPlayableUrl(url) ?: return false
         loadExtractor(server, referer, subtitleCallback) { link ->
             loaded = true
-            runBlocking { callback.invoke(newExtractorLink(link.name, link.name, link.url, link.type) { this.referer = link.referer; this.quality = quality; this.headers = link.headers; this.extractorData = link.extractorData }) }
+            runBlocking {
+                callback.invoke(
+                    newExtractorLink(link.source, link.name, link.url, link.type) {
+                        this.referer = link.referer
+                        this.quality = quality
+                        this.headers = link.headers
+                        this.extractorData = link.extractorData
+                    }.withSimpleServerName(name)
+                )
+            }
         }
         return loaded
     }

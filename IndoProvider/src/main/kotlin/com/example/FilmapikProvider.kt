@@ -169,22 +169,21 @@ class FilmapikProvider : MainAPI() {
                         }
                     ).distinct()
                 servers.forEach { raw ->
-                    resolvePlayer(raw, fetch.url, resolver, directUrls, callback)
+                    resolvePlayer(raw, fetch.url, resolver, directUrls)
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
             }
         }
-        return resolver.loaded || directUrls.isNotEmpty()
+        return resolver.loaded
     }
 
     private suspend fun resolvePlayer(
         raw: String?,
         referer: String,
         resolver: LinkResolutionSession,
-        directUrls: MutableSet<String>,
-        callback: (ExtractorLink) -> Unit
+        directUrls: MutableSet<String>
     ) {
         val playerUrl = ProviderHtmlParser.absoluteUrl(raw, referer) ?: return
         if (resolver.resolve(playerUrl, referer)) return
@@ -199,7 +198,7 @@ class FilmapikProvider : MainAPI() {
                 if (directMediaType(source.url) != null) {
                     resolver.resolve(source.url, playerUrl)
                 } else if (directUrls.add(source.url)) {
-                    callback(
+                    resolver.emitResolved(
                         newExtractorLink(name, "$name ${source.label}", source.url, ExtractorLinkType.VIDEO) {
                             this.referer = playerUrl
                             quality = source.quality

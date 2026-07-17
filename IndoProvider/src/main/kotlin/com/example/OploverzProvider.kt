@@ -183,7 +183,7 @@ class OploverzProvider : MainAPI() {
                     referer = "$BLOGGER_ORIGIN/"
                     quality = Qualities.Unknown.value
                     headers = mapOf("Referer" to "$BLOGGER_ORIGIN/")
-                }
+                }.withSimpleServerName(name)
             )
         }
 
