@@ -11,7 +11,10 @@ import kotlin.test.assertTrue
 class AnimeProviderLiveTest {
     @Test
     fun `animeindo emits extensionless upstream media`() = runBlocking {
-        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
 
         val links = mutableListOf<ExtractorLink>()
         val loaded = AnimeindoProvider().loadLinks(
@@ -31,7 +34,10 @@ class AnimeProviderLiveTest {
 
     @Test
     fun `oploverz resolves current blogger rpc`() = runBlocking {
-        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
 
         val links = mutableListOf<ExtractorLink>()
         val loaded = OploverzProvider().loadLinks(
@@ -51,7 +57,10 @@ class AnimeProviderLiveTest {
 
     @Test
     fun `kuronime emits decrypted kuroplayer hls`() = runBlocking {
-        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
 
         val links = mutableListOf<ExtractorLink>()
         val loaded = KuronimeProvider().loadLinks(

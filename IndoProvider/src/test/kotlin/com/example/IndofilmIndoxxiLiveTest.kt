@@ -12,33 +12,69 @@ import kotlin.test.assertTrue
 /** Opt-in smoke tests against current active provider pages and their real players. */
 class IndoxxiLayarKacaLiveTest {
     @Test
-    fun `indoxxi resolves a current reachable mirror`() = runBlocking {
-        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
+    fun `indoxxi emits a current concrete mirror`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
 
         verify(
             provider = IndoxxiProvider(),
             pageUrl = "https://filmbioskop21.lk21.in.net/" +
-                "nonton-film-golden-kamuy-the-abashiri-prison-raid-lk21-2026/"
+                "nonton-film-golden-kamuy-the-abashiri-prison-raid-lk21-2026/",
+            probeMedia = false
         )
     }
 
     @Test
-    fun `indoxxi resolves current Indonesia category movie`() = runBlocking {
-        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
+    fun `indoxxi emits a current Indonesia category movie mirror`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
 
         verify(
             provider = IndoxxiProvider(),
-            pageUrl = "https://filmbioskop21.lk21.in.net/nonton-film-mothernet-lk21-2026/"
+            pageUrl = "https://filmbioskop21.lk21.in.net/nonton-film-mothernet-lk21-2026/",
+            probeMedia = false
         )
     }
 
     @Test
-    fun `layarkaca prioritizes a reachable current server`() = runBlocking {
-        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
+    fun `indoxxi exposes the trusted Gofile fallback on an older Indonesia movie`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val pageUrl =
+            "https://filmbioskop21.lk21.in.net/nonton-film-sweet-dreams-lk21-2023/"
+        val fetch = withTimeout(45_000) {
+            app.get(pageUrl, timeout = 45L)
+        }
+        val candidates = ProviderHtmlParser.downloadCandidateUrls(
+            fetch.document,
+            fetch.url
+        )
+        assertTrue(
+            candidates.any { it.startsWith("https://gofile.io/d/") },
+            "Indoxxi did not expose the Sweet Dreams Gofile fallback: $candidates"
+        )
+        // Playback is intentionally not asserted: Gofile's current public web
+        // flow creates a guest account and requires Bearer/X-Website-Token.
+    }
+
+    @Test
+    fun `layarkaca emits a current concrete server`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
 
         verify(
             LayarKacaProvider(),
-            "https://tv.nontonfilm.red/evil-dead-burn-2026/"
+            "https://tv.nontonfilm.red/evil-dead-burn-2026/",
+            probeMedia = false
         )
     }
 

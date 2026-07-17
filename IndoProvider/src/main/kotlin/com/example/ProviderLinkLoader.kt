@@ -91,11 +91,21 @@ internal class LinkResolutionSession(
         sessionTimeoutMs.coerceIn(1L, 10 * 60_000L) * 1_000_000L
 
     val loaded: Boolean get() = emittedLinks.isNotEmpty()
+    internal val canContinue: Boolean
+        get() = System.nanoTime() < deadlineNanos && visitedCandidates.size < maxCandidates
+
+    internal suspend fun <T> withinBudget(block: suspend () -> T): T? {
+        val remainingMs = remainingBudgetMs()
+        if (remainingMs == 0L || visitedCandidates.size >= maxCandidates) return null
+        return withTimeoutOrNull(minOf(candidateTimeoutMs.coerceAtLeast(1L), remainingMs)) {
+            block()
+        }
+    }
 
     suspend fun resolve(raw: String?, referer: String?): Boolean {
         val before = emittedLinks.size
         val url = api.toPlayableUrl(raw)?.takeUnless { it.isTrailerUrl() } ?: return false
-        val remainingMs = ((deadlineNanos - System.nanoTime()) / 1_000_000L).coerceAtLeast(0L)
+        val remainingMs = remainingBudgetMs()
         if (remainingMs == 0L) return false
         withTimeoutOrNull(minOf(candidateTimeoutMs.coerceAtLeast(1L), remainingMs)) {
             resolveCandidate(url, referer, genericDepth = 0)
@@ -419,6 +429,7 @@ internal class LinkResolutionSession(
     internal fun emitResolved(link: ExtractorLink) = emit(link)
 
     private fun emit(link: ExtractorLink) {
+        if (System.nanoTime() >= deadlineNanos) return
         if (link.url.isBlank() || !isSafeRemoteHttpUrl(link.url)) return
         val key = EmittedLinkKey(
             url = link.url,
@@ -428,6 +439,9 @@ internal class LinkResolutionSession(
         )
         if (emittedLinks.add(key)) callback(link.withSimpleServerName(api.name))
     }
+
+    private fun remainingBudgetMs(): Long =
+        ((deadlineNanos - System.nanoTime()) / 1_000_000L).coerceAtLeast(0L)
 }
 
 private suspend fun fetchBoundedByseApi(url: String, referer: String?): String {
@@ -577,7 +591,11 @@ private fun isPublicAddress(address: InetAddress): Boolean {
     if (address.isAnyLocalAddress || address.isLoopbackAddress || address.isLinkLocalAddress ||
         address.isSiteLocalAddress || address.isMulticastAddress
     ) return false
-    if (address is Inet6Address) return true
+    if (address is Inet6Address) {
+        val first = address.address.firstOrNull()?.toInt()?.and(0xff) ?: return false
+        if ((first and 0xfe) == 0xfc) return false
+        return true
+    }
     return isPublicIpv4(address.hostAddress ?: return false)
 }
 

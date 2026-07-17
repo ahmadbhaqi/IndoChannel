@@ -7,6 +7,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import org.jsoup.Jsoup
 
 class RotatingMovieProviderRegressionTest {
     private val sourceRoot = listOf(
@@ -105,6 +106,26 @@ class RotatingMovieProviderRegressionTest {
         assertEquals(
             listOf(pages[2], pages[1], pages[0], pages[3]),
             DutamoviePlayerParser.orderPlayerPages(pages)
+        )
+    }
+
+    @Test
+    fun `dutamovie collects an inline-only detail iframe`() {
+        val detailUrl = "https://austincomputerworks.org/ghost-in-the-cell-2026/"
+        val document = Jsoup.parse(
+            """
+            <article>
+                <div class="gmr-embed-responsive">
+                    <iframe data-src="https://abyssplayer.com/R4DrMYBr1"></iframe>
+                </div>
+            </article>
+            """.trimIndent(),
+            detailUrl
+        )
+
+        assertEquals(
+            listOf("https://abyssplayer.com/R4DrMYBr1"),
+            DutamoviePlayerParser.detailMediaUrls(document, detailUrl)
         )
     }
 }

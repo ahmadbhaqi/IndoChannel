@@ -63,7 +63,7 @@ class IndoxxiProvider : MainAPI() {
         val requestUrl = providerUrl(url) ?: return null
         val fetch = app.get(requestUrl)
         val document = fetch.document
-        val canonicalUrl = providerUrl(fetch.url) ?: requestUrl
+        val canonicalUrl = providerUrl(fetch.url) ?: return null
         val title = MovieMetadataParser.title(
             document.selectFirst("h1.entry-title, h3[itemprop=name]")?.text()
         ) ?: return null
@@ -119,13 +119,21 @@ class IndoxxiProvider : MainAPI() {
         val requestUrl = providerUrl(data) ?: return false
         val fetch = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
         val document = fetch.document
-        val canonicalUrl = providerUrl(fetch.url) ?: requestUrl
+        val canonicalUrl = providerUrl(fetch.url) ?: return false
         val baseUrl = baseUrl(canonicalUrl)
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
 
         ProviderHtmlParser.mediaSources(document).forEach { resolvePlayer(it, canonicalUrl, resolver) }
+        if (!resolver.loaded) {
+            for (downloadUrl in ProviderHtmlParser.downloadCandidateUrls(document, canonicalUrl)) {
+                if (!resolver.canContinue) break
+                resolvePlayer(downloadUrl, canonicalUrl, resolver)
+                if (resolver.loaded) break
+            }
+        }
 
-        ProviderHtmlParser.muviproAjaxRequests(document).forEach { request ->
+        for (request in ProviderHtmlParser.muviproAjaxRequests(document)) {
+            if (!resolver.canContinue) break
             try {
                 val response = app.post(
                     "$baseUrl/wp-admin/admin-ajax.php",
@@ -134,7 +142,7 @@ class IndoxxiProvider : MainAPI() {
                     headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
                     timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                 ).document
-                ProviderHtmlParser.iframeSources(response).forEach {
+                ProviderHtmlParser.mediaSources(response).forEach {
                     resolvePlayer(it, canonicalUrl, resolver)
                 }
             } catch (error: CancellationException) {
@@ -144,10 +152,11 @@ class IndoxxiProvider : MainAPI() {
             }
         }
 
-        document.select("ul#player-list > li a[href], ul.muvipro-player-tabs li a[href]").forEach { link ->
+        for (link in document.select("ul#player-list > li a[href], ul.muvipro-player-tabs li a[href]")) {
+            if (!resolver.canContinue) break
             val playerUrl = ProviderHtmlParser.absoluteUrl(link.attr("href"), canonicalUrl)
-                ?: return@forEach
-            if (!playerUrl.startsWith("http")) return@forEach
+                ?: continue
+            if (!playerUrl.startsWith("http")) continue
             try {
                 val playerDocument = app.get(
                     playerUrl,
@@ -171,11 +180,13 @@ class IndoxxiProvider : MainAPI() {
         if (resolver.resolve(url, referer)) return
 
         try {
-            val html = app.get(
-                url,
-                referer = referer,
-                timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-            ).text
+            val html = resolver.withinBudget {
+                app.get(
+                    url,
+                    referer = referer,
+                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+                ).text
+            } ?: return
             IndoxxiPlayerParser.mediaUrls(html, url).forEach { resolver.resolve(it, url) }
         } catch (error: CancellationException) {
             throw error

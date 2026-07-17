@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
 import kotlin.coroutines.cancellation.CancellationException
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
@@ -57,7 +58,8 @@ class DutamovieProvider : MainAPI() {
             ?: throw ErrorLoadingException("Invalid Dutamovie URL")
         val fetch = app.get(requestUrl)
         val document = fetch.document
-        val canonicalUrl = normalizePageUrl(fetch.url) ?: requestUrl
+        val canonicalUrl = normalizePageUrl(fetch.url)
+            ?: throw ErrorLoadingException("Dutamovie redirected to a foreign host")
         val rawTitle = document.selectFirst("h1.entry-title, h1[itemprop=name]")?.text()
             ?.substringBefore("Season")
             ?.substringBefore("Episode")
@@ -98,16 +100,24 @@ class DutamovieProvider : MainAPI() {
         val requestUrl = normalizePageUrl(data) ?: return false
         val fetch = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
         val document = fetch.document
-        val canonicalUrl = normalizePageUrl(fetch.url) ?: requestUrl
+        val canonicalUrl = normalizePageUrl(fetch.url) ?: return false
         val baseUrl = getBaseUrl(canonicalUrl)
         val id = document.selectFirst("div#muvipro_player_content_id")?.attr("data-id")
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        for (server in DutamoviePlayerParser.detailMediaUrls(document, canonicalUrl)) {
+            if (!resolver.canContinue || resolver.resolve(server, canonicalUrl)) break
+        }
+        if (!resolver.loaded) {
+            for (download in ProviderHtmlParser.downloadCandidateUrls(document, canonicalUrl)) {
+                if (!resolver.canContinue || resolver.resolve(download, canonicalUrl)) break
+            }
+        }
         if (id.isNullOrEmpty()) {
             val playerPages = document.select("ul.muvipro-player-tabs li a")
                 .mapNotNull { normalizePageUrl(it.attr("href")) }
                 .let(DutamoviePlayerParser::orderPlayerPages)
             for (playerPage in playerPages) {
-                if (resolver.loaded) break
+                if (resolver.loaded || !resolver.canContinue) break
                 val player = try {
                     val response = app.get(
                         playerPage,
@@ -130,7 +140,7 @@ class DutamovieProvider : MainAPI() {
             }
         } else {
             for (ele in document.select("div.tab-content-ajax")) {
-                if (resolver.loaded) break
+                if (resolver.loaded || !resolver.canContinue) break
                 val server = try {
                     app.post(
                         "$baseUrl/wp-admin/admin-ajax.php",
@@ -162,6 +172,14 @@ class DutamovieProvider : MainAPI() {
 }
 
 internal object DutamoviePlayerParser {
+    fun detailMediaUrls(document: Document, detailUrl: String): List<String> {
+        return ProviderHtmlParser.mediaSources(
+            document,
+            "iframe, div.gmr-embed-responsive iframe"
+        ).mapNotNull { ProviderHtmlParser.absoluteUrl(it, detailUrl) }
+            .distinct()
+    }
+
     fun orderPlayerPages(urls: List<String>): List<String> {
         return urls.distinct().withIndex()
             .sortedWith(compareBy<IndexedValue<String>> { priority(it.value) }.thenBy { it.index })

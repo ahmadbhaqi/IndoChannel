@@ -14,20 +14,29 @@ import kotlin.test.assertTrue
 class RotatingMovieProvidersLiveTest {
     @Test
     fun `ngefilm emits reachable media`() = runBlocking {
-        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
         verify(NgefilmProvider(), "https://new38.ngefilm.site/gangland-2025/")
     }
 
     @Test
     fun `pusatfilm emits reachable media`() = runBlocking {
-        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
         verify(PusatfilmProvider(), "https://v4.pusatfilm21info.com/royal-2025/")
     }
 
     @Test
     fun `dutamovie emits reachable media`() = runBlocking {
-        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
-        verify(DutamovieProvider(), "https://austincomputerworks.org/bagong-tukso-2-2026/")
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+        verify(DutamovieProvider(), "https://austincomputerworks.org/ghost-in-the-cell-2026/")
     }
 
     private suspend fun verify(provider: MainAPI, pageUrl: String) {

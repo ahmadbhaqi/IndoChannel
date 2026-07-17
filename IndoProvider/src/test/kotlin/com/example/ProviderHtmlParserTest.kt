@@ -98,6 +98,96 @@ class ProviderHtmlParserTest {
             "https://oploverz.org/dr-stone-season-4/",
             ProviderHtmlParser.absoluteUrl("/dr-stone-season-4/", "https://oploverz.org")
         )
+        assertEquals(
+            "https://player.example/embed/media.mp4",
+            ProviderHtmlParser.absoluteUrl(
+                "media.mp4",
+                "https://player.example/embed/current"
+            )
+        )
+    }
+
+    @Test
+    fun `downloadCandidateUrls accepts numbered labels and provider download lists`() {
+        val document = Jsoup.parse(
+            """
+            <main>
+              <a href="https://gofile.io/d/current"> Link <span>Download</span> 1 </a>
+              <a href="/download/current" title="Link Download 2"><span class="icon"></span></a>
+              <div class="gmr-download-list">
+                <a href="//pixeldrain.com/u/current-file">Primary mirror</a>
+              </div>
+              <a href="https://gofile.io/d/current" title="Link Download 3">Duplicate mirror</a>
+            </main>
+            """.trimIndent(),
+            "https://provider.example/movie/current/"
+        )
+
+        assertEquals(
+            listOf(
+                "https://gofile.io/d/current",
+                "https://provider.example/download/current",
+                "https://pixeldrain.com/u/current-file"
+            ),
+            ProviderHtmlParser.downloadCandidateUrls(
+                document,
+                "https://provider.example/movie/current/"
+            )
+        )
+    }
+
+    @Test
+    fun `downloadCandidateUrls rejects arbitrary remote hosts and caps the result`() {
+        val links = (1..12).joinToString("") { index ->
+            """<a href="https://gofile.io/d/$index" title="Link Download $index">Mirror</a>"""
+        }
+        val document = Jsoup.parse(
+            """
+            <main>
+              <a href="https://untrusted.example/file" title="Link Download 99">Untrusted</a>
+              $links
+            </main>
+            """.trimIndent(),
+            "https://provider.example/movie/current/"
+        )
+
+        assertEquals(
+            (1..8).map { "https://gofile.io/d/$it" },
+            ProviderHtmlParser.downloadCandidateUrls(
+                document,
+                "https://provider.example/movie/current/"
+            )
+        )
+    }
+
+    @Test
+    fun `downloadCandidateUrls rejects unrelated hidden taxonomy trailer and share links`() {
+        val document = Jsoup.parse(
+            """
+            <main>
+              <a href="https://files.example/current">Download Film Current</a>
+              <a href="javascript:alert(1)" title="Link Download 1">Script</a>
+              <a href="http://127.0.0.1/private" title="Link Download 2">Private host</a>
+              <a href="https://provider.example/tag/download-film-current/" title="Link Download 3">Tag</a>
+              <a href="https://www.youtube.com/watch?v=trailer" title="Link Download 4">Trailer</a>
+              <a href="https://api.whatsapp.com/send?text=movie" title="Link Download 5">Share</a>
+              <a hidden href="https://files.example/hidden" title="Link Download 6">Hidden</a>
+              <div class="download-links">
+                <a href="https://t.me/share/url?url=movie">Telegram</a>
+                <a href="https://provider.example/genre/action/">Action</a>
+              </div>
+            </main>
+            """.trimIndent(),
+            "https://provider.example/movie/current/"
+        )
+
+        assertEquals(
+            emptyList(),
+            ProviderHtmlParser.downloadCandidateUrls(
+                document,
+                "https://provider.example/movie/current/"
+            )
+        )
     }
 
     @Test
@@ -401,6 +491,8 @@ class ProviderHtmlParserTest {
         assertNull(api.toPlayableUrl("http://[0:0:0:0:0:0:0:1]/video.mp4"))
         assertNull(api.toPlayableUrl("http://[::ffff:7f00:1]/video.mp4"))
         assertNull(api.toPlayableUrl("http://[ff02::1]/video.mp4"))
+        assertNull(api.toPlayableUrl("http://[fc00::1]/video.mp4"))
+        assertNull(api.toPlayableUrl("http://[fd12:3456::1]/video.mp4"))
         assertNull(api.toPlayableUrl("http://127.1/video.mp4"))
         assertNull(api.toPlayableUrl("http://2130706433/video.mp4"))
         assertEquals(

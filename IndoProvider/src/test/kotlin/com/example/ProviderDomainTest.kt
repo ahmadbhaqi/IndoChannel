@@ -23,7 +23,8 @@ class ProviderDomainTest {
             "DutamovieProvider.kt" to """override var mainUrl = "https://austincomputerworks.org"""",
             "IndoxxiProvider.kt" to """override var mainUrl = "https://filmbioskop21.lk21.in.net"""",
             "FilmapikProvider.kt" to """override var mainUrl = "https://filmapik.college"""",
-            "KitanontonProvider.kt" to """override var mainUrl = "https://kitanonton2.surf""""
+            "KitanontonProvider.kt" to """override var mainUrl = "https://kitanonton2.surf"""",
+            "RebahinProvider.kt" to """override var mainUrl = "https://154.203.167.63""""
         )
 
         expectedDomains.forEach { (fileName, expected) ->
@@ -50,6 +51,7 @@ class ProviderDomainTest {
         val expectedRegistrations = listOf(
             "registerMainAPI(IndoxxiProvider())",
             "registerMainAPI(FilmapikProvider())",
+            "registerMainAPI(RebahinProvider())",
             "registerMainAPI(AnimeindoProvider())",
             "registerMainAPI(OploverzProvider())",
             "registerMainAPI(ZoronimeProvider())"
@@ -67,7 +69,8 @@ class ProviderDomainTest {
             "DutamovieProvider.kt",
             "PusatfilmProvider.kt",
             "KitanontonProvider.kt",
-            "FilmapikProvider.kt"
+            "FilmapikProvider.kt",
+            "RebahinProvider.kt"
         )
 
         val sessionCreation = Regex("""\bLinkResolutionSession\s*\(""")
@@ -93,7 +96,7 @@ class ProviderDomainTest {
         val plugin = source("IndoPlugin.kt")
         val expected = listOf(
             "LayarKacaProvider", "NgefilmProvider", "DutamovieProvider",
-            "KitanontonProvider", "IndoxxiProvider", "FilmapikProvider",
+            "KitanontonProvider", "IndoxxiProvider", "FilmapikProvider", "RebahinProvider",
             "OtakudesuProvider", "SamehadakuProvider", "AnoboyProvider",
             "KuronimeProvider", "AnimeindoProvider", "OploverzProvider", "ZoronimeProvider"
         )
@@ -104,10 +107,9 @@ class ProviderDomainTest {
     }
 
     @Test
-    fun `sohib21 clones are not registered as independent providers`() {
+    fun `unhealthy sohib21 aliases are not registered as independent providers`() {
         val plugin = source("IndoPlugin.kt")
         val cloneProviders = listOf(
-            "RebahinProvider",
             "CgvindoProvider",
             "IndofilmProvider",
             "JuraganFilmProvider"
@@ -179,10 +181,10 @@ class ProviderDomainTest {
     }
 
     @Test
-    fun `rebahin clones never rewrite a foreign catalog onto their own host`() {
+    fun `rebahin never rewrites an arbitrary foreign catalog onto its own host`() {
         val provider = source("RebahinProvider.kt")
         assertFalse(provider.contains("normalizeUrlHost"))
-        assertFalse(provider.contains("rebahinxxi", ignoreCase = true))
+        assertTrue(provider.contains("normalizeProviderPageUrl"))
     }
 
     @Test
@@ -203,7 +205,7 @@ class ProviderDomainTest {
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
         assertTrue(
-            Regex("""(?m)^version\s*=\s*6\s*$""").containsMatchIn(moduleBuild.readText()),
+            Regex("""(?m)^version\s*=\s*7\s*$""").containsMatchIn(moduleBuild.readText()),
             "Cloudstream must see these provider fixes as a new plugin release"
         )
     }

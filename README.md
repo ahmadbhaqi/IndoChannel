@@ -11,14 +11,10 @@ Saat ini, IndoChannel mendukung berbagai sumber streaming lokal terpopuler, anta
 - **Rebahin**
 - **LayarKaca (LK21)**
 - **Ngefilm**
-- **Pusatfilm**
 - **Dutamovie**
-- **JuraganFilm**
-- **Cgvindo**
 - **KitaNonton**
 - **Indoxxi**
 - **Filmapik**
-- **Indofilm**
 
 ### 🌸 Anime
 - **Otakudesu**
@@ -30,6 +26,8 @@ Saat ini, IndoChannel mendukung berbagai sumber streaming lokal terpopuler, anta
 - **Zoronime**
 
 > **Catatan:** Semua sumber yang ada di sini adalah layanan web streaming gratis yang dikurasi. Harap maklum jika ada situs yang kadang offline atau berubah domain (kami selalu berusaha melakukan update secara berkala).
+>
+> Ketersediaan link tetap bergantung pada mirror tiap judul. Beberapa judul Indonesia lama di Indoxxi saat ini hanya menunjuk ke folder Gofile atau domain download yang sudah parkir; folder Gofile modern memerlukan akun/token resmi dan tidak dianggap sebagai link video langsung.
 
 ---
 
@@ -63,6 +61,17 @@ Pastikan Anda sudah menginstal **JDK 17+** dan menggunakan **Android Studio** at
 ### Kompilasi & Build Lokal:
 - Windows: `.\gradlew.bat IndoProvider:make` atau `.\gradlew.bat IndoProvider:deployWithAdb`
 - Linux & Mac: `./gradlew IndoProvider:make` atau `./gradlew IndoProvider:deployWithAdb`
+
+### Live Test Provider
+
+Live test tidak berjalan pada unit test biasa; JUnit akan menandainya sebagai *skipped*. Untuk menjalankannya di PowerShell:
+
+```powershell
+$env:RUN_LIVE_PROVIDER_TESTS='1'
+.\gradlew.bat :IndoProvider:testDebugUnitTest
+```
+
+Pemeriksaan katalog dan metadata yang lebih luas memakai `RUN_LIVE_MOVIE_PROVIDER_TESTS=1`.
 
 ### Catatan Penting
 Semua struktur plugin dan CSS Selector berpedoman pada dokumentasi `cloudstream3-plugin`. Mohon jangan menggabungkan dua domain berbeda jika kelas elemen web mereka (*DOM class*) tidak sama.

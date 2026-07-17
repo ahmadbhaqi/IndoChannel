@@ -8,6 +8,7 @@ import kotlin.coroutines.cancellation.CancellationException
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.URI
 import java.net.URLEncoder
 
 class FilmapikProvider : MainAPI() {
@@ -68,7 +69,7 @@ class FilmapikProvider : MainAPI() {
     }
 
     private fun Element.toMovieResult(): SearchResponse? {
-        val href = attr("href").takeIf { it.isNotBlank() } ?: return null
+        val href = providerUrl(attr("href")) ?: return null
         val image = selectFirst("img")
         val rawTitle = image?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
             ?: selectFirst("h3")?.text()?.trim()?.takeIf { it.isNotBlank() }
@@ -77,14 +78,17 @@ class FilmapikProvider : MainAPI() {
         val poster = fixUrlNull(ProviderHtmlParser.imageSource(image))
         val quality = selectFirst(".badge-quality")?.text()?.trim()
         val type = if (href.contains("/tvshows/", ignoreCase = true)) TvType.TvSeries else TvType.Movie
-        return newMovieSearchResponse(title, fixUrl(href), type) {
+        return newMovieSearchResponse(title, href, type) {
             posterUrl = poster
             this.quality = getQualityFromString(quality)
         }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val document = app.get(url).document
+        val requestUrl = providerUrl(url) ?: return null
+        val fetch = app.get(requestUrl)
+        val document = fetch.document
+        val canonicalUrl = providerUrl(fetch.url) ?: return null
         val titleElement = document.selectFirst("h1, meta[property=og:title]")
         val title = MovieMetadataParser.title(
             titleElement?.let { if (it.tagName() == "meta") it.attr("content") else it.text() }
@@ -100,11 +104,11 @@ class FilmapikProvider : MainAPI() {
             it.attr("content").takeIf { tag -> tag.isNotBlank() }
         }
 
-        val isSeries = url.contains("/tvshows/", ignoreCase = true)
+        val isSeries = canonicalUrl.contains("/tvshows/", ignoreCase = true)
         return if (isSeries) {
             val episodes = document.select("a.famv-episode-btn[href]")
                 .mapNotNull { link ->
-                    val href = link.attr("href").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    val href = providerUrl(link.attr("href")) ?: return@mapNotNull null
                     val episodeNumber = Regex("""(?:episode-|EP)(\d+)""", RegexOption.IGNORE_CASE)
                         .find("$href ${link.text()}")
                         ?.groupValues
@@ -118,7 +122,7 @@ class FilmapikProvider : MainAPI() {
                             ?.groupValues
                             ?.getOrNull(1)
                             ?.toIntOrNull()
-                    newEpisode(fixUrl(href)) {
+                    newEpisode(href) {
                         name = link.attr("title").takeIf { it.isNotBlank() } ?: link.text()
                         season = seasonNumber
                         episode = episodeNumber
@@ -127,14 +131,14 @@ class FilmapikProvider : MainAPI() {
                 }
                 .distinctBy { it.data }
 
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+            newTvSeriesLoadResponse(title, canonicalUrl, TvType.TvSeries, episodes) {
                 posterUrl = poster
                 this.year = year
                 plot = description
                 this.tags = tags
             }
         } else {
-            newMovieLoadResponse(title, url, TvType.Movie, url) {
+            newMovieLoadResponse(title, canonicalUrl, TvType.Movie, canonicalUrl) {
                 posterUrl = poster
                 this.year = year
                 plot = description
@@ -149,13 +153,19 @@ class FilmapikProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val canonicalData = providerUrl(data) ?: return false
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
         val directUrls = mutableSetOf<String>()
-        val pages = listOf(data.trimEnd('/') + "/play", data).distinct()
-        pages.forEach { page ->
+        val pages = listOfNotNull(
+            FilmapikPlayerParser.playPageUrl(canonicalData),
+            canonicalData
+        ).distinct()
+        for (page in pages) {
+            if (!resolver.canContinue) break
             try {
-                val fetch = app.get(page, referer = data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
+                val fetch = app.get(page, referer = canonicalData, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
                 val document = fetch.document
+                val pageUrl = providerUrl(fetch.url) ?: continue
                 val servers = (
                     ProviderHtmlParser.mediaSources(document) +
                         document.select("[data-url]").mapNotNull {
@@ -168,8 +178,15 @@ class FilmapikProvider : MainAPI() {
                             it.attr("href").takeIf { value -> value.isNotBlank() }
                         }
                     ).distinct()
-                servers.forEach { raw ->
-                    resolvePlayer(raw, fetch.url, resolver, directUrls)
+                for (raw in servers) {
+                    if (!resolver.canContinue) break
+                    resolvePlayer(raw, pageUrl, resolver, directUrls)
+                }
+                if (!resolver.loaded) {
+                    for (download in ProviderHtmlParser.downloadCandidateUrls(document, pageUrl)) {
+                        if (!resolver.canContinue || resolver.loaded) break
+                        resolvePlayer(download, pageUrl, resolver, directUrls)
+                    }
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -189,11 +206,13 @@ class FilmapikProvider : MainAPI() {
         if (resolver.resolve(playerUrl, referer)) return
 
         try {
-            val html = app.get(
-                playerUrl,
-                referer = referer,
-                timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-            ).text
+            val html = resolver.withinBudget {
+                app.get(
+                    playerUrl,
+                    referer = referer,
+                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+                ).text
+            } ?: return
             FilmapikPlayerParser.sources(html, playerUrl).forEach { source ->
                 if (directMediaType(source.url) != null) {
                     resolver.resolve(source.url, playerUrl)
@@ -222,12 +241,15 @@ class FilmapikProvider : MainAPI() {
 
     private fun FilmapikSearchItem.toSearchResponse(): SearchResponse? {
         val safeTitle = MovieMetadataParser.title(title) ?: return null
-        val safeUrl = url?.takeIf { it.isNotBlank() } ?: return null
+        val safeUrl = providerUrl(url) ?: return null
         val type = if (safeUrl.contains("/tvshows/", ignoreCase = true)) TvType.TvSeries else TvType.Movie
         return newMovieSearchResponse(safeTitle, safeUrl, type) {
             posterUrl = img
         }
     }
+
+    private fun providerUrl(raw: String?): String? =
+        FilmapikPlayerParser.normalizePageUrl(raw, mainUrl)
 
 }
 
@@ -238,6 +260,29 @@ internal data class FilmapikMediaSource(
 )
 
 internal object FilmapikPlayerParser {
+    private val legacyHosts = setOf("filmapik.to", "filmapik.fitness")
+
+    fun normalizePageUrl(raw: String?, currentBaseUrl: String): String? {
+        return ProviderHtmlParser.normalizeProviderPageUrl(raw, currentBaseUrl, legacyHosts)
+    }
+
+    fun playPageUrl(detailUrl: String): String? {
+        return runCatching {
+            val uri = URI(detailUrl)
+            if (uri.scheme?.lowercase() !in setOf("http", "https") || uri.host.isNullOrBlank()) {
+                return@runCatching null
+            }
+            val path = uri.rawPath.orEmpty().ifBlank { "/" }.trimEnd('/')
+            buildString {
+                append(uri.scheme.lowercase())
+                append("://")
+                append(uri.rawAuthority)
+                append(if (path.endsWith("/play", ignoreCase = true)) path else "$path/play")
+                uri.rawQuery?.let { append('?').append(it) }
+            }.takeIf(::isSafeRemoteHttpUrl)
+        }.getOrNull()
+    }
+
     fun sources(html: String, playerUrl: String): List<FilmapikMediaSource> {
         val document = Jsoup.parse(html, playerUrl)
         val scripts = document.select("script").flatMap { script ->

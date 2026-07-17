@@ -2,7 +2,9 @@ package com.example
 
 import kotlin.test.Test
 import kotlin.test.assertFalse
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import org.jsoup.Jsoup
 
 class LayarKacaPlayerParserTest {
     @Test
@@ -29,6 +31,25 @@ class LayarKacaPlayerParserTest {
                 "Episode 1",
                 detailUrl
             )
+        )
+    }
+
+    @Test
+    fun `ajax-only player layout exposes every Muvipro request`() {
+        val document = Jsoup.parse(
+            """
+            <div id="muvipro_player_content_id" data-id="812"></div>
+            <div class="tab-content-ajax" id="player1"></div>
+            <div class="tab-content-ajax" id="player2"></div>
+            """.trimIndent()
+        )
+
+        assertEquals(
+            listOf(
+                MuviproAjaxRequest("812", "player1"),
+                MuviproAjaxRequest("812", "player2")
+            ),
+            LayarKacaPlayerParser.ajaxRequests(document)
         )
     }
 }

@@ -12,7 +12,10 @@ import kotlin.test.assertTrue
 class FilmapikLiveTest {
     @Test
     fun `filmapik emits a current media link`() = runBlocking {
-        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
 
         val links = mutableListOf<ExtractorLink>()
         val subtitles = mutableListOf<SubtitleFile>()

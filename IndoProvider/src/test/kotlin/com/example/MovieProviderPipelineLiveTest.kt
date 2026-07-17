@@ -21,7 +21,10 @@ class MovieProviderPipelineLiveTest {
 
     @Test
     fun `active movie providers expose a current catalog`() = runBlocking {
-        if (System.getenv("RUN_LIVE_MOVIE_PROVIDER_TESTS") != "1") return@runBlocking
+        if (System.getenv("RUN_LIVE_MOVIE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
 
         val failures = mutableListOf<String>()
         listOf(
@@ -62,7 +65,10 @@ class MovieProviderPipelineLiveTest {
 
     @Test
     fun `active movie providers parse current title poster and synopsis`() = runBlocking {
-        if (System.getenv("RUN_LIVE_MOVIE_PROVIDER_TESTS") != "1") return@runBlocking
+        if (System.getenv("RUN_LIVE_MOVIE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
 
         val cases = listOf(
             DetailCase(

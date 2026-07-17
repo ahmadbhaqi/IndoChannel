@@ -1,6 +1,7 @@
 package com.example
 
 import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.TvSeriesLoadResponse
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import java.net.URI
@@ -11,8 +12,52 @@ import kotlin.test.assertTrue
 
 class ProviderLiveDiagnosticTest {
     @Test
+    fun `kitanonton series preserves selected episode data and mirrors`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val provider = KitanontonProvider()
+        val detailUrl = "https://kitanonton2.surf/series/nonton-film-key-to-the-phoenix-heart-2026/"
+        val detail = withTimeout(45_000) { provider.load(detailUrl) }
+        val episodes = (detail as? TvSeriesLoadResponse)?.episodes.orEmpty()
+        assertTrue(episodes.isNotEmpty(), "KitaNonton series exposed no episodes")
+
+        assertTrue(
+            episodes.first().data.startsWith("https://") &&
+                KitanontonPlayerParser.isEpisodeData(episodes.first().data),
+            "Cloudstream corrupted KitaNonton's selected-episode payload: ${episodes.first().data}"
+        )
+        val request = KitanontonPlayerParser.decodeEpisodeData(episodes.first().data)
+        requireNotNull(request)
+        val watchFetch = withTimeout(30_000) {
+            app.get(request.watchUrl, referer = request.detailUrl, timeout = 30L)
+        }
+        val playerUrls = KitanontonPlayerParser.episodePlayerUrls(
+            watchFetch.document,
+            request.episode
+        )
+        assertTrue(playerUrls.isNotEmpty(), "KitaNonton selected episode exposed no mirrors")
+
+        val links = mutableListOf<ExtractorLink>()
+        val loaded = withTimeout(45_000) {
+            provider.loadLinks(episodes.first().data, false, {}, links::add)
+        }
+        println(
+            "KitaNonton series episodes=${episodes.size} first=${episodes.first().name} " +
+                "mirrors=${playerUrls.map { it.safeHost() }} loaded=$loaded " +
+                "links=${links.map { it.url }}"
+        )
+        assertTrue(!loaded || links.isNotEmpty(), "KitaNonton reported success without a link")
+    }
+
+    @Test
     fun `kitanonton resolves current catalog samples`() = runBlocking {
-        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
 
         val page = "https://kitanonton2.surf/nonton-one-piece-heroines-2026-sub-indo/"
         val links = mutableListOf<ExtractorLink>()
@@ -58,7 +103,10 @@ class ProviderLiveDiagnosticTest {
 
     @Test
     fun `kitanonton emits a real link`() = runBlocking {
-        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
 
         val links = mutableListOf<ExtractorLink>()
         val subtitles = mutableListOf<SubtitleFile>()

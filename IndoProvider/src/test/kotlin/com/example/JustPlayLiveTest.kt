@@ -13,7 +13,10 @@ import kotlin.test.assertTrue
 class JustPlayLiveTest {
     @Test
     fun `current JustPlay embed resolves directly`() = runBlocking {
-        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") return@runBlocking
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
 
         val playerUrl = "https://justplay.cam/e/fa49irj7tucw"
         val referer = "https://tv.nontonfilm.red/ip-man-kung-fu-legend-2026/"

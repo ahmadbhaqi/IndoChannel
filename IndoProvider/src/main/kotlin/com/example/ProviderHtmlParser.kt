@@ -18,6 +18,35 @@ internal data class MuviproAjaxRequest(
 internal object ProviderHtmlParser {
     private val iframeAttrs = listOf("data-litespeed-src", "data-src", "src")
     private val imageAttrs = listOf("data-litespeed-src", "data-src", "data-lazy-src", "data-original", "src")
+    private val numberedDownloadLabel = Regex("(?i)^link\\s+download\\s+\\d+$")
+    private val hiddenStyle = Regex("(?i)(?:display\\s*:\\s*none|visibility\\s*:\\s*hidden)")
+    private val taxonomyPath = Regex("(?i)^/(?:tag|category|genre|country|year)(?:/|$)")
+    private val rejectedDownloadHosts = setOf(
+        "youtube.com",
+        "youtu.be",
+        "vimeo.com",
+        "dailymotion.com",
+        "whatsapp.com",
+        "wa.me",
+        "t.me",
+        "telegram.me",
+        "facebook.com",
+        "fb.com",
+        "twitter.com",
+        "x.com"
+    )
+    private val trustedDownloadHosts = setOf(
+        "gofile.io",
+        "pixeldrain.com",
+        "mediafire.com",
+        "mega.nz",
+        "krakenfiles.com",
+        "buzzheavier.com"
+    )
+    private const val MAX_DOWNLOAD_CANDIDATES = 8
+    private const val downloadListLinkSelector =
+        ".gmr-download-list a[href], .gmr-download-wrap a[href], .gmr-download a[href], " +
+            ".download-list a[href], .download-links a[href], #download a[href], #downloads a[href]"
     private val mediaMetaSelectors = listOf(
         "meta[property=og:video:url]",
         "meta[property=og:video:secure_url]",
@@ -76,10 +105,38 @@ internal object ProviderHtmlParser {
         val value = raw?.trim()?.takeIf { it.isPlayableCandidate() } ?: return null
         return try {
             val uri = URI(value)
-            if (uri.isAbsolute) value else URI(baseUrl.trimEnd('/') + "/").resolve(value).toString()
+            if (uri.isAbsolute) value else URI(baseUrl).resolve(value).toString()
         } catch (_: Exception) {
             null
         }
+    }
+
+    /**
+     * Returns only explicit provider download mirrors, never arbitrary page links.
+     * A candidate must either be labelled "Link Download N" or live inside the
+     * provider's download-list markup, then pass URL and content-link filtering.
+     */
+    fun downloadCandidateUrls(document: Document, baseUrl: String): List<String> {
+        val listedLinks = document.select(downloadListLinkSelector)
+        return document.select("a[href]").mapNotNull { link ->
+            if (link.isHiddenDownloadLink()) return@mapNotNull null
+
+            val labels = listOf(link.text(), link.attr("title"))
+                .map { it.replace(Regex("\\s+"), " ").trim() }
+                .filter { it.isNotBlank() }
+            val explicitlyLabelled = labels.any(numberedDownloadLabel::matches)
+            val isListed = listedLinks.any { listed -> listed === link }
+            if (!explicitlyLabelled && !isListed) return@mapNotNull null
+
+            val rawHref = link.attr("href").trim()
+            if (rawHref.startsWith("#")) return@mapNotNull null
+            val absolute = absoluteUrl(rawHref, baseUrl) ?: return@mapNotNull null
+            if (!isSafeRemoteHttpUrl(absolute)) return@mapNotNull null
+            if (absolute.substringBefore('#') == baseUrl.substringBefore('#')) return@mapNotNull null
+            if (!isTrustedDownloadUrl(absolute, baseUrl)) return@mapNotNull null
+            if (isRejectedDownloadLink(absolute, labels)) return@mapNotNull null
+            absolute
+        }.distinct().take(MAX_DOWNLOAD_CANDIDATES)
     }
 
     /** Rehomes cached provider-owned URLs from known retired hosts onto the current host. */
@@ -187,5 +244,46 @@ internal object ProviderHtmlParser {
             .asSequence()
             .map { it.trim().substringBefore(" ").trim() }
             .firstOrNull { it.isNotBlank() }
+    }
+
+    private fun Element.isHiddenDownloadLink(): Boolean {
+        return (listOf(this) + parents()).any { element ->
+            element.hasAttr("hidden") ||
+                element.attr("aria-hidden").equals("true", ignoreCase = true) ||
+                hiddenStyle.containsMatchIn(element.attr("style"))
+        }
+    }
+
+    private fun isRejectedDownloadLink(url: String, labels: List<String>): Boolean {
+        val uri = runCatching { URI(url) }.getOrNull() ?: return true
+        val host = uri.host.orEmpty().lowercase().removePrefix("www.")
+        val path = uri.path.orEmpty()
+        val query = uri.rawQuery.orEmpty()
+        if (rejectedDownloadHosts.any { rejected -> host == rejected || host.endsWith(".$rejected") }) {
+            return true
+        }
+        if (taxonomyPath.containsMatchIn(path)) return true
+        if (labels.any { label ->
+                label.contains("trailer", ignoreCase = true) ||
+                    label.contains("share", ignoreCase = true)
+            }
+        ) return true
+        return path.contains("/share/", ignoreCase = true) ||
+            path.contains("/sharer/", ignoreCase = true) ||
+            path.contains("/intent/", ignoreCase = true) ||
+            query.contains("share=", ignoreCase = true)
+    }
+
+    private fun isTrustedDownloadUrl(url: String, baseUrl: String): Boolean {
+        return runCatching {
+            val host = URI(url).host.orEmpty().lowercase().removePrefix("www.")
+            val baseHost = URI(baseUrl).host.orEmpty().lowercase().removePrefix("www.")
+            host.isNotBlank() && (
+                host == baseHost ||
+                    trustedDownloadHosts.any { trusted ->
+                        host == trusted || host.endsWith(".$trusted")
+                    }
+                )
+        }.getOrDefault(false)
     }
 }

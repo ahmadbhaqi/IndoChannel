@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
+import java.net.URI
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
 import org.jsoup.Jsoup
@@ -66,7 +67,7 @@ class LayarKacaProvider : MainAPI() {
         val requestUrl = providerUrl(url) ?: return null
         val fetch = app.get(requestUrl)
         val document = fetch.document
-        val canonicalUrl = providerUrl(fetch.url) ?: requestUrl
+        val canonicalUrl = providerUrl(fetch.url) ?: return null
         val title = MovieMetadataParser.title(
             document.selectFirst("h1.entry-title, h3[itemprop=name]")?.text()
         ) ?: return null
@@ -134,12 +135,24 @@ class LayarKacaProvider : MainAPI() {
         val requestUrl = providerUrl(data) ?: return false
         val fetch = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
         val document = fetch.document
-        val canonicalUrl = providerUrl(fetch.url) ?: requestUrl
+        val canonicalUrl = providerUrl(fetch.url) ?: return false
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
         val serverPages = LayarKacaPlayerParser.serverPageUrls(document, canonicalUrl)
+        for (mediaUrl in ProviderHtmlParser.mediaSources(
+            document,
+            "iframe, div.gmr-embed-responsive iframe"
+        )) {
+            if (!resolver.canContinue || resolver.loaded) break
+            resolvePlayer(mediaUrl, canonicalUrl, resolver)
+        }
+        if (!resolver.loaded) {
+            for (download in ProviderHtmlParser.downloadCandidateUrls(document, canonicalUrl)) {
+                if (!resolver.canContinue || resolver.resolve(download, canonicalUrl)) break
+            }
+        }
 
         for (playerUrl in serverPages.asReversed()) {
-            if (resolver.loaded) break
+            if (resolver.loaded || !resolver.canContinue) break
             try {
                 val playerDocument = app.get(
                     playerUrl,
@@ -161,14 +174,34 @@ class LayarKacaProvider : MainAPI() {
         }
 
         if (!resolver.loaded) {
-            for (mediaUrl in ProviderHtmlParser.mediaSources(
-                document,
-                "iframe, div.gmr-embed-responsive iframe"
-            )) {
-                if (resolver.loaded) break
-                resolvePlayer(mediaUrl, canonicalUrl, resolver)
+            val ajaxUrl = URI(canonicalUrl).let { "${it.scheme}://${it.host}/wp-admin/admin-ajax.php" }
+            for (request in LayarKacaPlayerParser.ajaxRequests(document)) {
+                if (resolver.loaded || !resolver.canContinue) break
+                try {
+                    val response = app.post(
+                        ajaxUrl,
+                        data = request.toPostData(),
+                        referer = canonicalUrl,
+                        headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                        timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+                    )
+                    if (providerUrl(response.url) == null) continue
+                    for (mediaUrl in ProviderHtmlParser.mediaSources(response.document)) {
+                        if (resolver.loaded || !resolver.canContinue) break
+                        resolvePlayer(
+                            ProviderHtmlParser.absoluteUrl(mediaUrl, canonicalUrl),
+                            canonicalUrl,
+                            resolver
+                        )
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    // Keep trying the remaining AJAX player tabs.
+                }
             }
         }
+
         return resolver.loaded
     }
 
@@ -177,11 +210,13 @@ class LayarKacaProvider : MainAPI() {
         if (resolver.resolve(url, referer)) return
 
         try {
-            val html = app.get(
-                url,
-                referer = referer,
-                timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-            ).text
+            val html = resolver.withinBudget {
+                app.get(
+                    url,
+                    referer = referer,
+                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+                ).text
+            } ?: return
             LayarKacaPlayerParser.mediaUrls(html, url).forEach { resolver.resolve(it, url) }
         } catch (error: CancellationException) {
             throw error
@@ -195,6 +230,9 @@ class LayarKacaProvider : MainAPI() {
 }
 
 internal object LayarKacaPlayerParser {
+    fun ajaxRequests(document: Document): List<MuviproAjaxRequest> =
+        ProviderHtmlParser.muviproAjaxRequests(document)
+
     fun isEpisodeLink(url: String, label: String, detailUrl: String): Boolean {
         if (label.contains("View All Episodes", ignoreCase = true)) return false
         return normalizePageUrl(url) != normalizePageUrl(detailUrl)
