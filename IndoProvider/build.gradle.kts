@@ -6,6 +6,9 @@ dependencies {
     // helpers when the real network resolver is exercised from JVM tests.
     testImplementation("org.mozilla:rhino:1.8.1")
     testImplementation("me.xdrop:fuzzywuzzy:1.4.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+    testImplementation("dev.whyoleg.cryptography:cryptography-core:0.6.0")
+    testImplementation("dev.whyoleg.cryptography:cryptography-provider-optimal:0.6.0")
 }
 
 configurations.named("testImplementation") {
