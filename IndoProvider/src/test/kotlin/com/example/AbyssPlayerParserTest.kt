@@ -1,14 +1,21 @@
 package com.example
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.lagradost.cloudstream3.utils.ExtractorLink
 import java.security.MessageDigest
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import java.util.Collections
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 
 class AbyssPlayerParserTest {
     private val mapper = jacksonObjectMapper()
@@ -99,10 +106,179 @@ class AbyssPlayerParserTest {
         assertEquals(emptyList(), AbyssPlayerParser.sources(abyssPage(media)))
     }
 
-    private fun abyssPage(media: String, urlSafe: Boolean = false): String {
-        val slug = "current-video"
+    @Test
+    fun `Abyss decoder derives a full seekable Sora URL from current metadata`() {
+        val media = """
+            {
+              "mp4": {
+                "sources": [{
+                  "res_id": 2,
+                  "size": 369670425,
+                  "sub": "o32l05c213",
+                  "url": "https://encrypted-storage.example",
+                  "path": "encrypted.2"
+                }],
+                "domains": ["o32l05c213.sssrr.org"]
+              }
+            }
+        """.trimIndent()
+
+        assertEquals(
+            listOf(
+                AbyssMediaSource(
+                    label = "Abyss 360p",
+                    url = "https://o32l05c213.sssrr.org/sora/369670425/" +
+                        "dDN0TjNSYkE0eTBaZHNQWEF3TUs2cmYvbjJxVlNVSmJhMjBtR3V4STBTeWs2dVU5WkE",
+                    quality = 360,
+                    headers = mapOf("User-Agent" to Embed4mePlayerParser.USER_AGENT)
+                )
+            ),
+            AbyssPlayerParser.sources(
+                abyssPage(
+                    media = media,
+                    slug = "Ofj7sXf0s",
+                    md5Id = "22002463"
+                )
+            )
+        )
+    }
+
+    @Test
+    fun `Abyss decoder keeps live 1080p res5 and skips explicitly disabled sources`() {
+        val media = """
+            {
+              "mp4": {
+                "sources": [
+                  {
+                    "res_id": 2,
+                    "size": 369670425,
+                    "sub": "o32l05c213",
+                    "status": false
+                  },
+                  {
+                    "label": "1080p",
+                    "res_id": 5,
+                    "size": 1939119501,
+                    "sub": "htm4jbxon18",
+                    "status": true
+                  }
+                ],
+                "domains": [
+                  "o32l05c213.sssrr.org",
+                  "htm4jbxon18.sssrr.org"
+                ]
+              }
+            }
+        """.trimIndent()
+
+        assertEquals(
+            listOf(
+                AbyssMediaSource(
+                    label = "Abyss 1080p",
+                    url = "https://htm4jbxon18.sssrr.org/sora/1939119501/" +
+                        "NjVCdFlJR3dDUEo5UGRRMmtkUXJOSlgvMFEwakt0UWJub3dWVHBRTndDTXFCSjM4QjM4",
+                    quality = 1080,
+                    headers = mapOf("User-Agent" to Embed4mePlayerParser.USER_AGENT)
+                )
+            ),
+            AbyssPlayerParser.sources(
+                abyssPage(
+                    media = media,
+                    slug = "Ofj7sXf0s",
+                    md5Id = "22002463"
+                )
+            )
+        )
+    }
+
+    @Test
+    fun `Sora probe requires a full file content range total`() {
+        val url = "https://htm4jbxon18.sssrr.org/sora/1939119501/token"
+
+        assertTrue(
+            expectedSoraRangeIsValid(
+                url,
+                206,
+                "bytes 0-65535/1939119501"
+            ) == true
+        )
+        assertFalse(expectedSoraRangeIsValid(url, 200, null) == true)
+        assertFalse(
+            expectedSoraRangeIsValid(
+                url,
+                206,
+                "bytes 0-65535/2097152"
+            ) == true
+        )
+        assertNull(
+            expectedSoraRangeIsValid(
+                "https://cdn.example/video.mp4",
+                200,
+                null
+            )
+        )
+        assertNull(
+            expectedSoraRangeIsValid(
+                "https://legacy.sssrr.org/video/current.mp4",
+                200,
+                null
+            )
+        )
+    }
+
+    @Test
+    fun `resolver emits a healthy lower Abyss quality without waiting for stalled 1080p`() = runBlocking {
+        val media = """
+            {"mp4":{"sources":[
+              {"label":"1080p","size":100,"partSize":100,"url":"https://video.example","path":"full-1080.mp4"},
+              {"label":"720p","size":100,"partSize":100,"url":"https://video.example","path":"full-720.mp4"}
+            ]}}
+        """.trimIndent()
+        val links = mutableListOf<ExtractorLink>()
+        val probes = Collections.synchronizedList(mutableListOf<String>())
+        val playerUrl = "https://abyssplayer.com/current-video"
+        // Build and decode the encrypted fixture before starting the deliberately
+        // tiny candidate timeout. This test is about concurrent media probes;
+        // cipher/Jackson cold-start time must not consume that probe budget.
+        val playerPage = abyssPage(media)
+        assertEquals(2, AbyssPlayerParser.sources(playerPage).size)
+        val session = LinkResolutionSession(
+            api = KitanontonProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                assertEquals(playerUrl, url)
+                playerPage
+            },
+            extractorLoader = { _, _, _, _ -> error("Abyss adapter must be terminal") },
+            mediaLinkProbe = { link ->
+                probes += link.url
+                if (link.url.endsWith("full-1080.mp4")) {
+                    // Deliberately outlive the whole candidate budget. A
+                    // sequential resolver would never reach the healthy 720p
+                    // source, while the concurrent resolver can emit it first.
+                    delay(5_000)
+                    null
+                } else {
+                    link
+                }
+            },
+            candidateTimeoutMs = 2_000
+        )
+
+        assertTrue(session.resolve(playerUrl, "https://kitanonton2.surf/movie/current/"))
+        assertTrue("https://video.example/full-1080.mp4" in probes)
+        assertTrue("https://video.example/full-720.mp4" in probes)
+        assertEquals(listOf("https://video.example/full-720.mp4"), links.map { it.url })
+    }
+
+    private fun abyssPage(
+        media: String,
+        urlSafe: Boolean = false,
+        slug: String = "current-video",
+        md5Id: String = "30893980"
+    ): String {
         val userId = "394115"
-        val md5Id = "30893980"
         val key = md5Hex("$userId:$slug:$md5Id").toByteArray(Charsets.US_ASCII)
         val cipher = Cipher.getInstance("AES/CTR/NoPadding")
         cipher.init(

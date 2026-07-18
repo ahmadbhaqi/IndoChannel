@@ -11,9 +11,10 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
+private val LAYARKACA_LEGACY_HOSTS = setOf("parachutedrone.com", "tv10.lk21official.cc")
+
 class LayarKacaProvider : MainAPI() {
     override var mainUrl = "https://tv.nontonfilm.red"
-    private val legacyHosts = setOf("parachutedrone.com", "tv10.lk21official.cc")
     override var name = "LayarKaca"
     override val hasMainPage = true
     override var lang = "id"
@@ -143,10 +144,7 @@ class LayarKacaProvider : MainAPI() {
             inlineSourceParser = LayarKacaPlayerParser::mediaUrls
         )
         val serverPages = LayarKacaPlayerParser.serverPageUrls(document, canonicalUrl)
-        for (mediaUrl in ProviderHtmlParser.mediaSources(
-            document,
-            "iframe, div.gmr-embed-responsive iframe"
-        )) {
+        for (mediaUrl in LayarKacaPlayerParser.pageMediaUrls(document, canonicalUrl)) {
             if (!resolver.canContinue || resolver.loaded) break
             resolvePlayer(mediaUrl, canonicalUrl, resolver)
         }
@@ -157,13 +155,16 @@ class LayarKacaProvider : MainAPI() {
                     playerUrl,
                     referer = canonicalUrl,
                     timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-                ).document
-                for (mediaUrl in ProviderHtmlParser.mediaSources(
-                    playerDocument,
-                    "iframe, div.gmr-embed-responsive iframe"
+                ).let { response ->
+                    val responseUrl = providerUrl(response.url) ?: return@let null
+                    response.document to responseUrl
+                } ?: continue
+                for (mediaUrl in LayarKacaPlayerParser.pageMediaUrls(
+                    playerDocument.first,
+                    playerDocument.second
                 )) {
                     if (resolver.loaded) break
-                    resolvePlayer(mediaUrl, playerUrl, resolver)
+                    resolvePlayer(mediaUrl, playerDocument.second, resolver)
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -184,11 +185,14 @@ class LayarKacaProvider : MainAPI() {
                         headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
                         timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                     )
-                    if (providerUrl(response.url) == null) continue
-                    for (mediaUrl in ProviderHtmlParser.mediaSources(response.document)) {
+                    val responseUrl = providerUrl(response.url) ?: continue
+                    for (mediaUrl in LayarKacaPlayerParser.pageMediaUrls(
+                        response.document,
+                        responseUrl
+                    )) {
                         if (resolver.loaded || !resolver.canContinue) break
                         resolvePlayer(
-                            ProviderHtmlParser.absoluteUrl(mediaUrl, canonicalUrl),
+                            ProviderHtmlParser.absoluteUrl(mediaUrl, responseUrl),
                             canonicalUrl,
                             resolver
                         )
@@ -212,11 +216,11 @@ class LayarKacaProvider : MainAPI() {
 
     private suspend fun resolvePlayer(raw: String?, referer: String, resolver: LinkResolutionSession) {
         val url = ProviderHtmlParser.absoluteUrl(raw, referer) ?: return
-        resolver.resolve(url, referer)
+        resolver.resolveInline(url, referer)
     }
 
     private fun providerUrl(raw: String?): String? =
-        ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, legacyHosts)
+        ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, LAYARKACA_LEGACY_HOSTS)
 }
 
 internal object LayarKacaPlayerParser {
@@ -229,12 +233,75 @@ internal object LayarKacaPlayerParser {
     }
 
     fun serverPageUrls(document: Document, detailUrl: String): List<String> {
-        return document.select(
+        val playerTabs = document.select(
             "ul.gmr-player-nav a[href], ul.muvipro-player-tabs a[href], ul#player-list a[href]"
         ).mapNotNull { link ->
-            ProviderHtmlParser.absoluteUrl(link.attr("href"), detailUrl)
-                ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
-        }.distinct()
+            normalizeServerPageUrl(link.attr("href"), detailUrl)
+                ?.takeIf { isServerPageUrl(it, detailUrl) }
+        }
+        val providerMenu = document.select("ul#loadProviders > li a[href]").mapNotNull { link ->
+            normalizeServerPageUrl(link.attr("href"), detailUrl)
+                ?.takeIf { isServerPageUrl(it, detailUrl, requirePlayerQuery = false) }
+        }
+        return (playerTabs + providerMenu).distinct()
+    }
+
+    private fun normalizeServerPageUrl(raw: String?, detailUrl: String): String? {
+        val value = raw?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        val schemeMatches = runCatching {
+            val candidate = URI(value)
+            val detail = URI(detailUrl)
+            !candidate.isAbsolute || candidate.scheme.equals(detail.scheme, ignoreCase = true)
+        }.getOrDefault(false)
+        if (!schemeMatches) return null
+        return ProviderHtmlParser.normalizeProviderPageUrl(
+            value,
+            detailUrl,
+            LAYARKACA_LEGACY_HOSTS
+        )
+    }
+
+    private fun isServerPageUrl(
+        url: String,
+        detailUrl: String,
+        requirePlayerQuery: Boolean = true
+    ): Boolean {
+        return runCatching {
+            val candidate = URI(url)
+            val detail = URI(detailUrl)
+            val candidateScheme = candidate.scheme.orEmpty().lowercase()
+            val detailScheme = detail.scheme.orEmpty().lowercase()
+            val sameOrigin = candidate.host.orEmpty().equals(
+                detail.host.orEmpty(),
+                ignoreCase = true
+            ) && candidateScheme == detailScheme &&
+                effectivePort(candidate, candidateScheme) == effectivePort(detail, detailScheme)
+            val hasPlayerQuery = candidate.rawQuery.orEmpty()
+                .split('&')
+                .any { parameter ->
+                    parameter.substringBefore('=').equals("player", ignoreCase = true) &&
+                        parameter.substringAfter('=', "").isNotBlank()
+                }
+            candidateScheme in setOf("http", "https") &&
+                sameOrigin &&
+                (hasPlayerQuery || !requirePlayerQuery) &&
+                candidate.toString().substringBefore('#') != detail.toString().substringBefore('#')
+        }.getOrDefault(false)
+    }
+
+    private fun effectivePort(uri: URI, scheme: String): Int = when {
+        uri.port >= 0 -> uri.port
+        scheme == "https" -> 443
+        scheme == "http" -> 80
+        else -> -1
+    }
+
+    fun pageMediaUrls(document: Document, pageUrl: String): List<String> {
+        return (
+            ProviderHtmlParser.mediaSources(document) +
+                mediaUrls(document.outerHtml(), pageUrl)
+            ).mapNotNull { ProviderHtmlParser.absoluteUrl(it, pageUrl) }
+            .distinct()
     }
 
     fun mediaUrls(html: String, playerUrl: String): List<String> {
@@ -254,15 +321,26 @@ internal object LayarKacaPlayerParser {
                 .replace("\\/", "/")
                 .replace("\\u0026", "&")
                 .replace("&amp;", "&")
-            Regex("(?i)[\\\"']?(?:file|src)[\\\"']?\\s*[:=]\\s*[\\\"'](https?://[^\\\"']+)[\\\"']")
+            val declaredSources = InlineDataParser.playableInlineUrls(normalized)
+            val assignmentSources = Regex(
+                "(?i)[\\\"']?(?:file|src)[\\\"']?\\s*=\\s*[\\\"']([^\\\"']+)[\\\"']"
+            )
                 .findAll(normalized)
                 .map { it.groupValues[1] }
+                .filter(::isPlayableMediaPath)
                 .toList()
+            declaredSources + assignmentSources
         }
         val sourceUrls = document.select("video[src], video source[src], source[src]").map { it.attr("src") }
         return (inlineUrls + sourceUrls)
             .mapNotNull { ProviderHtmlParser.absoluteUrl(it, playerUrl) }
             .distinct()
+    }
+
+    private fun isPlayableMediaPath(raw: String): Boolean {
+        val path = runCatching { URI(raw).path.orEmpty().lowercase() }
+            .getOrDefault(raw.substringBefore('?').lowercase())
+        return path.endsWith(".m3u8") || path.endsWith(".mp4")
     }
 
     private fun normalizePageUrl(url: String): String {

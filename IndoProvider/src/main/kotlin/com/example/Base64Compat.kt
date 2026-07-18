@@ -45,9 +45,19 @@ internal fun decodeBase64Compat(raw: String): ByteArray? {
     return output.copyOf(outputSize)
 }
 
-internal fun encodeBase64UrlNoPadding(input: ByteArray): String {
+internal fun encodeBase64UrlNoPadding(input: ByteArray): String =
+    encodeBase64NoPadding(input, urlSafe = true)
+
+internal fun encodeBase64NoPadding(input: ByteArray): String =
+    encodeBase64NoPadding(input, urlSafe = false)
+
+private fun encodeBase64NoPadding(input: ByteArray, urlSafe: Boolean): String {
     if (input.isEmpty()) return ""
-    val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    val alphabet = if (urlSafe) {
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    } else {
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    }
     val output = StringBuilder((input.size * 4 + 2) / 3)
     var index = 0
     while (index + 2 < input.size) {

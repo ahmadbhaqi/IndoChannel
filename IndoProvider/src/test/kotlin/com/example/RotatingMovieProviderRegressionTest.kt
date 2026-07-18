@@ -95,6 +95,45 @@ class RotatingMovieProviderRegressionTest {
     }
 
     @Test
+    fun `dutamovie parses compact Eps labels and episode slugs`() {
+        assertEquals(
+            DutamoviePlayerParser.EpisodeNumbers(season = 1, episode = 1),
+            DutamoviePlayerParser.episodeNumbers(
+                "https://austincomputerworks.org/eps/the-east-palace-season-1-episode-1/",
+                "S1 Eps1"
+            )
+        )
+        assertEquals(
+            DutamoviePlayerParser.EpisodeNumbers(season = 2, episode = 7),
+            DutamoviePlayerParser.episodeNumbers(
+                "https://austincomputerworks.org/eps/example-season-2-episode-7/",
+                "Lihat Episode"
+            )
+        )
+        assertEquals(
+            DutamoviePlayerParser.EpisodeNumbers(season = null, episode = null),
+            DutamoviePlayerParser.episodeNumbers(
+                "https://austincomputerworks.org/tv/the-east-palace-2026/",
+                "Lihat Semua Episode"
+            )
+        )
+        assertEquals(
+            DutamoviePlayerParser.EpisodeNumbers(season = null, episode = null),
+            DutamoviePlayerParser.episodeNumbers(
+                "https://austincomputerworks.org/the-steps-2/",
+                "The Steps 2"
+            )
+        )
+        assertEquals(
+            DutamoviePlayerParser.EpisodeNumbers(season = 1, episode = 2),
+            DutamoviePlayerParser.episodeNumbers(
+                "https://austincomputerworks.org/eps/example/s1/ep-2/",
+                "Episode berikutnya"
+            )
+        )
+    }
+
+    @Test
     fun `dutamovie does not infer mirror host from mutable player numbers`() {
         val pages = listOf(
             "https://austincomputerworks.org/movie/?player=1",
@@ -111,19 +150,49 @@ class RotatingMovieProviderRegressionTest {
     }
 
     @Test
-    fun `dutamovie prioritizes discovered Morencius host and defers Abyss`() {
+    fun `dutamovie prioritizes verified Morencius Abyss and Embed4me adapters`() {
         val urls = listOf(
             "https://abyssplayer.com/current",
-            "https://playerp2p.example/embed/current",
+            "https://edge.playerp2p.online/#current",
             "https://morencius.com/embed/current",
             "https://embedpyrox.xyz/player/current",
             "https://voe.sx/e/current"
         )
 
         assertEquals(
-            listOf(urls[2], urls[3], urls[4], urls[1], urls[0]),
+            listOf(urls[2], urls[0], urls[1], urls[3], urls[4]),
             DutamoviePlayerParser.orderMediaUrls(urls)
         )
+    }
+
+    @Test
+    fun `dutamovie bounds initial probes and defers remaining mirrors until discovery`() {
+        val urls = listOf(
+            "https://generic-one.example/embed/current",
+            "https://voe.sx/e/current",
+            "https://abyssplayer.com/current",
+            "https://morencius.com/embed/current",
+            "https://edge.playerp2p.online/#current"
+        )
+
+        val schedule = DutamoviePlayerParser.initialMediaSchedule(urls)
+
+        assertEquals(
+            listOf(
+                "https://morencius.com/embed/current",
+                "https://abyssplayer.com/current"
+            ),
+            schedule.eager
+        )
+        assertEquals(
+            listOf(
+                "https://edge.playerp2p.online/#current",
+                "https://voe.sx/e/current",
+                "https://generic-one.example/embed/current"
+            ),
+            schedule.deferred
+        )
+        assertTrue(schedule.eager.size < urls.size)
     }
 
     @Test
@@ -167,6 +236,38 @@ class RotatingMovieProviderRegressionTest {
         assertEquals(
             listOf("https://abyssplayer.com/R4DrMYBr1"),
             DutamoviePlayerParser.detailMediaUrls(document, detailUrl)
+        )
+    }
+
+    @Test
+    fun `dutamovie player response keeps every playable source and excludes assets`() {
+        val responseUrl = "https://austincomputerworks.org/player/server-one/"
+        val document = Jsoup.parse(
+            """
+            <div class="gmr-embed-responsive">
+              <iframe src="https://morencius.com/embed/one"></iframe>
+              <iframe data-src="https://abyssplayer.com/embed/two"></iframe>
+            </div>
+            <video><source src="/media/direct.mp4"></video>
+            <script>
+              const sources = [
+                {file: "../hls/master.m3u8", type: "hls"},
+                {file: "../subs/id.vtt", type: "text/vtt"},
+                {src: "../images/poster.jpg", type: "image/jpeg"}
+              ];
+            </script>
+            """.trimIndent(),
+            responseUrl
+        )
+
+        assertEquals(
+            listOf(
+                "https://morencius.com/embed/one",
+                "https://abyssplayer.com/embed/two",
+                "https://austincomputerworks.org/media/direct.mp4",
+                "https://austincomputerworks.org/player/hls/master.m3u8"
+            ),
+            DutamoviePlayerParser.pageMediaUrls(document, responseUrl)
         )
     }
 }

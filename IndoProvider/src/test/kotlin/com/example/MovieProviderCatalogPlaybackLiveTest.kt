@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.TvSeriesLoadResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertTrue
@@ -23,12 +24,42 @@ class MovieProviderCatalogPlaybackLiveTest {
             return@runBlocking
         }
 
+        val failures = mutableListOf<String>()
         listOf(
             ProviderCase(DutamovieProvider()),
             ProviderCase(FilmapikProvider()),
-            ProviderCase(KitanontonProvider()),
             ProviderCase(LayarKacaProvider())
-        ).forEach { verifyCurrentSamples(it) }
+        ).forEach { case ->
+            try {
+                verifyCurrentSamples(case)
+            } catch (error: TimeoutCancellationException) {
+                failures += "${case.provider.name}: ${error.message ?: "timed out"}"
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                failures += "${case.provider.name}: ${error.message}"
+            }
+        }
+        assertTrue(
+            failures.isEmpty(),
+            "Current catalog playback failures:\n${failures.joinToString("\n")}"
+        )
+    }
+
+    @Test
+    fun `kitanonton resolves every current catalog sample`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        verifyCurrentSamples(
+            ProviderCase(
+                provider = KitanontonProvider(),
+                sampleSize = 3,
+                requireAll = true
+            )
+        )
     }
 
     @Test
@@ -42,7 +73,8 @@ class MovieProviderCatalogPlaybackLiveTest {
             ProviderCase(
                 provider = IndoxxiProvider(),
                 categoryName = "Indonesia",
-                sampleSize = 6
+                sampleSize = 6,
+                requireAll = true
             )
         )
     }
@@ -77,6 +109,9 @@ class MovieProviderCatalogPlaybackLiveTest {
                         ?: item.url
                     case.provider.loadLinks(playbackData, false, subtitles::add, links::add)
                 }
+            } catch (error: TimeoutCancellationException) {
+                failure = error
+                false
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -90,7 +125,7 @@ class MovieProviderCatalogPlaybackLiveTest {
             loaded && links.isNotEmpty()
         }
 
-        val required = (outcomes.size + 1) / 2
+        val required = if (case.requireAll) outcomes.size else (outcomes.size + 1) / 2
         val successes = outcomes.count { it }
         assertTrue(
             successes >= required,
@@ -102,6 +137,7 @@ class MovieProviderCatalogPlaybackLiveTest {
     private data class ProviderCase(
         val provider: MainAPI,
         val categoryName: String? = null,
-        val sampleSize: Int = 3
+        val sampleSize: Int = 3,
+        val requireAll: Boolean = false
     )
 }

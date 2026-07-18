@@ -20,7 +20,7 @@ internal object StreamTapePlayerParser {
     }
 
     fun directUrl(html: String, playerUrl: String): String? {
-        return sequenceOf("robotlink", "ideoolink")
+        return sequenceOf("botlink", "robotlink", "ideoolink")
             .flatMap { assignments(html, it).asSequence() }
             .mapNotNull { rightHandSide ->
                 StringExpressionParser(rightHandSide).parse()

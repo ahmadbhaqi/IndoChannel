@@ -16,13 +16,15 @@ internal object FreeonPlayerParser {
     private const val MAX_PACKED_INPUT_SIZE = 2_000_000
     private const val MAX_UNPACKED_OUTPUT_SIZE = 4_000_000
     private val mapper = jacksonObjectMapper()
+    private val apiAssignment = Regex(
+        "(?i)\\burl\\s*[:=]\\s*[\\\"']([^\\\"']+)[\\\"']"
+    )
 
     fun apiUrls(html: String, playerUrl: String): List<String> {
         return unpackedScripts(html).flatMap { script ->
-            Regex(
-                "(?i)url\\s*[:=]\\s*[\\\"']((?:https?:)?//(?:[^/\\\"']+\\.)?freeon\\.site/api/\\?[^\\\"']+)[\\\"']"
-            ).findAll(script).mapNotNull { match ->
+            apiAssignment.findAll(script).mapNotNull { match ->
                 absoluteHttpUrl(match.groupValues[1], playerUrl)
+                    ?.takeIf { candidate -> sameOriginApiUrl(candidate, playerUrl) }
             }.toList()
         }.distinct()
     }
@@ -158,5 +160,31 @@ internal object FreeonPlayerParser {
             val resolved = URI(baseUrl).resolve(normalized).toString()
             resolved.takeIf { it.startsWith("https://") || it.startsWith("http://") }
         }.getOrNull()
+    }
+
+    private fun sameOriginApiUrl(candidateUrl: String, playerUrl: String): Boolean {
+        return runCatching {
+            val candidate = URI(candidateUrl)
+            val player = URI(playerUrl)
+            val candidateScheme = candidate.scheme.orEmpty().lowercase()
+            val playerScheme = player.scheme.orEmpty().lowercase()
+            val candidateHost = candidate.host.orEmpty().lowercase().removePrefix("www.")
+            val playerHost = player.host.orEmpty().lowercase().removePrefix("www.")
+            val candidatePort = candidate.effectivePort(candidateScheme)
+            val playerPort = player.effectivePort(playerScheme)
+            candidateScheme in setOf("http", "https") &&
+                candidateScheme == playerScheme &&
+                candidateHost.isNotBlank() &&
+                candidateHost == playerHost &&
+                candidatePort == playerPort &&
+                Regex("(?i)^/api(?:/|$)").containsMatchIn(candidate.path.orEmpty())
+        }.getOrDefault(false)
+    }
+
+    private fun URI.effectivePort(scheme: String): Int = when {
+        port >= 0 -> port
+        scheme == "https" -> 443
+        scheme == "http" -> 80
+        else -> -1
     }
 }

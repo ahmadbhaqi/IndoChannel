@@ -346,6 +346,25 @@ class ProviderHtmlParserTest {
             sniffMediaType("#EXTM3U\n#EXT-X-VERSION:3\n".toByteArray()),
             "An HLS header without a media or variant URI is not playable"
         )
+        listOf(
+            "#EXTM3U\nAccess denied\n",
+            "#EXTM3U\n#EXT-X-VERSION:3\nAccess denied\n",
+            "#EXTM3U\n#EXT-X-VERSION:3\n<html>\n"
+        ).forEach { fakeManifest ->
+            assertNull(
+                sniffMediaType(fakeManifest.toByteArray(), "application/vnd.apple.mpegurl"),
+                "An error page prefixed with EXTM3U must not reach the player"
+            )
+        }
+        assertEquals(
+            ExtractorLinkType.M3U8,
+            sniffMediaType(
+                """
+                #EXTM3U
+                #EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=64000,URI="iframe/playlist.m3u8"
+                """.trimIndent().toByteArray()
+            )
+        )
         assertNull(
             sniffMediaType(mp4.copyOfRange(0, 12), "video/mp4"),
             "A truncated ftyp header is not a playable MP4"
@@ -492,6 +511,25 @@ class ProviderHtmlParserTest {
         assertEquals(
             "https://strcloud.in/get_video?id=current&token=abc",
             StreamTapePlayerParser.directUrl(html, "https://strcloud.in/e/current/movie.mp4")
+        )
+    }
+
+    @Test
+    fun `streamtape parser decodes current Strcloud bot link assignment`() {
+        val html = """
+            <div id="botlink"></div>
+            <script>
+                document.getElementById('botlink').innerHTML =
+                    '//strcloud.i' + ('xyzan/get_video?id=KPyZMwqMqqi0G9g&expires=1784264233&ip=192.0.2.1&token=abc').substring(4);
+            </script>
+        """.trimIndent()
+
+        assertEquals(
+            "https://strcloud.in/get_video?id=KPyZMwqMqqi0G9g&expires=1784264233&ip=192.0.2.1&token=abc",
+            StreamTapePlayerParser.directUrl(
+                html,
+                "https://strcloud.in/e/KPyZMwqMqqi0G9g"
+            )
         )
     }
 
@@ -843,6 +881,40 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `hanging generic extractor cannot hide healthy inline media`() = runBlocking {
+        val playerUrl = "https://player.example/embed/current"
+        val mediaUrl = "https://cdn.example/movie.mp4"
+        var extractorCancelled = false
+        var playerFetches = 0
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                assertEquals(playerUrl, url)
+                playerFetches++
+                """<source src="$mediaUrl">"""
+            },
+            extractorLoader = { _, _, _, _ ->
+                try {
+                    delay(1_000)
+                    false
+                } finally {
+                    extractorCancelled = true
+                }
+            },
+            candidateTimeoutMs = 250,
+            genericExtractorTimeoutMs = 25
+        )
+
+        assertTrue(session.resolve(playerUrl, "https://provider.example/item"))
+        assertTrue(extractorCancelled)
+        assertEquals(1, playerFetches)
+        assertEquals(mediaUrl, links.single().url)
+    }
+
+    @Test
     fun `inline source parser reuses the resolver player fetch`() = runBlocking {
         val playerUrl = "https://player.example/embed/1"
         val mediaUrl = "https://cdn.example/movie.mp4"
@@ -864,6 +936,28 @@ class ProviderHtmlParserTest {
         assertTrue(session.resolve(playerUrl, "https://provider.example/item"))
         assertEquals(1, playerFetches)
         assertEquals(mediaUrl, links.single().url)
+        assertEquals("https://player.example", links.single().headers["Origin"])
+        assertEquals(playerUrl, links.single().headers["Referer"])
+    }
+
+    @Test
+    fun `provider declared direct media carries response origin and referer`() = runBlocking {
+        val referer = "https://provider.example/player/server-one/"
+        val mediaUrl = "https://cdn.example/current/master.m3u8"
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = DutamovieProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { _, _ -> error("direct media must not be fetched as HTML") },
+            extractorLoader = { _, _, _, _ -> error("direct media must not use a generic extractor") },
+            mediaLinkProbe = { it }
+        )
+
+        assertTrue(session.resolveInline(mediaUrl, referer))
+        assertEquals(mediaUrl, links.single().url)
+        assertEquals(referer, links.single().headers["Referer"])
+        assertEquals("https://provider.example", links.single().headers["Origin"])
     }
 
     @Test
@@ -1042,6 +1136,7 @@ class ProviderHtmlParserTest {
         val wrapper = "https://wrapper.example/current.mp4"
         val media = "https://cdn.example/current.mp4"
         val fetched = mutableListOf<String>()
+        val probes = mutableListOf<String>()
         val links = mutableListOf<ExtractorLink>()
         val session = LinkResolutionSession(
             api = RebahinProvider(),
@@ -1052,11 +1147,15 @@ class ProviderHtmlParserTest {
                 """<iframe src="$media"></iframe>"""
             },
             extractorLoader = { _, _, _, _ -> false },
-            mediaLinkProbe = { link -> link.takeIf { it.url == media } }
+            mediaLinkProbe = { link ->
+                probes += link.url
+                link.takeIf { it.url == media }
+            }
         )
 
-        assertTrue(session.resolve(wrapper, "https://provider.example/item"))
+        assertTrue(session.resolveInline(wrapper, "https://provider.example/item"))
         assertEquals(listOf(wrapper), fetched)
+        assertEquals(listOf(wrapper, media), probes)
         assertEquals(media, links.single().url)
     }
 
@@ -1095,6 +1194,37 @@ class ProviderHtmlParserTest {
         assertFalse(session.resolve("https://player.example/embed/current", null))
         assertEquals(listOf("https://player.example/embed/current"), fetched)
         assertTrue(links.isEmpty())
+    }
+
+    @Test
+    fun `resolution session resolves a same origin rotating Freeon clone`() = runBlocking {
+        val playerUrl = "https://strplay.drama21.top/embed/current"
+        val apiUrl = "https://strplay.drama21.top/api/?signed=1"
+        val mediaUrl = "https://web.opendrive.com/api/v1/download/file.json/id?inline=1"
+        val token0 = 161.toChar()
+        val token1 = 162.toChar()
+        val packed = """
+            eval(function(p,a,c,k,e,d){e=function(c){return(c<a?'':e(c/a))+String.fromCharCode(c%a+161)};return p}('$token0 $token1="//strplay.drama21.top/api/?signed=1";',95,2,'var|url'.split('|')))
+        """.trimIndent()
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = IndoxxiProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                when (url) {
+                    playerUrl -> packed
+                    apiUrl -> """{"status":"ok","sources":[{"file":"$mediaUrl","type":"video/mp4","label":"Original"}]}"""
+                    else -> error("unexpected fetch: $url")
+                }
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { link -> link.takeIf { it.url == mediaUrl } }
+        )
+
+        assertTrue(session.resolve(playerUrl, "https://provider.example/item"))
+        assertEquals(listOf(mediaUrl), links.map { it.url })
+        assertEquals(playerUrl, links.single().referer)
     }
 
     @Test

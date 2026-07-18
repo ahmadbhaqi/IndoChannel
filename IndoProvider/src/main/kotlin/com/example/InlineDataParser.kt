@@ -63,6 +63,19 @@ internal object InlineDataParser {
 
     fun inlinePlayerUrls(html: String): List<String> = inlinePlayerSources(html).map { it.url }
 
+    fun playableInlineUrls(html: String): List<String> = inlinePlayerSources(html)
+        .filter { source ->
+            val mimeType = source.mimeType.orEmpty().lowercase()
+            val path = runCatching { URI(source.url).path.orEmpty().lowercase() }
+                .getOrDefault(source.url.substringBefore('?').lowercase())
+            path.endsWith(".m3u8") ||
+                path.endsWith(".mp4") ||
+                mimeType.contains("mpegurl") ||
+                mimeType == "hls" ||
+                mimeType.startsWith("video/")
+        }
+        .map { it.url }
+
     fun isDirectHttpVideo(url: String): Boolean {
         return runCatching {
             val uri = URI(url)

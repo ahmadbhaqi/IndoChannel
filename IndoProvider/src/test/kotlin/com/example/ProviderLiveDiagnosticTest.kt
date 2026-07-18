@@ -12,6 +12,51 @@ import kotlin.test.assertTrue
 
 class ProviderLiveDiagnosticTest {
     @Test
+    fun `layarkaca Backrooms keeps a referer aware Strcloud fallback`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val page = "https://tv.nontonfilm.red/backrooms-2026/"
+        val links = mutableListOf<ExtractorLink>()
+        val loaded = withTimeout(120_000) {
+            LayarKacaProvider().loadLinks(page, false, {}, links::add)
+        }
+        println(
+            "LayarKaca Backrooms loaded=$loaded links=" +
+                links.map { "${it.url.safeHost()} referer=${it.referer.safeHost()}" }
+        )
+        assertTrue(
+            loaded && links.isNotEmpty(),
+            "LayarKaca Backrooms did not resolve JustPlay or referer-aware Strcloud"
+        )
+    }
+
+    @Test
+    fun `dutamovie compact series episodes keep playable data`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val provider = DutamovieProvider()
+        val detailUrl = "https://austincomputerworks.org/tv/the-east-palace-2026/"
+        val detail = withTimeout(45_000) { provider.load(detailUrl) }
+        val episodes = (detail as? TvSeriesLoadResponse)?.episodes.orEmpty()
+        assertTrue(episodes.isNotEmpty(), "Dutamovie discarded compact S1 Eps1 labels")
+        val links = mutableListOf<ExtractorLink>()
+        val loaded = withTimeout(120_000) {
+            provider.loadLinks(episodes.first().data, false, {}, links::add)
+        }
+        println(
+            "Dutamovie East Palace episodes=${episodes.size} first=${episodes.first().data} " +
+                "loaded=$loaded links=${links.map { it.url }}"
+        )
+        assertTrue(loaded && links.isNotEmpty(), "Dutamovie first current series episode has no link")
+    }
+
+    @Test
     fun `kitanonton series preserves selected episode data and mirrors`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
             org.junit.Assume.assumeTrue(false)

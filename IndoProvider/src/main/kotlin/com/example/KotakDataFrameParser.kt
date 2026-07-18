@@ -46,11 +46,19 @@ internal object TurboVipPlayerParser {
         """(?:var|let|const)\s+urlPlay\s*=\s*["'](https?://[^"'\\\s<>]+)["']""",
         RegexOption.IGNORE_CASE
     )
+    private val quotedMaster = Regex(
+        """["'](https?://[^"'\\\s<>]+/[^"'\\\s<>]*master\.m3u8(?:\?[^"'\\\s<>]*)?)["']""",
+        RegexOption.IGNORE_CASE
+    )
 
     fun directUrl(html: String): String? {
         if (html.length > MAX_HTML_SIZE) return null
-        val url = urlPlay.find(html)?.groupValues?.getOrNull(1) ?: return null
+        val url = urlPlay.find(html)?.groupValues?.getOrNull(1)
+            ?: quotedMaster.find(html)?.groupValues?.getOrNull(1)
+            ?: return null
         val path = runCatching { java.net.URI(url).path.orEmpty().lowercase() }.getOrDefault("")
-        return url.takeIf { path.endsWith(".mp4") && isSafeRemoteHttpUrl(it) }
+        return url.takeIf {
+            (path.endsWith(".mp4") || path.endsWith(".m3u8")) && isSafeRemoteHttpUrl(it)
+        }
     }
 }

@@ -73,10 +73,11 @@ class KotakDataFrameParserTest {
                 "<script>var urlPlay = 'https://e04.etvp.cc/uploads/6a58e0429634c.mp4';</script>"
             )
         )
-        assertTrue(
+        assertEquals(
+            "https://edge.example/current/master.m3u8",
             TurboVipPlayerParser.directUrl(
-                "<script>var urlPlay = 'https://edge.example/current/master.m3u8';</script>"
-            ) == null
+                "<script>const fallback = 'https://edge.example/current/master.m3u8';</script>"
+            )
         )
         assertTrue(
             TurboVipPlayerParser.directUrl(

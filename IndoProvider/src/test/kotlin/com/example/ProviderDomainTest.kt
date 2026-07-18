@@ -52,6 +52,7 @@ class ProviderDomainTest {
             "registerMainAPI(IndoxxiProvider())",
             "registerMainAPI(FilmapikProvider())",
             "registerMainAPI(RebahinProvider())",
+            "registerMainAPI(IdlixProvider())",
             "registerMainAPI(AnimeindoProvider())",
             "registerMainAPI(OploverzProvider())",
             "registerMainAPI(ZoronimeProvider())"
@@ -70,7 +71,8 @@ class ProviderDomainTest {
             "PusatfilmProvider.kt",
             "KitanontonProvider.kt",
             "FilmapikProvider.kt",
-            "RebahinProvider.kt"
+            "RebahinProvider.kt",
+            "IdlixProvider.kt"
         )
 
         val sessionCreation = Regex("""\bLinkResolutionSession\s*\(""")
@@ -97,6 +99,7 @@ class ProviderDomainTest {
         val expected = listOf(
             "LayarKacaProvider", "NgefilmProvider", "DutamovieProvider",
             "KitanontonProvider", "IndoxxiProvider", "FilmapikProvider", "RebahinProvider",
+            "IdlixProvider",
             "OtakudesuProvider", "SamehadakuProvider", "AnoboyProvider",
             "KuronimeProvider", "AnimeindoProvider", "OploverzProvider", "ZoronimeProvider"
         )
@@ -153,9 +156,13 @@ class ProviderDomainTest {
     }
 
     @Test
-    fun `idlix is removed because no non-browser playback endpoint is available`() {
-        assertFalse(File(sourceRoot, "IdlixProvider.kt").exists())
-        assertFalse(source("IndoPlugin.kt").contains("IdlixProvider"))
+    fun `idlix is registered through its public api and bounded playback claim`() {
+        val provider = source("IdlixProvider.kt")
+        assertTrue(provider.contains("https://z2.idlixku.com"))
+        assertTrue(provider.contains("/watch/play-info/"))
+        assertTrue(provider.contains("/watch/session/claim"))
+        assertTrue(provider.contains("LinkResolutionSession("))
+        assertTrue(source("IndoPlugin.kt").contains("registerMainAPI(IdlixProvider())"))
     }
 
     @Test
@@ -205,7 +212,7 @@ class ProviderDomainTest {
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
         assertTrue(
-            Regex("""(?m)^version\s*=\s*8\s*$""").containsMatchIn(moduleBuild.readText()),
+            Regex("""(?m)^version\s*=\s*9\s*$""").containsMatchIn(moduleBuild.readText()),
             "Cloudstream must see these provider fixes as a new plugin release"
         )
     }

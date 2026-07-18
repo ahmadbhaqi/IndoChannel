@@ -17,6 +17,7 @@ class IndoPlugin: Plugin() {
         registerMainAPI(IndoxxiProvider())
         registerMainAPI(FilmapikProvider())
         registerMainAPI(RebahinProvider())
+        registerMainAPI(IdlixProvider())
         
         // Anime
         registerMainAPI(OtakudesuProvider())

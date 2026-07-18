@@ -2,6 +2,7 @@ package com.example
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class FreeonPlayerParserTest {
     @Test
@@ -14,6 +15,26 @@ class FreeonPlayerParserTest {
             listOf("https://plyr.freeon.site/api/?signed=1"),
             FreeonPlayerParser.apiUrls(packed, "https://plyr.freeon.site/embed/id")
         )
+    }
+
+    @Test
+    fun `unicode packer accepts rotating same origin Freeon clones only`() {
+        val token0 = 161.toChar()
+        val token1 = 162.toChar()
+        val clonePlayer = "https://strplay.drama21.top/embed/current"
+        val clonePacked = """
+            eval(function(p,a,c,k,e,d){e=function(c){return(c<a?'':e(c/a))+String.fromCharCode(c%a+161)};return p}('$token0 $token1="//strplay.drama21.top/api/?signed=1";',95,2,'var|url'.split('|')))
+        """.trimIndent()
+        val crossOriginPacked = clonePacked.replace(
+            "//strplay.drama21.top/api/",
+            "//untrusted.example/api/"
+        )
+
+        assertEquals(
+            listOf("https://strplay.drama21.top/api/?signed=1"),
+            FreeonPlayerParser.apiUrls(clonePacked, clonePlayer)
+        )
+        assertTrue(FreeonPlayerParser.apiUrls(crossOriginPacked, clonePlayer).isEmpty())
     }
 
     @Test

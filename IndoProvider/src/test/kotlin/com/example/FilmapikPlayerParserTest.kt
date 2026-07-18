@@ -32,6 +32,29 @@ class FilmapikPlayerParserTest {
     }
 
     @Test
+    fun `Efek double digit player uses its same numbered storage shard`() {
+        assertEquals(
+            listOf(
+                "https://s12.efek.stream/stream/1080/current/__001?token=x",
+                "https://v12.efek.stream/stream/1080/current/__001?token=x"
+            ),
+            FilmapikPlayerParser.mediaUrlCandidates(
+                "https://v12.efek.stream/stream/1080/current/__001?token=x"
+            )
+        )
+    }
+
+    @Test
+    fun `Efek shard fallback rejects zero padded and unbounded host numbers`() {
+        listOf(
+            "https://v02.efek.stream/stream/current.mp4",
+            "https://v1000.efek.stream/stream/current.mp4"
+        ).forEach { url ->
+            assertEquals(listOf(url), FilmapikPlayerParser.mediaUrlCandidates(url))
+        }
+    }
+
+    @Test
     fun `cached detail URLs are rehomed to the current Filmapik domain`() {
         val current = "https://filmapik.college"
 

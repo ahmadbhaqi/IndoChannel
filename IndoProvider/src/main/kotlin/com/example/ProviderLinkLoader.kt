@@ -17,6 +17,15 @@ import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.URI
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -24,6 +33,12 @@ import okhttp3.ResponseBody
 import org.jsoup.Jsoup
 
 internal typealias PlayerPageFetcher = suspend (url: String, referer: String?) -> String
+internal typealias PlayerApiFetcher = suspend (
+    url: String,
+    referer: String?,
+    headers: Map<String, String>
+) -> String
+internal typealias HowNetworkApiFetcher = suspend (request: HowNetworkApiRequest) -> String
 internal typealias InlineSourceParser = (html: String, playerUrl: String) -> List<String>
 internal typealias CloudstreamExtractorLoader = suspend (
     url: String,
@@ -45,13 +60,20 @@ internal typealias PlaySobatUrlParser = (html: String) -> List<String>
 
 private const val PLAY_SOBAT_MIRROR_TIMEOUT_MS = 12_000L
 private const val CANDIDATE_TIMEOUT_MS = 40_000L
+private const val GENERIC_EXTRACTOR_TIMEOUT_MS = 12_000L
 internal const val PROVIDER_HTTP_TIMEOUT_SECONDS = 25L
 private const val SESSION_TIMEOUT_MS = 90_000L
 private const val MAX_RESOLUTION_CANDIDATES = 48
 private const val MAX_BYSE_API_RESPONSE_BYTES = 2_000_000
 private const val MAX_JUSTPLAY_API_RESPONSE_BYTES = 2_000_000
+private const val MAX_EMBED4ME_API_RESPONSE_BYTES = 4_000_000
+private const val MAX_HOWNETWORK_API_RESPONSE_BYTES = 2_000_000
 private const val MAX_MEDIA_PROBE_BYTES = 65_536
 private const val MEDIA_PROBE_TIMEOUT_SECONDS = 10L
+private const val MAX_ABYSS_QUALITY_PROBES = 8
+private const val MAX_PLAYLIST_PROBE_ITEMS = 16
+private const val MAX_CONCURRENT_PLAYLIST_PROBES = 4
+private const val MAX_AUDIO_TRACK_PROBE_ITEMS = 8
 private const val JSON_MEDIA_TYPE = "application/json;charset=UTF-8"
 
 private data class CandidateKey(
@@ -73,13 +95,24 @@ internal class LinkResolutionSession(
     private val pageFetcher: PlayerPageFetcher = { url, referer ->
         app.get(url, referer = referer, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS).text
     },
+    private val playerApiFetcher: PlayerApiFetcher = { url, referer, headers ->
+        val response = app.get(
+            url,
+            referer = referer,
+            headers = headers,
+            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+        )
+        readBoundedBody(response.body, MAX_EMBED4ME_API_RESPONSE_BYTES)
+    },
     private val byseApiFetcher: PlayerPageFetcher = ::fetchBoundedByseApi,
     private val justPlayApiFetcher: JustPlayApiFetcher = ::fetchBoundedJustPlayApi,
+    private val howNetworkApiFetcher: HowNetworkApiFetcher = ::fetchBoundedHowNetworkApi,
     private val extractorLoader: CloudstreamExtractorLoader = ::loadExtractorWithResult,
     private val inlineSourceParser: InlineSourceParser? = null,
     private val maxDepth: Int = 2,
     private val maxCandidates: Int = MAX_RESOLUTION_CANDIDATES,
     private val candidateTimeoutMs: Long = CANDIDATE_TIMEOUT_MS,
+    private val genericExtractorTimeoutMs: Long = GENERIC_EXTRACTOR_TIMEOUT_MS,
     sessionTimeoutMs: Long = SESSION_TIMEOUT_MS,
     private val playSobatUrlParser: PlaySobatUrlParser = InlineDataParser::playSobatUrls,
     private val playSobatMirrorTimeoutMs: Long = PLAY_SOBAT_MIRROR_TIMEOUT_MS,
@@ -94,10 +127,12 @@ internal class LinkResolutionSession(
 ) {
     private val visitedCandidates = mutableSetOf<CandidateKey>()
     private val emittedLinks = mutableSetOf<EmittedLinkKey>()
+    private val emissionMutex = Mutex()
     private val deadlineNanos = System.nanoTime() +
         sessionTimeoutMs.coerceIn(1L, 10 * 60_000L) * 1_000_000L
 
     val loaded: Boolean get() = emittedLinks.isNotEmpty()
+    internal val linkCount: Int get() = emittedLinks.size
     internal val canContinue: Boolean
         get() = System.nanoTime() < deadlineNanos && visitedCandidates.size < maxCandidates
 
@@ -114,13 +149,53 @@ internal class LinkResolutionSession(
         val url = api.toPlayableUrl(raw)?.takeUnless { it.isTrailerUrl() } ?: return false
         val remainingMs = remainingBudgetMs()
         if (remainingMs == 0L) return false
-        withTimeoutOrNull(minOf(candidateTimeoutMs.coerceAtLeast(1L), remainingMs)) {
-            resolveCandidate(url, referer, genericDepth = 0)
+        val timeoutMs = minOf(candidateTimeoutMs.coerceAtLeast(1L), remainingMs)
+        val candidateDeadlineNanos = System.nanoTime() + timeoutMs * 1_000_000L
+        withTimeoutOrNull(timeoutMs) {
+            resolveCandidate(
+                url,
+                referer,
+                genericDepth = 0,
+                candidateDeadlineNanos = candidateDeadlineNanos
+            )
         }
         return emittedLinks.size > before
     }
 
-    private suspend fun resolveCandidate(url: String, referer: String?, genericDepth: Int) {
+    /** Emits a direct media declaration with browser-style Origin/Referer. */
+    suspend fun resolveInline(raw: String?, referer: String?): Boolean {
+        val url = api.toPlayableUrl(raw)?.takeUnless { it.isTrailerUrl() } ?: return false
+        val type = directMediaType(url) ?: return resolve(url, referer)
+        val before = emittedLinks.size
+        val remainingMs = remainingBudgetMs()
+        if (remainingMs == 0L) return false
+        val timeoutMs = minOf(candidateTimeoutMs.coerceAtLeast(1L), remainingMs)
+        val candidateDeadlineNanos = System.nanoTime() + timeoutMs * 1_000_000L
+        withTimeoutOrNull(timeoutMs) {
+            emitDirect(url, referer, type, includeOrigin = true)
+            if (emittedLinks.size == before) {
+                // A URL ending in .mp4/.m3u8 can still be an HTML wrapper. Keep
+                // the direct probe and wrapper fallback inside one candidate
+                // timeout, and do not repeat the failed media request.
+                resolveCandidate(
+                    url,
+                    referer,
+                    genericDepth = 0,
+                    candidateDeadlineNanos = candidateDeadlineNanos,
+                    skipInitialDirectProbe = true
+                )
+            }
+        }
+        return emittedLinks.size > before
+    }
+
+    private suspend fun resolveCandidate(
+        url: String,
+        referer: String?,
+        genericDepth: Int,
+        candidateDeadlineNanos: Long,
+        skipInitialDirectProbe: Boolean = false
+    ) {
         if (genericDepth > maxDepth || System.nanoTime() >= deadlineNanos || !isSafeRemoteHttpUrl(url)) return
         val candidateKey = CandidateKey(url, referer.orEmpty())
         if (candidateKey !in visitedCandidates && visitedCandidates.size >= maxCandidates) return
@@ -128,10 +203,12 @@ internal class LinkResolutionSession(
 
         try {
             var cachedHtml: String? = null
-            directMediaType(url)?.let { type ->
-                val beforeDirect = emittedLinks.size
-                emitDirect(url, referer, type)
-                if (emittedLinks.size > beforeDirect) return
+            if (!skipInitialDirectProbe) {
+                directMediaType(url)?.let { type ->
+                    val beforeDirect = emittedLinks.size
+                    emitDirect(url, referer, type)
+                    if (emittedLinks.size > beforeDirect) return
+                }
             }
 
             val host = URI(url).host.orEmpty().lowercase()
@@ -150,33 +227,7 @@ internal class LinkResolutionSession(
                 val html = pageFetcher(url, referer)
                 cachedHtml = html
                 if (ProviderHtmlParser.isNonContentPage(html)) return
-                val beforeAdapter = emittedLinks.size
-                FreeonPlayerParser.apiUrls(html, url).forEach { apiUrl ->
-                    val response = try {
-                        pageFetcher(apiUrl, url)
-                    } catch (error: CancellationException) {
-                        throw error
-                    } catch (_: Exception) {
-                        return@forEach
-                    }
-                    FreeonPlayerParser.sources(response).forEach { source ->
-                        val type = if (source.mimeType.contains("mpegurl", ignoreCase = true) ||
-                            source.url.contains(".m3u8", ignoreCase = true)
-                        ) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        emitVerified(
-                            directLinkFactory(
-                                api.name,
-                                "${api.name} ${source.label}",
-                                source.url,
-                                url,
-                                Qualities.Unknown.value,
-                                type,
-                                mapOf("Referer" to url)
-                            )
-                        )
-                    }
-                }
-                if (emittedLinks.size > beforeAdapter) return
+                if (emitFreeonPlayback(html, url)) return
             }
 
             val path = runCatching { URI(url).path.orEmpty() }.getOrDefault("")
@@ -198,7 +249,7 @@ internal class LinkResolutionSession(
                 val beforeAdapter = emittedLinks.size
                 for (nested in KotakDataFrameParser.urls(html)) {
                     if (emittedLinks.size > beforeAdapter) break
-                    resolveCandidate(nested, url, genericDepth)
+                    resolveCandidate(nested, url, genericDepth, candidateDeadlineNanos)
                 }
                 if (emittedLinks.size > beforeAdapter) return
             }
@@ -222,8 +273,9 @@ internal class LinkResolutionSession(
                 cachedHtml = html
                 if (ProviderHtmlParser.isNonContentPage(html)) return
                 val beforeAdapter = emittedLinks.size
-                AbyssPlayerParser.sources(html).forEach { source ->
-                    emitVerified(
+                val qualityLinks = AbyssPlayerParser.sources(html)
+                    .take(MAX_ABYSS_QUALITY_PROBES)
+                    .map { source ->
                         directLinkFactory(
                             api.name,
                             "${api.name} ${source.label}",
@@ -231,15 +283,18 @@ internal class LinkResolutionSession(
                             url,
                             source.quality,
                             ExtractorLinkType.VIDEO,
-                            mapOf("Referer" to url)
+                            source.headers + ("Referer" to url)
                         )
-                    )
-                }
+                    }
+                // Probe qualities together so a stalled 1080p URL cannot
+                // starve a healthy 720p/480p fallback. Each successful quality
+                // is emitted as soon as its own probe finishes.
+                emitVerifiedBatch(qualityLinks)
                 if (emittedLinks.size > beforeAdapter) return
-                // Current Abyss pages without complete URL/path fields require a
-                // browser-only WebSocket/service-worker pipeline. The generic
-                // extractor cannot turn those pages into a playable media URL,
-                // so let the parent mirror list advance immediately.
+                // A recognized Abyss page is terminal even when none of its
+                // bounded Sora sources verifies. Generic extraction would only
+                // rediscover encrypted backing storage and can surface it as an
+                // unsupported media stream.
                 return
             }
 
@@ -253,6 +308,98 @@ internal class LinkResolutionSession(
                     emitDirect(mediaUrl, url, ExtractorLinkType.M3U8)
                 }
                 if (emittedLinks.size > beforeAdapter) return
+            }
+
+            Embed4mePlayerParser.apiRequest(url, referer)?.let { request ->
+                val beforeAdapter = emittedLinks.size
+                val videoPayload = try {
+                    playerApiFetcher(request.videoApiUrl, request.playerUrl, request.headers)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
+                for (source in videoPayload
+                    ?.let { Embed4mePlayerParser.videoSources(it, request.playerUrl) }
+                    .orEmpty()
+                ) {
+                    emitVerified(
+                        directLinkFactory(
+                            api.name,
+                            "${api.name} ${source.label}",
+                            source.url,
+                            request.playerUrl,
+                            Qualities.Unknown.value,
+                            source.type,
+                            request.headers + ("Referer" to request.playerUrl)
+                        )
+                    )
+                    if (emittedLinks.size > beforeAdapter) break
+                }
+                if (emittedLinks.size == beforeAdapter) {
+                    val downloadPayload = try {
+                        playerApiFetcher(request.downloadApiUrl, request.playerUrl, request.headers)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        null
+                    }
+                    for (source in downloadPayload
+                        ?.let { Embed4mePlayerParser.downloadSources(it, request.playerUrl) }
+                        .orEmpty()
+                    ) {
+                        emitVerified(
+                            directLinkFactory(
+                                api.name,
+                                "${api.name} ${source.label}",
+                                source.url,
+                                request.playerUrl,
+                                Qualities.Unknown.value,
+                                source.type,
+                                request.headers + ("Referer" to request.playerUrl)
+                            )
+                        )
+                        if (emittedLinks.size > beforeAdapter) break
+                    }
+                }
+                // A recognized hash player is an API shell. Generic extraction
+                // can only rediscover the same shell or its ciphertext.
+                return
+            }
+
+            HowNetworkPlayerParser.apiRequest(url)?.let { request ->
+                val beforeAdapter = emittedLinks.size
+                val payload = try {
+                    howNetworkApiFetcher(request)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
+                val mediaHeaders = linkedMapOf(
+                    "Referer" to request.playerUrl,
+                    "Origin" to request.headers.getValue("Origin")
+                )
+                for (source in payload
+                    ?.let { HowNetworkPlayerParser.sources(it, request.playerUrl) }
+                    .orEmpty()
+                ) {
+                    emitVerified(
+                        directLinkFactory(
+                            api.name,
+                            "${api.name} ${source.label}",
+                            source.url,
+                            request.playerUrl,
+                            Qualities.Unknown.value,
+                            source.type,
+                            mediaHeaders
+                        )
+                    )
+                    if (emittedLinks.size > beforeAdapter) break
+                }
+                // The recognized player is only an AJAX shell. Falling through
+                // can expose its JSON or HTML as media and trigger parsing 3003.
+                return
             }
 
             if (host.matches(Regex("""\d{1,3}(?:\.\d{1,3}){3}"""))) {
@@ -349,7 +496,7 @@ internal class LinkResolutionSession(
                     if (emittedLinks.size > beforeAdapter) return
                     val playable = api.toPlayableUrl(nested) ?: return@forEach
                     withTimeoutOrNull(playSobatMirrorTimeoutMs) {
-                        resolveCandidate(playable, url, genericDepth)
+                        resolveCandidate(playable, url, genericDepth, candidateDeadlineNanos)
                     }
                 }
                 // Keep the cached generic fallback: some PlaySobat pages also
@@ -369,7 +516,14 @@ internal class LinkResolutionSession(
             val beforeExtractor = emittedLinks.size
             val extractedLinks = mutableListOf<ExtractorLink>()
             try {
-                extractorLoader(url, referer, subtitleCallback, extractedLinks::add)
+                // Generic Cloudstream extractors can perform their own network
+                // retries. Bound that work separately and reserve at least half
+                // of the remaining candidate budget for cached/fetched HTML.
+                // Keep callbacks outside the timed block so links emitted before
+                // a stalled extractor is cancelled can still be verified below.
+                withTimeoutOrNull(genericExtractorBudgetMs(candidateDeadlineNanos)) {
+                    extractorLoader(url, referer, subtitleCallback, extractedLinks::add)
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: LinkageError) {
@@ -388,6 +542,10 @@ internal class LinkResolutionSession(
 
             val html = cachedHtml ?: pageFetcher(url, referer)
             if (ProviderHtmlParser.isNonContentPage(html)) return
+            // Freeon rotates its frontend onto unrelated domains such as
+            // strplay.drama21.top. Detect the bounded Unicode packer and only
+            // call a same-origin /api endpoint instead of trusting host names.
+            if (emitFreeonPlayback(html, url)) return
             val beforeJuicyCodes = emittedLinks.size
             JuicyCodesPlayerParser.playback(html)?.let { playback ->
                 playback.tracks.forEach { track ->
@@ -415,15 +573,29 @@ internal class LinkResolutionSession(
                 ?.let { parser -> runCatching { parser(html, url) }.getOrDefault(emptyList()) }
                 .orEmpty()
                 .forEach { nested ->
-                    ProviderHtmlParser.absoluteUrl(nested, url)?.let {
-                        resolveCandidate(it, url, genericDepth + 1)
+                    val playable = ProviderHtmlParser.absoluteUrl(nested, url)
+                        ?: return@forEach
+                    val directType = directMediaType(playable)
+                    if (directType != null) {
+                        emitDirect(playable, url, directType, includeOrigin = true)
+                    } else {
+                        resolveCandidate(playable, url, genericDepth + 1, candidateDeadlineNanos)
                     }
                 }
             if (emittedLinks.size > beforeJuicyCodes) return
             val document = Jsoup.parse(html, url)
             ProviderHtmlParser.mediaSources(document).forEach { nested ->
-                ProviderHtmlParser.absoluteUrl(nested, url)?.let {
-                    resolveCandidate(it, url, genericDepth + 1)
+                val playable = ProviderHtmlParser.absoluteUrl(nested, url)
+                    ?: return@forEach
+                val directType = directMediaType(playable)
+                if (directType != null) {
+                    val beforeInline = emittedLinks.size
+                    emitDirect(playable, url, directType, includeOrigin = true)
+                    if (emittedLinks.size == beforeInline) {
+                        resolveCandidate(playable, url, genericDepth + 1, candidateDeadlineNanos)
+                    }
+                } else {
+                    resolveCandidate(playable, url, genericDepth + 1, candidateDeadlineNanos)
                 }
             }
         } catch (error: CancellationException) {
@@ -433,8 +605,16 @@ internal class LinkResolutionSession(
         }
     }
 
-    private suspend fun emitDirect(url: String, referer: String?, type: ExtractorLinkType) {
+    private suspend fun emitDirect(
+        url: String,
+        referer: String?,
+        type: ExtractorLinkType,
+        includeOrigin: Boolean = false
+    ) {
         if (!isSafeRemoteHttpUrl(url)) return
+        val headers = linkedMapOf<String, String>()
+        referer?.takeIf { it.isNotBlank() }?.let { headers["Referer"] = it }
+        if (includeOrigin) requestOrigin(referer)?.let { headers["Origin"] = it }
         emitVerified(
             directLinkFactory(
                 api.name,
@@ -443,9 +623,50 @@ internal class LinkResolutionSession(
                 referer.orEmpty(),
                 Qualities.Unknown.value,
                 type,
-                referer?.let { mapOf("Referer" to it) }.orEmpty()
+                headers
             )
         )
+    }
+
+    private fun requestOrigin(url: String?): String? = runCatching {
+        val uri = URI(url ?: return@runCatching null)
+        if (uri.scheme?.lowercase() !in setOf("http", "https") || uri.host.isNullOrBlank()) {
+            return@runCatching null
+        }
+        URI(uri.scheme.lowercase(), null, uri.host, uri.port, null, null, null)
+            .toString()
+            .trimEnd('/')
+    }.getOrNull()
+
+    private suspend fun emitFreeonPlayback(html: String, playerUrl: String): Boolean {
+        val beforeAdapter = emittedLinks.size
+        for (apiUrl in FreeonPlayerParser.apiUrls(html, playerUrl)) {
+            val response = try {
+                pageFetcher(apiUrl, playerUrl)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                continue
+            }
+            for (source in FreeonPlayerParser.sources(response)) {
+                val type = if (
+                    source.mimeType.contains("mpegurl", ignoreCase = true) ||
+                    source.url.contains(".m3u8", ignoreCase = true)
+                ) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                emitVerified(
+                    directLinkFactory(
+                        api.name,
+                        "${api.name} ${source.label}",
+                        source.url,
+                        playerUrl,
+                        Qualities.Unknown.value,
+                        type,
+                        mapOf("Referer" to playerUrl)
+                    )
+                )
+            }
+        }
+        return emittedLinks.size > beforeAdapter
     }
 
     private suspend fun emitBysePlayback(
@@ -506,16 +727,37 @@ internal class LinkResolutionSession(
     internal suspend fun emitResolved(link: ExtractorLink) = emitVerified(link)
 
     private suspend fun emitVerified(link: ExtractorLink) {
-        if (System.nanoTime() >= deadlineNanos) return
-        if (!link.hasSafeMediaUrls()) return
+        val verified = verifyMediaLink(link) ?: return
+        emissionMutex.withLock {
+            emitUnchecked(verified)
+        }
+    }
+
+    private suspend fun emitVerifiedBatch(links: List<ExtractorLink>) = supervisorScope {
+        if (links.isEmpty()) return@supervisorScope
+        val semaphore = Semaphore(MAX_ABYSS_QUALITY_PROBES)
+        links.forEach { link ->
+            launch {
+                semaphore.withPermit {
+                    val verified = verifyMediaLink(link) ?: return@withPermit
+                    emissionMutex.withLock {
+                        emitUnchecked(verified)
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun verifyMediaLink(link: ExtractorLink): ExtractorLink? {
+        if (System.nanoTime() >= deadlineNanos) return null
+        if (!link.hasSafeMediaUrls()) return null
         val remainingMs = remainingBudgetMs()
-        if (remainingMs == 0L) return
-        val verified = withTimeoutOrNull(
+        if (remainingMs == 0L) return null
+        return withTimeoutOrNull(
             minOf(MEDIA_PROBE_TIMEOUT_SECONDS * 1_000L, remainingMs)
         ) {
             mediaLinkProbe(link)
-        } ?: return
-        emitUnchecked(verified)
+        }
     }
 
     private fun emitUnchecked(link: ExtractorLink) {
@@ -532,11 +774,33 @@ internal class LinkResolutionSession(
 
     private fun remainingBudgetMs(): Long =
         ((deadlineNanos - System.nanoTime()) / 1_000_000L).coerceAtLeast(0L)
+
+    private fun genericExtractorBudgetMs(candidateDeadlineNanos: Long): Long {
+        val remainingCandidateMs =
+            ((candidateDeadlineNanos - System.nanoTime()) / 1_000_000L).coerceAtLeast(1L)
+        val extractorShareMs = (remainingCandidateMs / 2L).coerceAtLeast(1L)
+        return minOf(
+            genericExtractorTimeoutMs.coerceAtLeast(1L),
+            extractorShareMs,
+            remainingBudgetMs().coerceAtLeast(1L)
+        )
+    }
 }
 
 private suspend fun fetchBoundedByseApi(url: String, referer: String?): String {
     val response = app.get(url, referer = referer, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
     return readBoundedBody(response.body, MAX_BYSE_API_RESPONSE_BYTES)
+}
+
+private suspend fun fetchBoundedHowNetworkApi(request: HowNetworkApiRequest): String {
+    val response = app.post(
+        request.apiUrl,
+        data = request.form,
+        referer = request.playerUrl,
+        headers = request.headers,
+        timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+    )
+    return readBoundedBody(response.body, MAX_HOWNETWORK_API_RESPONSE_BYTES)
 }
 
 /**
@@ -548,21 +812,7 @@ private suspend fun fetchBoundedByseApi(url: String, referer: String?): String {
 private suspend fun probeExtractorLink(link: ExtractorLink): ExtractorLink? {
     if (!link.hasSafeMediaUrls()) return null
     if (link is ExtractorLinkPlayList) {
-        val first = link.playlist.firstOrNull() ?: return null
-        @Suppress("DEPRECATION_ERROR")
-        val firstLink = ExtractorLink(
-            link.source,
-            link.name,
-            first.url,
-            link.referer,
-            link.quality,
-            link.type,
-            link.headers,
-            link.extractorData
-        )
-        val verifiedFirst = probeExtractorLink(firstLink) ?: return null
-        link.type = verifiedFirst.type
-        return link
+        return validateExtractorPlaylist(link, ::probeExtractorLink)
     }
 
     val requestedUri = runCatching { URI(link.url) }.getOrNull() ?: return null
@@ -599,6 +849,16 @@ private suspend fun probeExtractorLink(link: ExtractorLink): ExtractorLink? {
             response.body.close()
             return null
         }
+        if (
+            expectedSoraRangeIsValid(
+                link.url,
+                response.code,
+                response.headers["Content-Range"]
+            ) == false
+        ) {
+            response.body.close()
+            return null
+        }
         val contentType = response.body.contentType()?.toString()
         val prefix = readBoundedPrefix(response.body, MAX_MEDIA_PROBE_BYTES)
         val detectedType = sniffMediaType(prefix, contentType) ?: return null
@@ -607,12 +867,124 @@ private suspend fun probeExtractorLink(link: ExtractorLink): ExtractorLink? {
         // same redirect, while DRM, playlist and alternate-audio metadata stay
         // intact and origin-bound headers are not moved onto a foreign CDN URL.
         link.type = detectedType
+        if (validateAuxiliaryAudioTracks(link, ::probeExtractorLink) == null) return null
         link
     } catch (error: CancellationException) {
         throw error
     } catch (_: Exception) {
         null
     }
+}
+
+@Suppress("DEPRECATION_ERROR")
+internal suspend fun validateAuxiliaryAudioTracks(
+    link: ExtractorLink,
+    entryProbe: suspend (ExtractorLink) -> ExtractorLink?
+): ExtractorLink? {
+    val tracks = link.audioTracks
+    if (tracks.size > MAX_AUDIO_TRACK_PROBE_ITEMS) return null
+    if (tracks.isEmpty()) return link
+    val verified = coroutineScope {
+        val semaphore = Semaphore(MAX_CONCURRENT_PLAYLIST_PROBES)
+        tracks.map { track ->
+            async {
+                semaphore.withPermit {
+                    val trackHeaders = track.headers.orEmpty()
+                    entryProbe(
+                        ExtractorLink(
+                            link.source,
+                            link.name,
+                            track.url,
+                            trackHeaders.entries
+                                .lastOrNull { it.key.equals("Referer", ignoreCase = true) }
+                                ?.value
+                                ?: link.referer,
+                            Qualities.Unknown.value,
+                            ExtractorLinkType.M3U8,
+                            trackHeaders,
+                            link.extractorData
+                        )
+                    )
+                }
+            }
+        }.awaitAll()
+    }
+    return link.takeIf { verified.all { it != null } }
+}
+
+/**
+ * A multipart extractor result is only safe to expose when every part is real
+ * media. Checking just the first part lets a later HTML/expired part reach the
+ * player and surface as unsupported parsing code 3003.
+ */
+@Suppress("DEPRECATION_ERROR")
+internal suspend fun validateExtractorPlaylist(
+    link: ExtractorLinkPlayList,
+    entryProbe: suspend (ExtractorLink) -> ExtractorLink?
+): ExtractorLinkPlayList? {
+    val entries = link.playlist
+    if (entries.isEmpty() || entries.size > MAX_PLAYLIST_PROBE_ITEMS) return null
+
+    val verified = coroutineScope {
+        val semaphore = Semaphore(MAX_CONCURRENT_PLAYLIST_PROBES)
+        entries.map { entry ->
+            async {
+                semaphore.withPermit {
+                    entryProbe(
+                        ExtractorLink(
+                            link.source,
+                            link.name,
+                            entry.url,
+                            link.referer,
+                            link.quality,
+                            link.type,
+                            link.headers,
+                            link.extractorData
+                        )
+                    )
+                }
+            }
+        }.awaitAll()
+    }
+    if (verified.any { it == null }) return null
+    val mediaTypes = verified.filterNotNull().map { it.type }.distinct()
+    if (mediaTypes.size != 1) return null
+    link.type = mediaTypes.single()
+    return link
+}
+
+/**
+ * Full-file Sora URLs encode the expected media size in their path. Requiring
+ * the same total in Content-Range prevents the legacy 2 MiB chunk token from
+ * passing the MP4 prefix sniff and failing later in the player.
+ */
+internal fun expectedSoraRangeIsValid(
+    url: String,
+    responseCode: Int,
+    contentRange: String?
+): Boolean? {
+    val uri = runCatching { URI(url) }.getOrNull() ?: return null
+    val host = uri.host.orEmpty().lowercase().trimEnd('.')
+    if (!host.endsWith(".sssrr.org")) return null
+    if (!uri.rawPath.orEmpty().startsWith("/sora/", ignoreCase = true)) return null
+    val expectedSize = Regex("^/sora/([1-9]\\d{0,19})/")
+        .find(uri.rawPath.orEmpty())
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.toLongOrNull()
+        ?.takeIf { it in 1L..20_000_000_000L }
+        ?: return false
+    if (responseCode != 206) return false
+    val range = contentRange
+        ?.trim()
+        ?.let {
+            Regex("(?i)^bytes\\s+(\\d+)-(\\d+)/(\\d+)$").matchEntire(it)
+        }
+        ?: return false
+    val start = range.groupValues[1].toLongOrNull() ?: return false
+    val end = range.groupValues[2].toLongOrNull() ?: return false
+    val total = range.groupValues[3].toLongOrNull() ?: return false
+    return start == 0L && end in start until total && total == expectedSize
 }
 
 internal fun sniffMediaType(
@@ -642,12 +1014,7 @@ internal fun sniffMediaType(
         .map(String::trim)
         .filter(String::isNotBlank)
         .toList()
-    if (
-        manifestLines.firstOrNull()?.equals("#EXTM3U", ignoreCase = true) == true &&
-        manifestLines.drop(1).any { line ->
-            !line.startsWith("#") && line.none(Char::isISOControl)
-        }
-    ) {
+    if (isPlayableHlsManifest(manifestLines)) {
         return ExtractorLinkType.M3U8
     }
     if (
@@ -695,6 +1062,56 @@ internal fun sniffMediaType(
     // or encrypted storage bytes as video/mp4, which Cloudstream then reports
     // as an unsupported parsing code. A real media signature is required.
     return null
+}
+
+private fun isPlayableHlsManifest(lines: List<String>): Boolean {
+    if (lines.firstOrNull()?.equals("#EXTM3U", ignoreCase = true) != true) return false
+    val body = lines.drop(1)
+    val hasHlsDirective = body.any { line ->
+        Regex("(?i)^#EXT(?:INF|-[A-Z0-9-]+)(?::|$)").containsMatchIn(line)
+    }
+    if (!hasHlsDirective) return false
+
+    val directUris = body
+        .filterNot { it.startsWith("#") }
+        .filter(::isPlausibleHlsUri)
+    if (directUris.isNotEmpty()) return true
+
+    val attributeUri = Regex("(?i)\\bURI\\s*=\\s*[\"']([^\"']+)[\"']")
+    return body.any { line ->
+        line.startsWith("#") && attributeUri.findAll(line).any { match ->
+            isPlausibleHlsUri(match.groupValues[1])
+        }
+    }
+}
+
+private fun isPlausibleHlsUri(raw: String): Boolean {
+    val value = raw.trim()
+    if (
+        value.isBlank() ||
+        value.length > 4_096 ||
+        value.any { it.isWhitespace() || it.isISOControl() }
+    ) return false
+    val normalized = value.lowercase()
+    if (
+        normalized.startsWith("<") ||
+        normalized.startsWith("{") ||
+        normalized.startsWith("[") ||
+        normalized in setOf("forbidden", "unauthorized", "denied", "error", "not-found") ||
+        normalized.contains("access denied")
+    ) return false
+
+    return runCatching {
+        val uri = URI(value.replace(Regex("\\{\\$[A-Za-z0-9_-]+}"), "variable"))
+        if (uri.userInfo != null) return@runCatching false
+        if (uri.isAbsolute) {
+            uri.scheme?.lowercase() in setOf("http", "https") && !uri.host.isNullOrBlank()
+        } else if (value.startsWith("//")) {
+            !uri.host.isNullOrBlank()
+        } else {
+            uri.path.orEmpty().isNotBlank() && uri.path !in setOf(".", "..")
+        }
+    }.getOrDefault(false)
 }
 
 private suspend fun fetchBoundedJustPlayApi(request: JustPlayHttpRequest): String {
@@ -825,7 +1242,7 @@ private fun ExtractorLink.mediaUrls(): List<String> = when (this) {
 }
 
 private fun ExtractorLink.hasSafeMediaUrls(): Boolean {
-    val urls = mediaUrls()
+    val urls = mediaUrls() + audioTracks.map { it.url }
     return urls.isNotEmpty() && urls.all { it.isNotBlank() && isSafeRemoteHttpUrl(it) }
 }
 
@@ -865,14 +1282,14 @@ internal fun orderPlaySobatMirrorUrls(urls: List<String>): List<String> {
         .sortedBy { url ->
             val host = runCatching { URI(url).host.orEmpty().lowercase() }.getOrDefault("")
             when {
+                host == "abyssplayer.com" || host.endsWith(".abyssplayer.com") -> 0
                 host == "hglink.to" || host.endsWith(".hglink.to") ||
-                    host == "streamwish.to" || host.endsWith(".streamwish.to") -> 0
+                    host == "streamwish.to" || host.endsWith(".streamwish.to") -> 1
                 host == "mdfx9dc8n.net" || host.endsWith(".mdfx9dc8n.net") ||
-                    host.contains("mixdrop") -> 1
-                host == "dood.la" || host.endsWith(".dood.la") -> 2
-                host == "cloudplay.p2pstream.vip" || host.endsWith(".p2pstream.vip") -> 3
-                host == "abyssplayer.com" || host.endsWith(".abyssplayer.com") -> 4
-                else -> 1
+                    host.contains("mixdrop") -> 2
+                host == "dood.la" || host.endsWith(".dood.la") -> 3
+                host == "cloudplay.p2pstream.vip" || host.endsWith(".p2pstream.vip") -> 4
+                else -> 2
             }
         }
 }

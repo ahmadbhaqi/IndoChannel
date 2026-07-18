@@ -8,6 +8,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.test.Test
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 class RebahinLiveTest {
     @Test
@@ -24,6 +25,15 @@ class RebahinLiveTest {
             provider.getMainPage(1, request)
         }.items.flatMap { it.list }
         assertNotNull(catalog.firstOrNull(), "Rebahin returned an empty current catalog")
+        val posterSamples = catalog.take(8)
+        val validPosterCount = posterSamples.count { item ->
+            item.posterUrl?.let(::isCurrentPosterUrl) == true
+        }
+        assertTrue(
+            validPosterCount >= maxOf(1, (posterSamples.size + 1) / 2),
+            "Rebahin emitted valid posters for only $validPosterCount/${posterSamples.size} " +
+                "current cards: ${posterSamples.map { it.name to it.posterUrl }}"
+        )
 
         var playableSample: String? = null
         val attempts = mutableListOf<String>()
@@ -66,5 +76,12 @@ class RebahinLiveTest {
             playableSample,
             "No playable Rebahin item was found among current catalog samples: $attempts"
         )
+    }
+
+    private fun isCurrentPosterUrl(raw: String): Boolean {
+        val lower = raw.lowercase()
+        return isSafeRemoteHttpUrl(raw) &&
+            listOf("placeholder", "no-image", "no_poster", "nothumb", "logo-rebahin")
+                .none(lower::contains)
     }
 }

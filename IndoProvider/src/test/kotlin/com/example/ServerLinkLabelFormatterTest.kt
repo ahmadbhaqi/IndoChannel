@@ -1,15 +1,18 @@
 package com.example
 
+import com.lagradost.cloudstream3.newAudioFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkPlayList
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.PlayListItem
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import java.util.Collections
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -30,6 +33,59 @@ class ServerLinkLabelFormatterTest {
 
         assertSame(playlist, playlist.withSimpleServerName("KitaNonton"))
         assertEquals("https://media.example/part.mp4", playlist.playlist.single().url)
+    }
+
+    @Test
+    fun `multipart link is rejected when a later entry fails verification`() = runBlocking {
+        val good = "https://media.example/part-1.mp4"
+        val dead = "https://media.example/part-2.mp4"
+        val checked = Collections.synchronizedList(mutableListOf<String>())
+        val playlist = ExtractorLinkPlayList(
+            source = "Multipart",
+            name = "Multipart",
+            playlist = listOf(
+                PlayListItem(good, 1_000_000L),
+                PlayListItem(dead, 1_000_000L)
+            ),
+            referer = "https://player.example/",
+            quality = 720,
+            headers = emptyMap(),
+            extractorData = null,
+            type = ExtractorLinkType.VIDEO,
+            audioTracks = emptyList()
+        )
+
+        val verified = validateExtractorPlaylist(playlist) { entry ->
+            checked += entry.url
+            entry.takeIf { it.url == good }
+        }
+
+        assertNull(verified)
+        assertEquals(setOf(good, dead), checked.toSet())
+    }
+
+    @Suppress("DEPRECATION_ERROR")
+    @Test
+    fun `link is rejected when an auxiliary audio playlist is dead`() = runBlocking {
+        val good = "https://media.example/audio-id.m3u8"
+        val dead = "https://media.example/audio-dead.m3u8"
+        val link = ExtractorLink(
+            source = "IDLIX",
+            name = "IDLIX 720p",
+            url = "https://media.example/video.m3u8",
+            referer = "https://z2.idlixku.com/movie/example",
+            quality = 720,
+            headers = emptyMap(),
+            extractorData = null,
+            type = ExtractorLinkType.M3U8,
+            audioTracks = listOf(newAudioFile(good), newAudioFile(dead))
+        )
+
+        assertNull(
+            validateAuxiliaryAudioTracks(link) { audio ->
+                audio.takeIf { it.url == good }
+            }
+        )
     }
 
     @Test

@@ -75,6 +75,28 @@ class AnimeStreamParserTest {
     }
 
     @Test
+    fun `playable inline urls exclude subtitle tracks and poster assets`() {
+        val html = """
+            config = {
+              sources: [
+                {file:"https://cdn.example/current/master.m3u8",type:"hls"},
+                {file:"https://cdn.example/current/movie.mp4",type:"video/mp4"}
+              ],
+              tracks: [{file:"https://cdn.example/current/subtitle.vtt",kind:"captions"}],
+              image: {file:"https://cdn.example/current/poster.jpg"}
+            };
+        """.trimIndent()
+
+        assertEquals(
+            listOf(
+                "https://cdn.example/current/master.m3u8",
+                "https://cdn.example/current/movie.mp4"
+            ),
+            InlineDataParser.playableInlineUrls(html)
+        )
+    }
+
+    @Test
     fun `blogger bootstrap and rpc response yield playable video`() {
         val bootstrap = InlineDataParser.bloggerBootstrap(
             """window.WIZ_global_data={"FdrFJe":"-12345","cfb2h":"boq_build_20260709"};"""

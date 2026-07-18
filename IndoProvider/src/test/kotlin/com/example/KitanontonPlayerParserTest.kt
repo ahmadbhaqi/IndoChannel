@@ -1,5 +1,6 @@
 package com.example
 
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.jsoup.Jsoup
 import kotlin.test.Test
@@ -9,13 +10,13 @@ import kotlin.test.assertTrue
 
 class KitanontonPlayerParserTest {
     @Test
-    fun `orders current Abyss chunk players after conventional mirrors`() {
+    fun `orders decoded Abyss media before unsigned IP mirrors`() {
         val juicy = "https://178.211.139.171/embed/code"
         val unknown = "https://unknown.example/embed/code"
         val abyss = "https://abyssplayer.com/working"
 
         assertEquals(
-            listOf(unknown, juicy, abyss),
+            listOf(abyss, unknown, juicy),
             KitanontonPlayerParser.orderPlayerUrls(listOf(juicy, unknown, abyss))
         )
     }
@@ -31,7 +32,65 @@ class KitanontonPlayerParserTest {
             visited += url
         }
 
-        assertEquals(listOf(unknown, juicy, abyss), visited)
+        assertEquals(listOf(abyss, unknown, juicy), visited)
+    }
+
+    @Test
+    fun `keeps resolving mirrors until two links are available`() = runBlocking {
+        val visited = mutableListOf<String>()
+        var linkCount = 0
+        val abyss = "https://abyssplayer.com/possibly-expired"
+        val firstFallback = "https://unknown.example/embed/code"
+        val unusedFallback = "https://178.211.139.171/embed/code"
+
+        KitanontonPlayerParser.resolveUntilTarget(
+            urls = listOf(unusedFallback, firstFallback, abyss),
+            targetLinkCount = 2,
+            linkCount = { linkCount },
+            canContinue = { true }
+        ) { url ->
+            visited += url
+            linkCount++
+        }
+
+        assertEquals(listOf(abyss, firstFallback), visited)
+        assertEquals(2, linkCount)
+    }
+
+    @Test
+    fun `page retry propagates candidate budget cancellation`() = runBlocking {
+        var attempts = 0
+        val resolver = LinkResolutionSession(
+            api = KitanontonProvider(),
+            subtitleCallback = {},
+            callback = {},
+            candidateTimeoutMs = 50L,
+            sessionTimeoutMs = 500L
+        )
+
+        val result = resolver.withinBudget {
+            KitanontonPlayerParser.retryPageFetch(attempts = 2) {
+                attempts++
+                delay(30L)
+                null
+            }
+        }
+
+        assertNull(result)
+        assertEquals(2, attempts)
+    }
+
+    @Test
+    fun `page retry accepts the first valid retry`() = runBlocking {
+        val attempts = mutableListOf<Int>()
+
+        val result = KitanontonPlayerParser.retryPageFetch(attempts = 2) { attempt ->
+            attempts += attempt
+            if (attempt == 1) "valid page" else null
+        }
+
+        assertEquals("valid page", result)
+        assertEquals(listOf(0, 1), attempts)
     }
 
     @Test
@@ -64,11 +123,13 @@ class KitanontonPlayerParserTest {
         val episodeTwoB = "https://abyssplayer.com/episode-two-b"
         val document = Jsoup.parse(
             """
-            <a class="btn-eps" data-iframe="${encodedUrl(episodeOneA)}">Ep1</a>
-            <a class="btn-eps" data-iframe="${encodedUrl(episodeOneB)}">Ep1</a>
-            <a class="btn-eps" data-iframe="${encodedUrl(episodeTwoA)}">Ep2</a>
-            <a class="btn-eps" data-iframe="${encodedUrl(episodeTwoB)}">Ep2</a>
-            <a class="btn-eps" data-iframe="not-base64">Ep2</a>
+            <div id="list-eps">
+              <a class="btn-eps" data-iframe="${encodedUrl(episodeOneA)}">Ep1</a>
+              <a class="btn-eps" data-iframe="${encodedUrl(episodeOneB)}">Ep1</a>
+              <div data-iframe="${encodedUrl(episodeTwoA)}" title="Episode 2"></div>
+              <div data-iframe="$episodeTwoB" title="Episode 2"></div>
+              <a class="btn-eps" data-iframe="not-base64">Ep2</a>
+            </div>
             """.trimIndent()
         )
 
@@ -90,7 +151,7 @@ class KitanontonPlayerParserTest {
         val detailUrl = "https://kitanonton.example/series/example/"
         val document = Jsoup.parse(
             """
-            <a class="thumb mvi-cover" href="/series/example/watch"></a>
+            <div id="mv-info"><a href="/series/example/watch">Watch</a></div>
             """.trimIndent(),
             detailUrl
         )

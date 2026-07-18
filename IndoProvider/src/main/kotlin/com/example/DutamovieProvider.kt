@@ -4,12 +4,27 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
+import java.util.Collections
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
+
+private const val DUTAMOVIE_DISCOVERY_TIMEOUT_MS = 30_000L
+private const val DUTAMOVIE_TAB_TIMEOUT_MS = 8_000L
+private const val DUTAMOVIE_TAB_HTTP_TIMEOUT_SECONDS = 8L
+private const val DUTAMOVIE_CANDIDATE_TIMEOUT_MS = 20_000L
+private const val DUTAMOVIE_SESSION_TIMEOUT_MS = 120_000L
+private const val MAX_DUTAMOVIE_INITIAL_PROBES = 2
+private const val MAX_DUTAMOVIE_DISCOVERY_TABS = 16
+private const val DUTAMOVIE_DISCOVERY_CONCURRENCY = 4
 
 class DutamovieProvider : MainAPI() {
     override var mainUrl = "https://austincomputerworks.org"
@@ -84,9 +99,22 @@ class DutamovieProvider : MainAPI() {
         return if (tvType == TvType.TvSeries) {
             val episodes = episodeElements.mapNotNull { eps ->
                 val href = normalizePageUrl(eps.attr("href")) ?: return@mapNotNull null
-                val epNum = Regex("Episode\\s*(\\d+)").find(eps.text())?.groupValues?.getOrNull(1)?.toIntOrNull()
-                newEpisode(href) { this.name = "Episode $epNum"; this.episode = epNum; this.posterUrl = poster }
-            }.filter { it.episode != null }
+                val label = eps.attr("title").ifBlank { eps.text() }.trim()
+                if (
+                    label.contains("Lihat Semua Episode", ignoreCase = true) ||
+                    label.contains("View All Episodes", ignoreCase = true) ||
+                    href.substringBefore('?').substringBefore('#').trimEnd('/') ==
+                    canonicalUrl.substringBefore('?').substringBefore('#').trimEnd('/')
+                ) return@mapNotNull null
+                val numbers = DutamoviePlayerParser.episodeNumbers(href, label)
+                val epNum = numbers.episode ?: return@mapNotNull null
+                newEpisode(href) {
+                    this.name = "Episode $epNum"
+                    this.season = numbers.season
+                    this.episode = epNum
+                    this.posterUrl = poster
+                }
+            }.distinctBy { it.data }
             newTvSeriesLoadResponse(title, canonicalUrl, TvType.TvSeries, episodes) {
                 posterUrl = poster; this.year = year; plot = description; this.tags = tags; addActors(actors); addTrailer(trailer)
             }
@@ -104,68 +132,120 @@ class DutamovieProvider : MainAPI() {
         val canonicalUrl = normalizePageUrl(fetch.url) ?: return false
         val baseUrl = getBaseUrl(canonicalUrl)
         val id = document.selectFirst("div#muvipro_player_content_id")?.attr("data-id")
-        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
-        for (server in DutamoviePlayerParser.orderMediaUrls(
-            DutamoviePlayerParser.detailMediaUrls(document, canonicalUrl)
-        )) {
-            if (!resolver.canContinue || resolver.resolve(server, canonicalUrl)) break
+        val resolver = LinkResolutionSession(
+            this,
+            subtitleCallback,
+            callback,
+            inlineSourceParser = { html, _ -> InlineDataParser.playableInlineUrls(html) },
+            candidateTimeoutMs = DUTAMOVIE_CANDIDATE_TIMEOUT_MS,
+            sessionTimeoutMs = DUTAMOVIE_SESSION_TIMEOUT_MS
+        )
+        val initialSchedule = DutamoviePlayerParser.initialMediaSchedule(
+            DutamoviePlayerParser.pageMediaUrls(document, canonicalUrl)
+        )
+
+        val discoveredCandidates = Collections.synchronizedList(
+            mutableListOf<Pair<String, String>>()
+        )
+        val discoverySemaphore = Semaphore(DUTAMOVIE_DISCOVERY_CONCURRENCY)
+        // Discovery only performs network/HTML parsing, so it can safely overlap
+        // the bounded serial resolver probe. The resolver itself remains serial.
+        supervisorScope {
+            val discoveryJob = launch {
+                withTimeoutOrNull(DUTAMOVIE_DISCOVERY_TIMEOUT_MS) {
+                    supervisorScope {
+                if (id.isNullOrEmpty()) {
+                    val playerPages = document.select("ul.muvipro-player-tabs li a")
+                        .mapNotNull { normalizePageUrl(it.attr("href")) }
+                        .let(DutamoviePlayerParser::orderPlayerPages)
+                        .take(MAX_DUTAMOVIE_DISCOVERY_TABS)
+                    playerPages.forEach { playerPage ->
+                        launch {
+                            discoverySemaphore.withPermit {
+                                val response = try {
+                                    withTimeoutOrNull(DUTAMOVIE_TAB_TIMEOUT_MS) {
+                                        app.get(
+                                            playerPage,
+                                            referer = canonicalUrl,
+                                            headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                                            timeout = DUTAMOVIE_TAB_HTTP_TIMEOUT_SECONDS
+                                        )
+                                    }
+                                } catch (error: CancellationException) {
+                                    throw error
+                                } catch (_: Exception) {
+                                    null
+                                } ?: return@withPermit
+                                val responsePageUrl = normalizePageUrl(response.url)
+                                    ?: return@withPermit
+                                val candidates = DutamoviePlayerParser.pageMediaUrls(
+                                    response.document,
+                                    responsePageUrl
+                                ).map { source -> source to responsePageUrl }
+                                discoveredCandidates.addAll(candidates)
+                            }
+                        }
+                    }
+                } else {
+                    document.select("div.tab-content-ajax")
+                        .take(MAX_DUTAMOVIE_DISCOVERY_TABS)
+                        .forEach { element ->
+                            launch {
+                                discoverySemaphore.withPermit {
+                                    val response = try {
+                                        withTimeoutOrNull(DUTAMOVIE_TAB_TIMEOUT_MS) {
+                                            app.post(
+                                                "$baseUrl/wp-admin/admin-ajax.php",
+                                                data = mapOf(
+                                                    "action" to "muvipro_player_content",
+                                                    "tab" to element.attr("id"),
+                                                    "post_id" to id.orEmpty()
+                                                ),
+                                                referer = canonicalUrl,
+                                                headers = mapOf(
+                                                    "X-Requested-With" to "XMLHttpRequest"
+                                                ),
+                                                timeout = DUTAMOVIE_TAB_HTTP_TIMEOUT_SECONDS
+                                            )
+                                        }
+                                    } catch (error: CancellationException) {
+                                        throw error
+                                    } catch (_: Exception) {
+                                        null
+                                    } ?: return@withPermit
+                                    val responsePageUrl = normalizePageUrl(response.url)
+                                        ?: return@withPermit
+                                    val candidates = DutamoviePlayerParser.ajaxMediaCandidates(
+                                        response.document,
+                                        responsePageUrl,
+                                        canonicalUrl
+                                    )
+                                    discoveredCandidates.addAll(candidates)
+                                }
+                            }
+                        }
+                }
+                    }
+                }
+            }
+            DutamoviePlayerParser.resolveEagerCandidates(
+                initialSchedule.eager,
+                canContinue = { resolver.canContinue }
+            ) { server ->
+                resolver.resolveInline(server, canonicalUrl)
+            }
+            if (resolver.loaded) discoveryJob.cancel()
         }
-        if (id.isNullOrEmpty()) {
-            val playerPages = document.select("ul.muvipro-player-tabs li a")
-                .mapNotNull { normalizePageUrl(it.attr("href")) }
-                .let(DutamoviePlayerParser::orderPlayerPages)
-            val players = mutableListOf<Pair<String, String>>()
-            for (playerPage in playerPages) {
-                if (!resolver.canContinue) break
-                val player = try {
-                    val response = app.get(
-                        playerPage,
-                        referer = canonicalUrl,
-                        headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
-                        timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-                    )
-                    val iframe = response.document
-                        .selectFirst("div.gmr-embed-responsive iframe")
-                        ?.let { ProviderHtmlParser.firstIframeSource(it) }
-                        ?: continue
-                    iframe to (normalizePageUrl(response.url) ?: playerPage)
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Exception) {
-                    null
-                }
-                    ?: continue
-                players += player
-            }
-            for (player in players.sortedBy { DutamoviePlayerParser.mediaPriority(it.first) }) {
-                if (resolver.loaded || !resolver.canContinue) break
-                resolver.resolve(player.first, player.second)
-            }
-        } else {
-            val players = mutableListOf<String>()
-            for (ele in document.select("div.tab-content-ajax")) {
-                if (!resolver.canContinue) break
-                val server = try {
-                    app.post(
-                        "$baseUrl/wp-admin/admin-ajax.php",
-                        data = mapOf("action" to "muvipro_player_content", "tab" to ele.attr("id"), "post_id" to "$id"),
-                        referer = canonicalUrl,
-                        headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
-                        timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-                    ).document.selectFirst("iframe")
-                        ?.let { ProviderHtmlParser.firstIframeSource(it) }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Exception) {
-                    null
-                }
-                    ?: continue
-                players += server
-            }
-            for (server in DutamoviePlayerParser.orderMediaUrls(players)) {
-                if (resolver.loaded || !resolver.canContinue) break
-                resolver.resolve(server, canonicalUrl)
-            }
+        if (resolver.loaded) return true
+        val discoveredSnapshot = synchronized(discoveredCandidates) {
+            discoveredCandidates.toList()
+        }
+        val postDiscoveryCandidates = DutamoviePlayerParser.postDiscoverySchedule(
+            deferredInitial = initialSchedule.deferred.map { source -> source to canonicalUrl },
+            discovered = discoveredSnapshot
+        )
+        for ((server, referer) in postDiscoveryCandidates) {
+            if (!resolver.canContinue || resolver.resolveInline(server, referer)) break
         }
         if (!resolver.loaded) {
             for (download in ProviderHtmlParser.downloadCandidateUrls(document, canonicalUrl)) {
@@ -185,13 +265,56 @@ class DutamovieProvider : MainAPI() {
 }
 
 internal object DutamoviePlayerParser {
+    data class InitialMediaSchedule(
+        val eager: List<String>,
+        val deferred: List<String>
+    )
+
+    data class EpisodeNumbers(
+        val season: Int?,
+        val episode: Int?
+    )
+
+    fun episodeNumbers(url: String, label: String): EpisodeNumbers {
+        val path = runCatching { URI(url).path.orEmpty() }.getOrDefault("")
+        val season = Regex(
+            "(?i)(?:\\bseason|\\bs)[-\\s._]*(\\d+)\\b"
+        ).find(label)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: Regex("(?i)(?:^|[-/_.])(?:season|s)[-_.]*(\\d+)(?=$|[-/_.])")
+                .find(path)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val episode = Regex(
+            "(?i)(?:\\bepisode|\\beps?|\\bep)[-\\s._]*(\\d+)\\b"
+        ).find(label)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: Regex("(?i)\\be[-\\s._]*(\\d+)\\b")
+                .find(label)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: Regex("(?i)(?:^|[-/_.])(?:episode|eps?|ep)[-_.]*(\\d+)(?=$|[-/_.])")
+                .find(path)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        return EpisodeNumbers(season, episode)
+    }
+
     fun detailMediaUrls(document: Document, detailUrl: String): List<String> {
-        return ProviderHtmlParser.mediaSources(
-            document,
-            "iframe, div.gmr-embed-responsive iframe"
-        ).mapNotNull { ProviderHtmlParser.absoluteUrl(it, detailUrl) }
+        return pageMediaUrls(document, detailUrl)
+    }
+
+    fun pageMediaUrls(document: Document, pageUrl: String): List<String> {
+        return (
+            ProviderHtmlParser.mediaSources(document) +
+                InlineDataParser.playableInlineUrls(document.outerHtml())
+            ).mapNotNull { ProviderHtmlParser.absoluteUrl(it, pageUrl) }
             .distinct()
     }
+
+    /**
+     * AJAX response URLs are only resolution bases. Efek and other player
+     * hosts validate the browser navigation chain against the movie page, so
+     * retain the canonical detail page as the request Referer.
+     */
+    fun ajaxMediaCandidates(
+        document: Document,
+        responseUrl: String,
+        canonicalDetailUrl: String
+    ): List<Pair<String, String>> = pageMediaUrls(document, responseUrl)
+        .map { source -> source to canonicalDetailUrl }
 
     fun orderPlayerPages(urls: List<String>): List<String> {
         // Player numbers are only tab identifiers. Current pages assign the
@@ -205,17 +328,88 @@ internal object DutamoviePlayerParser {
             .sortedWith(compareBy<IndexedValue<String>> { mediaPriority(it.value) }.thenBy { it.index })
             .map { it.value }
 
+    fun initialMediaSchedule(urls: List<String>): InitialMediaSchedule {
+        val ordered = orderMediaUrls(urls)
+        return InitialMediaSchedule(
+            eager = ordered.take(MAX_DUTAMOVIE_INITIAL_PROBES),
+            deferred = ordered.drop(MAX_DUTAMOVIE_INITIAL_PROBES)
+        )
+    }
+
+    /**
+     * Each resolver call owns its candidate timeout. Do not wrap this loop in
+     * a shared timeout: cancelling it midway leaves the resolver's visited key
+     * consumed even though the candidate did not finish its bounded attempt.
+     */
+    suspend fun resolveEagerCandidates(
+        eager: List<String>,
+        canContinue: () -> Boolean,
+        resolve: suspend (String) -> Boolean
+    ): Boolean {
+        for (candidate in eager) {
+            if (!canContinue()) return false
+            if (resolve(candidate)) return true
+        }
+        return false
+    }
+
+    /**
+     * Discovery and detail-page candidates have independent value. Keep the
+     * already-ranked initial lane stable, rank discovery by known reliability,
+     * then alternate lanes so discovered tabs cannot consume the session before
+     * initial candidate #3.
+     */
+    fun postDiscoverySchedule(
+        deferredInitial: List<Pair<String, String>>,
+        discovered: List<Pair<String, String>>
+    ): List<Pair<String, String>> {
+        // initialMediaSchedule has already ranked this lane. Preserve that
+        // exact order so candidate #3 cannot be moved behind a later initial
+        // source merely because discovery completed in between.
+        val initialLane = deferredInitial.distinct()
+        val discoveredLane = discovered.distinct().withIndex()
+            .sortedWith(
+                compareBy<IndexedValue<Pair<String, String>>> {
+                    mediaPriority(it.value.first)
+                }.thenBy { it.index }
+            )
+            .map { it.value }
+
+        val scheduled = mutableListOf<Pair<String, String>>()
+        var initialIndex = 0
+        var discoveredIndex = 0
+        while (initialIndex < initialLane.size || discoveredIndex < discoveredLane.size) {
+            val initial = initialLane.getOrNull(initialIndex)
+            val found = discoveredLane.getOrNull(discoveredIndex)
+            val initialFirst = when {
+                initial == null -> false
+                found == null -> true
+                else -> mediaPriority(initial.first) <= mediaPriority(found.first)
+            }
+            if (initialFirst) {
+                scheduled += initial!!
+                initialIndex++
+                discoveredLane.getOrNull(discoveredIndex++)?.let(scheduled::add)
+            } else {
+                scheduled += found!!
+                discoveredIndex++
+                initialLane.getOrNull(initialIndex++)?.let(scheduled::add)
+            }
+        }
+        return scheduled.distinct()
+    }
+
     fun mediaPriority(url: String): Int {
         val host = runCatching { URI(url).host.orEmpty().lowercase() }.getOrDefault("")
         return when {
             host == "morencius.com" || host.endsWith(".morencius.com") -> 0
-            host == "embedpyrox.xyz" || host.endsWith(".embedpyrox.xyz") -> 1
-            host.contains("voe") || host.contains("lulu") -> 2
-            host.contains("hgcloud") || host.contains("streamwish") -> 3
             host == "abyssplayer.com" || host.endsWith(".abyssplayer.com") ||
-                host == "abyss.to" || host.endsWith(".abyss.to") -> 9
-            host.contains("p2p") || host.contains("4meplayer") -> 7
-            else -> 4
+                host == "abyss.to" || host.endsWith(".abyss.to") -> 1
+            Embed4mePlayerParser.supportsHost(host) -> 2
+            host == "embedpyrox.xyz" || host.endsWith(".embedpyrox.xyz") -> 3
+            host.contains("voe") || host.contains("lulu") -> 4
+            host.contains("hgcloud") || host.contains("streamwish") -> 5
+            else -> 6
         }
     }
 }

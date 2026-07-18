@@ -8,6 +8,11 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
+private const val KITANONTON_PAGE_TIMEOUT_SECONDS = 20L
+private const val KITANONTON_PAGE_ATTEMPTS = 2
+private const val KITANONTON_PLAYBACK_PAGE_TIMEOUT_SECONDS = 10L
+private const val KITANONTON_TARGET_LINKS = 2
+
 class KitanontonProvider : MainAPI() {
     override var mainUrl = "https://kitanonton2.surf"
     override var name = "KitaNonton"
@@ -23,13 +28,17 @@ class KitanontonProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val document = app.get("$mainUrl/${request.data.format(page)}").document
-        return newHomePageResponse(request.name, document.toMovieResults())
+        val fetch = fetchProviderPage("$mainUrl/${request.data.format(page)}")
+            ?: return newHomePageResponse(request.name, emptyList())
+        return newHomePageResponse(request.name, fetch.document.toMovieResults())
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, "UTF-8")
-        return app.get("$mainUrl/?s=$encoded").document.toMovieResults()
+        return fetchProviderPage("$mainUrl/?s=$encoded")
+            ?.document
+            ?.toMovieResults()
+            .orEmpty()
     }
 
     private fun Document.toMovieResults(): List<SearchResponse> {
@@ -66,8 +75,7 @@ class KitanontonProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val detailUrl = ProviderHtmlParser.normalizeProviderPageUrl(url, mainUrl) ?: return null
-        val fetch = app.get(detailUrl)
-        if (ProviderHtmlParser.normalizeProviderPageUrl(fetch.url, mainUrl) == null) return null
+        val fetch = fetchProviderPage(detailUrl) ?: return null
         val document = fetch.document
         val titleElement = document.selectFirst("h1, h3[itemprop=name], meta[property=og:title]")
         val title = MovieMetadataParser.title(
@@ -129,11 +137,10 @@ class KitanontonProvider : MainAPI() {
         }
         val watchEpisodes = watchUrl?.let { page ->
             try {
-                val watchDocument = app.get(
+                val watchDocument = fetchProviderPage(
                     page,
-                    referer = fetch.url,
-                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-                ).document
+                    referer = fetch.url
+                )?.document ?: return@let emptyList()
                 KitanontonPlayerParser.watchEpisodes(watchDocument)
             } catch (error: CancellationException) {
                 throw error
@@ -182,7 +189,14 @@ class KitanontonProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        val resolver = LinkResolutionSession(
+            this,
+            subtitleCallback,
+            callback,
+            inlineSourceParser = { html, _ -> InlineDataParser.playableInlineUrls(html) },
+            candidateTimeoutMs = 25_000L,
+            sessionTimeoutMs = 90_000L
+        )
         if (KitanontonPlayerParser.isEpisodeData(data)) {
             val request = KitanontonPlayerParser.decodeEpisodeData(data) ?: return false
             val detailUrl = ProviderHtmlParser.normalizeProviderPageUrl(request.detailUrl, mainUrl)
@@ -190,17 +204,20 @@ class KitanontonProvider : MainAPI() {
             val watchUrl = ProviderHtmlParser.normalizeProviderPageUrl(request.watchUrl, mainUrl)
                 ?: return false
             try {
-                val fetch = app.get(
-                    watchUrl,
-                    referer = detailUrl,
-                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-                )
-                KitanontonPlayerParser.resolveAll(
-                    KitanontonPlayerParser.episodePlayerUrls(fetch.document, request.episode)
+                val fetch = resolver.withinBudget {
+                    fetchProviderPage(
+                        watchUrl,
+                        referer = detailUrl,
+                        timeoutSeconds = KITANONTON_PLAYBACK_PAGE_TIMEOUT_SECONDS
+                    )
+                } ?: return false
+                KitanontonPlayerParser.resolveUntilTarget(
+                    urls = KitanontonPlayerParser.episodePlayerUrls(fetch.document, request.episode),
+                    targetLinkCount = KITANONTON_TARGET_LINKS,
+                    linkCount = { resolver.linkCount },
+                    canContinue = { resolver.canContinue }
                 ) { source ->
-                    if (!resolver.loaded && resolver.canContinue) {
-                        resolver.resolve(source, fetch.url)
-                    }
+                    resolver.resolveInline(source, fetch.url)
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -215,21 +232,27 @@ class KitanontonProvider : MainAPI() {
             KitanontonPlayerParser.playPageUrl(detailUrl),
             detailUrl
         ).distinct()) {
-            if (resolver.loaded || !resolver.canContinue) break
+            if (resolver.linkCount >= KITANONTON_TARGET_LINKS || !resolver.canContinue) break
             try {
-                val fetch = app.get(
-                    page,
-                    referer = detailUrl,
-                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-                )
+                val fetch = resolver.withinBudget {
+                    fetchProviderPage(
+                        page,
+                        referer = detailUrl,
+                        timeoutSeconds = KITANONTON_PLAYBACK_PAGE_TIMEOUT_SECONDS
+                    )
+                } ?: continue
                 val document = fetch.document
                 val playerUrls = ProviderHtmlParser.mediaSources(document) +
                     document.select("[data-iframe]").mapNotNull { server ->
                         KitanontonPlayerParser.decodeServerUrl(server.attr("data-iframe"))
-                    }
-                for (source in KitanontonPlayerParser.orderPlayerUrls(playerUrls)) {
-                    if (resolver.loaded || !resolver.canContinue) break
-                    resolver.resolve(source, fetch.url)
+                    } + InlineDataParser.playableInlineUrls(document.outerHtml())
+                KitanontonPlayerParser.resolveUntilTarget(
+                    urls = playerUrls,
+                    targetLinkCount = KITANONTON_TARGET_LINKS,
+                    linkCount = { resolver.linkCount },
+                    canContinue = { resolver.canContinue }
+                ) { source ->
+                    resolver.resolveInline(source, fetch.url)
                 }
             } catch (error: kotlin.coroutines.cancellation.CancellationException) {
                 throw error
@@ -237,6 +260,34 @@ class KitanontonProvider : MainAPI() {
             }
         }
         return resolver.loaded
+    }
+
+    private data class ProviderPage(
+        val document: Document,
+        val url: String
+    )
+
+    private suspend fun fetchProviderPage(
+        url: String,
+        referer: String? = null,
+        timeoutSeconds: Long = KITANONTON_PAGE_TIMEOUT_SECONDS
+    ): ProviderPage? {
+        val requestUrl = ProviderHtmlParser.normalizeProviderPageUrl(url, mainUrl) ?: return null
+        return KitanontonPlayerParser.retryPageFetch(KITANONTON_PAGE_ATTEMPTS) {
+            val response = app.get(
+                requestUrl,
+                referer = referer,
+                timeout = timeoutSeconds
+            )
+            if (response.code !in 200..399) return@retryPageFetch null
+            val pageUrl = ProviderHtmlParser.normalizeProviderPageUrl(response.url, mainUrl)
+                ?: return@retryPageFetch null
+            val document = response.document
+            if (ProviderHtmlParser.isNonContentPage(document.outerHtml())) {
+                return@retryPageFetch null
+            }
+            ProviderPage(document, pageUrl)
+        }
     }
 
     private fun String.backgroundImageUrl(): String? {
@@ -272,7 +323,7 @@ internal object KitanontonPlayerParser {
             .getOrDefault("")
         if (detailHost.isBlank()) return null
 
-        return document.select("a.thumb.mvi-cover[href]").firstNotNullOfOrNull { link ->
+        return document.select("#mv-info > a[href], a.thumb.mvi-cover[href]").firstNotNullOfOrNull { link ->
             ProviderHtmlParser.absoluteUrl(link.attr("href"), detailUrl)
                 ?.takeIf(::isWatchPageUrl)
                 ?.takeIf { watchUrl ->
@@ -284,7 +335,7 @@ internal object KitanontonPlayerParser {
 
     fun watchEpisodes(document: Document): List<KitanontonWatchEpisode> {
         val mirrorsByEpisode = linkedMapOf<Int, MutableList<String>>()
-        document.select("a.btn-eps[data-iframe]").forEach { link ->
+        document.select("#list-eps [data-iframe], a.btn-eps[data-iframe]").forEach { link ->
             val label = listOf(link.text(), link.attr("title"))
                 .joinToString(" ")
                 .trim()
@@ -312,6 +363,7 @@ internal object KitanontonPlayerParser {
 
     fun decodeServerUrl(raw: String?): String? {
         val value = raw?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        if (isSafeRemoteHttpUrl(value)) return value
         return runCatching {
             val decoded = decodeBase64Compat(value) ?: return@runCatching null
             String(decoded, Charsets.UTF_8)
@@ -409,6 +461,38 @@ internal object KitanontonPlayerParser {
         for (url in orderPlayerUrls(urls)) resolve(url)
     }
 
+    suspend fun resolveUntilTarget(
+        urls: List<String>,
+        targetLinkCount: Int,
+        linkCount: () -> Int,
+        canContinue: () -> Boolean,
+        resolve: suspend (String) -> Unit
+    ) {
+        require(targetLinkCount > 0)
+        for (url in orderPlayerUrls(urls)) {
+            if (linkCount() >= targetLinkCount || !canContinue()) break
+            resolve(url)
+        }
+    }
+
+    suspend fun <T> retryPageFetch(
+        attempts: Int,
+        request: suspend (attempt: Int) -> T?
+    ): T? {
+        require(attempts > 0)
+        repeat(attempts) { attempt ->
+            val result = try {
+                request(attempt)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                null
+            }
+            if (result != null) return result
+        }
+        return null
+    }
+
     fun orderPlayerUrls(urls: List<String>): List<String> {
         return urls.distinct().withIndex()
             .sortedWith(compareBy<IndexedValue<String>> { priority(it.value) }.thenBy { it.index })
@@ -418,15 +502,15 @@ internal object KitanontonPlayerParser {
     private fun priority(url: String): Int {
         val host = runCatching { URI(url).host.orEmpty().lowercase() }.getOrDefault("")
         return when {
+            host == "abyssplayer.com" || host.endsWith(".abyssplayer.com") ||
+                host == "abyss.to" || host.endsWith(".abyss.to") -> 0
             host == "freeon.site" || host.endsWith(".freeon.site") ||
                 host == "justplay.cam" || host.endsWith(".justplay.cam") ||
                 host == "bysebuho.com" || host.endsWith(".bysebuho.com") ||
                 host == "asiastream.cc" || host.endsWith(".asiastream.cc") ||
-                host == "playsobat.xyz" || host.endsWith(".playsobat.xyz") -> 0
-            host == "abyssplayer.com" || host.endsWith(".abyssplayer.com") ||
-                host == "abyss.to" || host.endsWith(".abyss.to") -> 3
-            host.matches(Regex("""\d{1,3}(?:\.\d{1,3}){3}""")) -> 2
-            else -> 1
+                host == "playsobat.xyz" || host.endsWith(".playsobat.xyz") -> 1
+            host.matches(Regex("""\d{1,3}(?:\.\d{1,3}){3}""")) -> 3
+            else -> 2
         }
     }
 

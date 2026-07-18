@@ -204,7 +204,7 @@ class FilmapikProvider : MainAPI() {
     ) {
         val playerUrl = ProviderHtmlParser.absoluteUrl(raw, referer) ?: return
         if (!FilmapikPlayerParser.isEfekPlayerUrl(playerUrl)) {
-            resolver.resolve(playerUrl, referer)
+            resolver.resolveInline(playerUrl, referer)
             return
         }
 
@@ -269,7 +269,9 @@ internal data class FilmapikMediaSource(
 
 internal object FilmapikPlayerParser {
     private val legacyHosts = setOf("filmapik.to", "filmapik.fitness")
-    private val efekHostRegex = Regex("""(?i)^([vs])(\d+)\.efek\.stream$""")
+    // Efek currently uses compact numeric shards. Three digits leaves room for
+    // v10+ rotations without accepting unbounded or ambiguous host variants.
+    private val efekHostRegex = Regex("""(?i)^([vs])([1-9]\d{0,2})\.efek\.stream$""")
 
     fun normalizePageUrl(raw: String?, currentBaseUrl: String): String? {
         return ProviderHtmlParser.normalizeProviderPageUrl(raw, currentBaseUrl, legacyHosts)
@@ -359,7 +361,7 @@ internal object FilmapikPlayerParser {
         if (!isSafeRemoteHttpUrl(url)) return emptyList()
         val uri = runCatching { URI(url) }.getOrNull() ?: return emptyList()
         val match = efekHostRegex.matchEntire(uri.host.orEmpty()) ?: return listOf(url)
-        val shard = match.groupValues[2].toIntOrNull()?.takeIf { it in 1..9 }
+        val shard = match.groupValues[2].toIntOrNull()?.takeIf { it in 1..999 }
             ?: return listOf(url)
         val storageUrl = replaceRawAuthorityHost(uri, "s$shard.efek.stream")
         return listOfNotNull(storageUrl, url).distinct()

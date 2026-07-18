@@ -6,6 +6,7 @@ import java.net.URI
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class IndoxxiProvider : MainAPI() {
@@ -126,23 +127,13 @@ class IndoxxiProvider : MainAPI() {
             subtitleCallback,
             callback,
             inlineSourceParser = IndoxxiPlayerParser::mediaUrls,
-            candidateTimeoutMs = 50_000L,
-            sessionTimeoutMs = 100_000L
+            candidateTimeoutMs = 25_000L,
+            sessionTimeoutMs = 120_000L
         )
 
-        for (source in ProviderHtmlParser.mediaSources(document)) {
+        for (source in IndoxxiPlayerParser.pageMediaUrls(document, canonicalUrl)) {
             if (!resolver.canContinue || resolver.loaded) break
             resolvePlayer(source, canonicalUrl, resolver)
-        }
-        if (resolver.loaded) return true
-
-        // Older Indonesia titles often retain a working Gofile/OpenDrive
-        // fallback after their embedded BestX/Abyss mirrors have expired.
-        // Try explicit, allow-listed download mirrors before spending the
-        // session budget on those rotating player tabs.
-        for (downloadUrl in ProviderHtmlParser.downloadCandidateUrls(document, canonicalUrl)) {
-            if (!resolver.canContinue || resolver.loaded) break
-            resolvePlayer(downloadUrl, canonicalUrl, resolver)
         }
         if (resolver.loaded) return true
 
@@ -151,14 +142,16 @@ class IndoxxiProvider : MainAPI() {
         )) {
             if (!resolver.canContinue || resolver.loaded) break
             try {
-                val response = app.post(
-                    "$baseUrl/wp-admin/admin-ajax.php",
-                    data = request.toPostData(),
-                    referer = canonicalUrl,
-                    headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
-                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-                ).document
-                for (source in ProviderHtmlParser.mediaSources(response)) {
+                val response = resolver.withinBudget {
+                    app.post(
+                        "$baseUrl/wp-admin/admin-ajax.php",
+                        data = request.toPostData(),
+                        referer = canonicalUrl,
+                        headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                        timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+                    ).document
+                } ?: continue
+                for (source in IndoxxiPlayerParser.pageMediaUrls(response, canonicalUrl)) {
                     if (!resolver.canContinue || resolver.loaded) break
                     resolvePlayer(source, canonicalUrl, resolver)
                 }
@@ -181,7 +174,7 @@ class IndoxxiProvider : MainAPI() {
                     referer = canonicalUrl,
                     timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                 ).document
-                for (source in ProviderHtmlParser.mediaSources(playerDocument)) {
+                for (source in IndoxxiPlayerParser.pageMediaUrls(playerDocument, playerUrl)) {
                     if (!resolver.canContinue || resolver.loaded) break
                     resolvePlayer(source, playerUrl, resolver)
                 }
@@ -191,12 +184,21 @@ class IndoxxiProvider : MainAPI() {
                 // Continue with the other configured servers.
             }
         }
+
+        // Download hosts such as Gofile are useful fallbacks but may spend
+        // tens of seconds creating a guest session. Try the provider's active
+        // AJAX players first so a stalled download cannot hide a healthy
+        // Freeon/Drama21 mirror later in the page.
+        for (downloadUrl in ProviderHtmlParser.downloadCandidateUrls(document, canonicalUrl)) {
+            if (!resolver.canContinue || resolver.loaded) break
+            resolvePlayer(downloadUrl, canonicalUrl, resolver)
+        }
         return resolver.loaded
     }
 
     private suspend fun resolvePlayer(raw: String?, referer: String, resolver: LinkResolutionSession) {
         val url = ProviderHtmlParser.absoluteUrl(raw, referer) ?: return
-        resolver.resolve(url, referer)
+        resolver.resolveInline(url, referer)
     }
 
     private fun providerUrl(raw: String?): String? =
@@ -243,6 +245,19 @@ internal object IndoxxiPlayerParser {
         return (inlineUrls + sourceUrls)
             .mapNotNull { ProviderHtmlParser.absoluteUrl(it, playerUrl) }
             .distinct()
+    }
+
+    /**
+     * WordPress player fragments frequently keep their only media declaration
+     * inside a packed/script `file` or `src` assignment. Scan those alongside
+     * DOM iframe/video attributes before handing candidates to the resolver.
+     */
+    fun pageMediaUrls(document: Document, pageUrl: String): List<String> {
+        return (
+            ProviderHtmlParser.mediaSources(document)
+                .mapNotNull { ProviderHtmlParser.absoluteUrl(it, pageUrl) } +
+                mediaUrls(document.outerHtml(), pageUrl)
+            ).distinct()
     }
 
     private fun String.decodeJsUrl(): String = replace("\\'", "'")
