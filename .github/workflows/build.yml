@@ -62,13 +62,13 @@ jobs:
         run: |
           cd src
           chmod +x gradlew
-          ./gradlew testDebugUnitTest --no-daemon --console=plain
+          ./gradlew clean testDebugUnitTest --project-prop=kotlin.compiler.execution.strategy=in-process --no-daemon --console=plain
 
       - name: Build Plugins
         run: |
           cd src
           chmod +x gradlew
-          ./gradlew make makePluginsJson -x lint --continue
+          ./gradlew make makePluginsJson --project-prop=kotlin.compiler.execution.strategy=in-process -x lint --continue --no-daemon --console=plain
           cp **/build/*.cs3 ../builds || true
           cp **/build/*.jar ../builds || true
           cp build/plugins.json ../builds || true
