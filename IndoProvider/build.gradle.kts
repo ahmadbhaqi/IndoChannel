@@ -12,10 +12,10 @@ configurations.named("testImplementation") {
     extendsFrom(configurations.getByName("compileOnly"))
 }
 
-version = 9
+version = 10
 
 cloudstream {
-    description = "Kumpulan provider film dan anime berbahasa Indonesia."
+    description = "Film, serial, dan anime dari berbagai provider Indonesia dalam satu ekstensi CloudStream."
     authors = listOf("Ahmad")
     status = 1
     tvTypes = listOf("Movie", "TvSeries", "Anime")

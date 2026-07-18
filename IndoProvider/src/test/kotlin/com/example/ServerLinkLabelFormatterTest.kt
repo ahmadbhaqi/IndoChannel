@@ -18,7 +18,7 @@ import kotlin.test.assertTrue
 
 class ServerLinkLabelFormatterTest {
     @Test
-    fun `server renaming preserves playlist subtype and entries`() {
+    fun `server renaming preserves playlist subtype and entries`() = runBlocking {
         val playlist = ExtractorLinkPlayList(
             source = "Raw Extractor",
             name = "Raw Extractor",
@@ -277,6 +277,23 @@ class ServerLinkLabelFormatterTest {
         assertEquals(original.type, renamed.type)
         assertEquals(original.headers, renamed.headers)
         assertEquals(original.extractorData, renamed.extractorData)
+    }
+
+    @Test
+    fun `renaming does not rebuild a link with separate audio`() = runBlocking {
+        val audio = newAudioFile("https://cdn.example/audio.m3u8")
+        val original = newExtractorLink(
+            "IDLIX",
+            "IDLIX Auto",
+            "https://cdn.example/master.m3u8",
+            ExtractorLinkType.M3U8
+        ) {
+            referer = "https://z2.idlixku.com/movie/example"
+            audioTracks = listOf(audio)
+        }
+
+        assertSame(original, original.withSimpleServerName("IDLIX"))
+        assertEquals(listOf(audio), original.audioTracks)
     }
 
     @Test

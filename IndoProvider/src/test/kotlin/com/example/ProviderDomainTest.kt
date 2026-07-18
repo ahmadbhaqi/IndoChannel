@@ -64,15 +64,14 @@ class ProviderDomainTest {
     }
 
     @Test
-    fun `movie providers use one shared resolution session`() {
+    fun `generic movie providers use one shared resolution session`() {
         val providers = listOf(
             "NgefilmProvider.kt",
             "DutamovieProvider.kt",
             "PusatfilmProvider.kt",
             "KitanontonProvider.kt",
             "FilmapikProvider.kt",
-            "RebahinProvider.kt",
-            "IdlixProvider.kt"
+            "RebahinProvider.kt"
         )
 
         val sessionCreation = Regex("""\bLinkResolutionSession\s*\(""")
@@ -161,7 +160,10 @@ class ProviderDomainTest {
         assertTrue(provider.contains("https://z2.idlixku.com"))
         assertTrue(provider.contains("/watch/play-info/"))
         assertTrue(provider.contains("/watch/session/claim"))
-        assertTrue(provider.contains("LinkResolutionSession("))
+        assertTrue(provider.contains("val verifiedMasterUrl"))
+        assertTrue(provider.contains("IdlixParser.masterManifest("))
+        assertTrue(provider.contains("newExtractorLink(name, \"\$name Auto\""))
+        assertFalse(provider.contains("LinkResolutionSession("))
         assertTrue(source("IndoPlugin.kt").contains("registerMainAPI(IdlixProvider())"))
     }
 
@@ -212,7 +214,7 @@ class ProviderDomainTest {
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
         assertTrue(
-            Regex("""(?m)^version\s*=\s*9\s*$""").containsMatchIn(moduleBuild.readText()),
+            Regex("""(?m)^version\s*=\s*10\s*$""").containsMatchIn(moduleBuild.readText()),
             "Cloudstream must see these provider fixes as a new plugin release"
         )
     }

@@ -16,7 +16,6 @@ import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.getQualityFromString
 import com.lagradost.cloudstream3.mainPageOf
-import com.lagradost.cloudstream3.newAudioFile
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
@@ -24,9 +23,10 @@ import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.newTvSeriesSearchResponse
-import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import java.net.URI
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
@@ -209,9 +209,12 @@ class IdlixProvider : MainAPI() {
         if (manifestResponse.code !in 200..299 || manifestResponse.text.length > IDLIX_MAX_MANIFEST_BYTES) {
             return false
         }
+        val verifiedMasterUrl = manifestResponse.url
+            .takeIf(IdlixParser::isTrustedMasterUrl)
+            ?: return false
         val manifest = IdlixParser.masterManifest(
             manifestResponse.text,
-            manifestResponse.url,
+            verifiedMasterUrl,
             maxHeight
         ) ?: return false
 
@@ -228,39 +231,27 @@ class IdlixProvider : MainAPI() {
                 subtitleCallback(newSubtitleFile(label, subtitleUrl))
             }
 
-        val resolver = LinkResolutionSession(
-            this,
-            subtitleCallback,
-            callback,
-            candidateTimeoutMs = 25_000L,
-            sessionTimeoutMs = 75_000L
-        )
         val mediaHeaders = mapOf(
             "User-Agent" to IDLIX_USER_AGENT,
             "Referer" to request.pageUrl,
             "Origin" to mainUrl
         )
-        val audioTracks = manifest.audioUrls.map { audioUrl ->
-            newAudioFile(audioUrl) {
+        // The signed master was fetched and parsed above, so it is already a
+        // verified HLS playlist. Let ExoPlayer read the master itself: this
+        // preserves its alternate-audio group and avoids rebuilding an
+        // ExtractorLink with the newer audioTracks constructor, which breaks on
+        // older CloudStream releases before their callback can receive a link.
+        val quality = manifest.streams.maxOfOrNull { it.height }
+            ?.takeIf { it > 0 }
+            ?: Qualities.Unknown.value
+        callback(
+            newExtractorLink(name, "$name Auto", verifiedMasterUrl, ExtractorLinkType.M3U8) {
+                referer = request.pageUrl
+                this.quality = quality
                 headers = mediaHeaders
             }
-        }
-        for (stream in manifest.streams.take(IDLIX_MAX_STREAMS)) {
-            @Suppress("DEPRECATION_ERROR")
-            val link = ExtractorLink(
-                source = name,
-                name = "$name ${stream.height.takeIf { it > 0 }?.let { "${it}p" }.orEmpty()}".trim(),
-                url = stream.url,
-                referer = request.pageUrl,
-                quality = stream.height,
-                headers = mediaHeaders,
-                extractorData = null,
-                type = ExtractorLinkType.M3U8,
-                audioTracks = audioTracks
-            )
-            resolver.emitResolved(link)
-        }
-        return resolver.loaded
+        )
+        return true
     }
 
     private suspend fun claimPlayback(

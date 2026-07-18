@@ -6,6 +6,28 @@ import kotlin.test.assertNull
 
 class FilmapikPlayerParserTest {
     @Test
+    fun `slow Efek player is deferred until regular and download fallbacks`() {
+        assertEquals(
+            listOf(
+                "https://abyssplayer.com/embed/healthy",
+                "https://bysebuho.com/download/backup",
+                "https://v2.efek.stream/v/slow"
+            ),
+            FilmapikPlayerParser.orderedPlayerCandidates(
+                primary = listOf(
+                    "https://v2.efek.stream/v/slow",
+                    "https://abyssplayer.com/embed/healthy"
+                ),
+                fallback = listOf(
+                    "https://bysebuho.com/download/backup",
+                    "https://abyssplayer.com/embed/healthy"
+                ),
+                pageUrl = "https://filmapik.college/example/play"
+            )
+        )
+    }
+
+    @Test
     fun `Efek player host is rehomed to its storage shard before fallbacks`() {
         assertEquals(
             listOf(

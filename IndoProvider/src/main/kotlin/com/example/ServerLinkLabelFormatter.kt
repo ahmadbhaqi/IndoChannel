@@ -1,7 +1,46 @@
 package com.example
 
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import java.net.URI
+
+internal data class CompatibleAudioTrack(
+    val url: String,
+    val headers: Map<String, String>
+)
+
+/**
+ * AudioFile/ExtractorLink.audioTracks was added after the original extension
+ * API. Read it reflectively so a plugin compiled today can still emit ordinary
+ * links on CloudStream builds that do not expose that getter yet.
+ */
+internal fun ExtractorLink.audioTracksCompat(): List<CompatibleAudioTrack> {
+    val getter = javaClass.methods.firstOrNull {
+        it.name == "getAudioTracks" && it.parameterCount == 0
+    } ?: return emptyList()
+    val rawTracks = runCatching { getter.invoke(this) as? Iterable<*> }
+        .getOrNull()
+        ?: return emptyList()
+    return rawTracks.map { raw ->
+        if (raw == null) return@map CompatibleAudioTrack("", emptyMap())
+        val methods = raw.javaClass.methods
+        val url = runCatching {
+            methods.firstOrNull { it.name == "getUrl" && it.parameterCount == 0 }
+                ?.invoke(raw) as? String
+        }.getOrNull().orEmpty()
+        val headers = runCatching {
+            val value = methods.firstOrNull {
+                it.name == "getHeaders" && it.parameterCount == 0
+            }?.invoke(raw) as? Map<*, *>
+            value.orEmpty().entries.mapNotNull { (key, item) ->
+                (key as? String)?.let { safeKey ->
+                    (item as? String)?.let { safeValue -> safeKey to safeValue }
+                }
+            }.toMap()
+        }.getOrDefault(emptyMap())
+        CompatibleAudioTrack(url, headers)
+    }
+}
 
 internal object ServerLinkLabelFormatter {
     private val explicitResolution = Regex("""(?i)(?<!\d)(\d{3,4})\s*p\b""")
@@ -205,8 +244,7 @@ internal object ServerLinkLabelFormatter {
     }.getOrNull()?.takeIf(String::isNotBlank)
 }
 
-@Suppress("DEPRECATION_ERROR")
-internal fun ExtractorLink.withSimpleServerName(providerName: String): ExtractorLink {
+internal suspend fun ExtractorLink.withSimpleServerName(providerName: String): ExtractorLink {
     val formattedName = ServerLinkLabelFormatter.format(
         providerName = providerName,
         source = source,
@@ -217,24 +255,18 @@ internal fun ExtractorLink.withSimpleServerName(providerName: String): Extractor
     )
     return if (formattedName == name) {
         this
-    } else if (javaClass != ExtractorLink::class.java) {
+    } else if (javaClass != ExtractorLink::class.java || audioTracksCompat().isNotEmpty()) {
         // Rebuilding a subtype would discard DRM keys, playlist entries, or
-        // other subtype-specific playback state. Preserve it unchanged.
+        // other subtype-specific playback state. Links with external audio are
+        // also kept intact so older CloudStream runtimes never need the newer
+        // ExtractorLink constructor that added the audioTracks argument.
         this
     } else {
-        // Extractor callbacks are synchronous while newExtractorLink is suspend.
-        // Rebuild only to replace the immutable display name and preserve every
-        // playback field exactly.
-        ExtractorLink(
-            source,
-            formattedName,
-            url,
-            referer,
-            quality,
-            headers,
-            extractorData,
-            type,
-            audioTracks
-        )
+        newExtractorLink(source, formattedName, url, type) {
+            referer = this@withSimpleServerName.referer
+            quality = this@withSimpleServerName.quality
+            headers = this@withSimpleServerName.headers
+            extractorData = this@withSimpleServerName.extractorData
+        }
     }
 }

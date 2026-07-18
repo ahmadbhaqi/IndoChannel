@@ -760,7 +760,7 @@ internal class LinkResolutionSession(
         }
     }
 
-    private fun emitUnchecked(link: ExtractorLink) {
+    private suspend fun emitUnchecked(link: ExtractorLink) {
         if (System.nanoTime() >= deadlineNanos) return
         if (!link.hasSafeMediaUrls()) return
         val key = EmittedLinkKey(
@@ -881,7 +881,7 @@ internal suspend fun validateAuxiliaryAudioTracks(
     link: ExtractorLink,
     entryProbe: suspend (ExtractorLink) -> ExtractorLink?
 ): ExtractorLink? {
-    val tracks = link.audioTracks
+    val tracks = link.audioTracksCompat()
     if (tracks.size > MAX_AUDIO_TRACK_PROBE_ITEMS) return null
     if (tracks.isEmpty()) return link
     val verified = coroutineScope {
@@ -889,7 +889,7 @@ internal suspend fun validateAuxiliaryAudioTracks(
         tracks.map { track ->
             async {
                 semaphore.withPermit {
-                    val trackHeaders = track.headers.orEmpty()
+                    val trackHeaders = track.headers
                     entryProbe(
                         ExtractorLink(
                             link.source,
@@ -1242,7 +1242,7 @@ private fun ExtractorLink.mediaUrls(): List<String> = when (this) {
 }
 
 private fun ExtractorLink.hasSafeMediaUrls(): Boolean {
-    val urls = mediaUrls() + audioTracks.map { it.url }
+    val urls = mediaUrls() + audioTracksCompat().map { it.url }
     return urls.isNotEmpty() && urls.all { it.isNotBlank() && isSafeRemoteHttpUrl(it) }
 }
 

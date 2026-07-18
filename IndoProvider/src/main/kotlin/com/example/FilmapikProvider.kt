@@ -154,14 +154,20 @@ class FilmapikProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val canonicalData = providerUrl(data) ?: return false
-        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        val resolver = LinkResolutionSession(
+            this,
+            subtitleCallback,
+            callback,
+            candidateTimeoutMs = 25_000L,
+            sessionTimeoutMs = 75_000L
+        )
         val directUrls = mutableSetOf<String>()
         val pages = listOfNotNull(
             FilmapikPlayerParser.playPageUrl(canonicalData),
             canonicalData
         ).distinct()
         for (page in pages) {
-            if (!resolver.canContinue) break
+            if (!resolver.canContinue || resolver.loaded) break
             try {
                 val fetch = app.get(page, referer = canonicalData, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
                 val document = fetch.document
@@ -178,15 +184,15 @@ class FilmapikProvider : MainAPI() {
                             it.attr("href").takeIf { value -> value.isNotBlank() }
                         }
                     ).distinct()
-                for (raw in servers) {
-                    if (!resolver.canContinue) break
+                val downloads = ProviderHtmlParser.downloadCandidateUrls(document, pageUrl)
+                val candidates = FilmapikPlayerParser.orderedPlayerCandidates(
+                    servers,
+                    downloads,
+                    pageUrl
+                )
+                for (raw in candidates) {
+                    if (!resolver.canContinue || resolver.loaded) break
                     resolvePlayer(raw, pageUrl, resolver, directUrls)
-                }
-                if (!resolver.loaded) {
-                    for (download in ProviderHtmlParser.downloadCandidateUrls(document, pageUrl)) {
-                        if (!resolver.canContinue || resolver.loaded) break
-                        resolvePlayer(download, pageUrl, resolver, directUrls)
-                    }
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -202,6 +208,7 @@ class FilmapikProvider : MainAPI() {
         resolver: LinkResolutionSession,
         directUrls: MutableSet<String>
     ) {
+        if (resolver.loaded || !resolver.canContinue) return
         val playerUrl = ProviderHtmlParser.absoluteUrl(raw, referer) ?: return
         if (!FilmapikPlayerParser.isEfekPlayerUrl(playerUrl)) {
             resolver.resolveInline(playerUrl, referer)
@@ -350,6 +357,21 @@ internal object FilmapikPlayerParser {
         val host = runCatching { URI(url).host.orEmpty() }.getOrDefault("")
         return efekHostRegex.matchEntire(host)?.groupValues?.getOrNull(1)
             ?.equals("s", ignoreCase = true) == true
+    }
+
+    /** Dead Efek shards are common, so preserve every fallback ahead of them. */
+    fun orderedPlayerCandidates(
+        primary: List<String>,
+        fallback: List<String>,
+        pageUrl: String
+    ): List<String> {
+        val primaryUrls = primary.mapNotNull { ProviderHtmlParser.absoluteUrl(it, pageUrl) }
+            .distinct()
+        val fallbackUrls = fallback.mapNotNull { ProviderHtmlParser.absoluteUrl(it, pageUrl) }
+            .distinct()
+        val (efekPlayers, regularPlayers) = primaryUrls.partition(::isEfekPlayerUrl)
+        val (efekFallbacks, regularFallbacks) = fallbackUrls.partition(::isEfekPlayerUrl)
+        return (regularPlayers + regularFallbacks + efekPlayers + efekFallbacks).distinct()
     }
 
     /**

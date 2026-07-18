@@ -1,84 +1,97 @@
-# 🇮🇩 IndoChannel Cloudstream Repository
+# IndoChannel
 
-Selamat datang di repositori **IndoChannel** untuk [Cloudstream](https://github.com/recloudstream/cloudstream)! 
-Repositori ini menyediakan berbagai ekstensi (plugin) untuk layanan streaming film dan anime berbahasa Indonesia.
+IndoChannel adalah repositori ekstensi komunitas untuk [CloudStream](https://github.com/recloudstream/cloudstream). Satu ekstensi `IndoProvider` menghadirkan katalog film, serial, dan anime dari berbagai provider berbahasa Indonesia langsung di dalam CloudStream.
 
-## 📦 Daftar Provider (Ekstensi)
+> IndoChannel bukan aplikasi streaming mandiri dan tidak menyimpan atau meng-host video. Ekstensi hanya membaca katalog serta tautan yang disediakan oleh situs sumber.
 
-Saat ini, IndoChannel mendukung berbagai sumber streaming lokal terpopuler, antara lain:
+## Instalasi yang direkomendasikan
 
-### 🎬 Movie & TV Series
-- **Rebahin**
-- **LayarKaca (LK21)**
-- **Ngefilm**
-- **Dutamovie**
-- **KitaNonton**
-- **Indoxxi**
-- **Filmapik**
+Gunakan tombol berikut dari perangkat Android yang sudah memiliki CloudStream. Tautan akan membuka CloudStream dan menawarkan penambahan repositori IndoChannel secara otomatis.
 
-### 🌸 Anime
-- **Otakudesu**
-- **Samehadaku**
-- **Anoboy**
-- **Kuronime**
-- **Animeindo**
-- **Oploverz**
-- **Zoronime**
+[![Pasang IndoChannel di CloudStream](https://img.shields.io/badge/Pasang%20di%20CloudStream-IndoChannel-5c6bc0?style=for-the-badge&logo=android&logoColor=white)](cloudstreamrepo://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/repo.json)
 
-> **Catatan:** Semua sumber yang ada di sini adalah layanan web streaming gratis yang dikurasi. Harap maklum jika ada situs yang kadang offline atau berubah domain (kami selalu berusaha melakukan update secara berkala).
->
-> Ketersediaan link tetap bergantung pada mirror tiap judul. Beberapa judul Indonesia lama di Indoxxi saat ini hanya menunjuk ke folder Gofile atau domain download yang sudah parkir; folder Gofile modern memerlukan akun/token resmi dan tidak dianggap sebagai link video langsung.
+Tautan instalasi langsung:
 
----
+[`cloudstreamrepo://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/repo.json`](cloudstreamrepo://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/repo.json)
 
-## 🛠️ Cara Pemasangan (Instalasi)
+Setelah CloudStream terbuka:
 
-Untuk memasukkan semua provider dari IndoChannel ke aplikasi Cloudstream Anda, ikuti langkah-langkah mudah berikut:
+1. Setujui penambahan repositori `IndoChannel`.
+2. Buka **Pengaturan / Settings > Extensions**.
+3. Pilih repositori **IndoChannel**, lalu pasang atau perbarui ekstensi **IndoProvider**.
 
-### Metode 1: Penggunaan Shortcode (Direkomendasikan)
-1. Buka aplikasi **Cloudstream**.
-2. Masuk ke tab **Settings** (Pengaturan) -> **Extensions** (Ekstensi).
-3. Klik tombol **+ Add Repository**.
-4. Pada kolom yang muncul, isi URL dengan link berikut ini:
-   ```text
-   https://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/repo.json
-   ```
-5. Isi nama repositori dengan `IndoChannel` (opsional).
-6. Klik **Download** dan tunggu hingga daftar ekstensi muncul, lalu tekan lambang Unduh (panah ke bawah) untuk setiap plugin yang ingin digunakan.
+### Jika tombol tidak membuka CloudStream
 
-### Metode 2: Sekali Klik (Bila didukung)
-Jika Anda membuka halaman ini di browser HP Anda yang sudah terinstal Cloudstream, cukup salin tautan instalasi otomatis berikut lalu buka di browser Anda:
+Tambahkan repositori secara manual melalui **Settings > Extensions > Add repository**, lalu masukkan:
 
-`cloudstreamrepo://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/repo.json`
+```text
+https://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/repo.json
+```
 
----
+[Buka file repo.json](https://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/repo.json)
 
-## 💻 Untuk Pengembang (Developer)
+Nama repositori dapat diisi `IndoChannel`. Letak dan nama menu bisa sedikit berbeda pada setiap versi atau fork CloudStream.
 
-Ingin ikut berkontribusi atau memperbaiki scraper yang bermasalah?
-Pastikan Anda sudah menginstal **JDK 17+** dan menggunakan **Android Studio** atau Command Line.
+## Provider yang tersedia
 
-### Kompilasi & Build Lokal:
-- Windows: `.\gradlew.bat IndoProvider:make` atau `.\gradlew.bat IndoProvider:deployWithAdb`
-- Linux & Mac: `./gradlew IndoProvider:make` atau `./gradlew IndoProvider:deployWithAdb`
+Provider berikut terdaftar di dalam ekstensi `IndoProvider` saat ini:
 
-### Live Test Provider
+| Film & serial | Anime |
+| --- | --- |
+| LayarKaca (LK21) | Otakudesu |
+| Ngefilm | Samehadaku |
+| Dutamovie | Anoboy |
+| KitaNonton | Kuronime |
+| IndoXXI | Animeindo |
+| Filmapik | Oploverz |
+| Rebahin | Zoronime |
+| IDLIX |  |
 
-Live test tidak berjalan pada unit test biasa; JUnit akan menandainya sebagai *skipped*. Untuk menjalankannya di PowerShell:
+Fitur yang muncul dapat berbeda antarprovider, tetapi umumnya mencakup katalog, pencarian, detail judul, episode, metadata, subtitle, dan pilihan server jika disediakan oleh sumber.
+
+## Catatan ketersediaan
+
+Situs sumber dapat mengganti domain, struktur halaman, proteksi anti-bot, server pemutar, atau menghapus sebuah judul tanpa pemberitahuan. Karena itu, provider maupun tautan tertentu dapat berhenti berfungsi sementara walaupun ekstensi sudah versi terbaru. Ketersediaan juga dapat dipengaruhi jaringan, DNS, wilayah, dan kondisi mirror untuk judul tersebut.
+
+Jika muncul pesan **tidak ada tautan yang ditemukan**:
+
+1. Perbarui CloudStream dan ekstensi IndoProvider.
+2. Coba server atau provider lain untuk judul yang sama.
+3. Pastikan situs sumber dapat dijangkau dari jaringan Anda.
+4. Jika masalah berulang, laporkan nama provider, judul, episode, server, versi ekstensi, dan log yang relevan agar masalah dapat direproduksi.
+
+## Untuk pengembang
+
+Prasyarat utama adalah JDK 17 dan Android SDK. Dari direktori utama proyek, jalankan:
+
+```powershell
+# Unit test
+.\gradlew.bat :IndoProvider:testDebugUnitTest
+
+# Paket plugin CloudStream
+.\gradlew.bat :IndoProvider:make
+
+# AAR debug
+.\gradlew.bat :IndoProvider:assembleDebug
+```
+
+Di Linux atau macOS, ganti `.\gradlew.bat` dengan `./gradlew`.
+
+Live test sengaja dilewati pada pengujian biasa karena mengakses situs eksternal. Untuk menjalankan rangkaian live test utama di PowerShell:
 
 ```powershell
 $env:RUN_LIVE_PROVIDER_TESTS='1'
 .\gradlew.bat :IndoProvider:testDebugUnitTest
 ```
 
-Pemeriksaan katalog dan metadata yang lebih luas memakai `RUN_LIVE_MOVIE_PROVIDER_TESTS=1`.
+Audit pipeline film yang lebih luas dapat dijalankan dengan `RUN_LIVE_MOVIE_PROVIDER_TESTS=1`. Hasil live test tidak selalu stabil karena bergantung pada layanan pihak ketiga.
 
-### Catatan Penting
-Semua struktur plugin dan CSS Selector berpedoman pada dokumentasi `cloudstream3-plugin`. Mohon jangan menggabungkan dua domain berbeda jika kelas elemen web mereka (*DOM class*) tidak sama.
+Build otomatis menghasilkan paket plugin, `plugins.json`, dan `repo.json` pada branch `builds`.
 
----
+## Kontribusi dan laporan bug
 
-## ⚖️ Lisensi dan Disclaimer
+Perbaikan parser, pengujian regresi, dan laporan provider yang rusak sangat diterima. Sertakan contoh URL atau judul yang masih tersedia secara publik serta langkah reproduksi; jangan menyertakan cookie, token, akun, atau data pribadi.
 
-- Proyek ini dirilis ke dalam domain publik (Public Domain).
-- **DISCLAIMER:** Developer tidak meng-host file video apa pun di server sendiri. Repositori ini murni hanya sebuah *scraper* (pengumpul tautan) dan menautkan konten ke provider aslinya.
+## Disclaimer
+
+Proyek ini tidak berafiliasi dengan CloudStream maupun situs provider yang tercantum. Pengembang tidak meng-host konten video dan tidak mengendalikan materi yang disediakan pihak ketiga. Pengguna bertanggung jawab mematuhi hukum, ketentuan layanan, dan hak cipta yang berlaku di wilayah masing-masing.

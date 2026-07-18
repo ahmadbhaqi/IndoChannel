@@ -16,6 +16,50 @@ import kotlin.test.assertTrue
 
 class IdlixProviderLiveTest {
     @Test
+    fun `idlix current movie matrix reports every playback outcome`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val provider = IdlixProvider()
+        val moviePage = provider.mainPage.first { it.data == "movie" }
+        val catalog = withTimeout(45_000) {
+            provider.getMainPage(
+                1,
+                MainPageRequest(moviePage.name, moviePage.data, moviePage.horizontalImages)
+            )
+        }.items.flatMap { it.list }
+            .filter { it.url.startsWith("${provider.mainUrl}/movie/") }
+            .distinctBy { it.url }
+            .take(6)
+
+        var playable = 0
+        for (candidate in catalog) {
+            val started = System.nanoTime()
+            val detail = withTimeoutOrNull(45_000) { provider.load(candidate.url) } as? MovieLoadResponse
+            val links = mutableListOf<ExtractorLink>()
+            val loaded = detail?.let {
+                withTimeoutOrNull(105_000) {
+                    provider.loadLinks(it.dataUrl, false, {}, links::add)
+                }
+            } == true
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+            if (loaded && links.any(::isSignedPlaybackLink)) playable++
+            println(
+                "IDLIX_MATRIX title=${candidate.name} loaded=$loaded links=${links.size} " +
+                    "audio=${links.maxOfOrNull { it.audioTracks.size } ?: 0} elapsedMs=$elapsedMs"
+            )
+        }
+
+        assertTrue(catalog.size >= 4, "IDLIX current catalog was too small for a playback matrix")
+        assertTrue(
+            playable == catalog.size,
+            "IDLIX current movie matrix resolved $playable of ${catalog.size} signed playbacks"
+        )
+    }
+
+    @Test
     fun `idlix current search detail and signed av playback remain available`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
             org.junit.Assume.assumeTrue(false)
@@ -47,7 +91,7 @@ class IdlixProviderLiveTest {
         )
 
         val attempts = mutableListOf<String>()
-        var resolvedAvLink: ExtractorLink? = null
+        var resolvedPlaybackLink: ExtractorLink? = null
         for (candidate in (searchResults + catalog).distinctBy { it.url }.take(4)) {
             val detail = try {
                 withTimeoutOrNull(45_000) { provider.load(candidate.url) }
@@ -79,24 +123,16 @@ class IdlixProviderLiveTest {
                 false
             }
 
-            resolvedAvLink = links.firstOrNull { link ->
-                IdlixParser.isTrustedPlaybackAsset(link.url) &&
-                    hasCurrentSignature(link.url) &&
-                    link.audioTracks.isNotEmpty() &&
-                    link.audioTracks.all { audio ->
-                        IdlixParser.isTrustedPlaybackAsset(audio.url) &&
-                            hasCurrentSignature(audio.url)
-                    }
-            }
+            resolvedPlaybackLink = links.firstOrNull(::isSignedPlaybackLink)
             attempts += "${candidate.name}: loaded=$loaded links=${links.size} " +
                 "audioTracks=${links.maxOfOrNull { it.audioTracks.size } ?: 0} " +
                 "failure=${failure?.message}"
-            if (loaded && resolvedAvLink != null) break
+            if (loaded && resolvedPlaybackLink != null) break
         }
 
         assertTrue(
-            resolvedAvLink != null,
-            "IDLIX did not resolve a signed video playlist with validated auxiliary audio: $attempts"
+            resolvedPlaybackLink != null,
+            "IDLIX did not resolve a signed, validated master playlist: $attempts"
         )
     }
 
@@ -122,7 +158,7 @@ class IdlixProviderLiveTest {
         assertTrue(catalog.isNotEmpty(), "IDLIX returned an empty current series catalog")
 
         val attempts = mutableListOf<String>()
-        var resolvedAvLink: ExtractorLink? = null
+        var resolvedPlaybackLink: ExtractorLink? = null
         var playbackAttempts = 0
         seriesLoop@ for (candidate in catalog.take(4)) {
             val detail = try {
@@ -155,28 +191,25 @@ class IdlixProviderLiveTest {
                     failure = error
                     false
                 }
-                resolvedAvLink = links.firstOrNull(::isSignedAvLink)
+                resolvedPlaybackLink = links.firstOrNull(::isSignedPlaybackLink)
                 attempts += "${candidate.name} S${episode.season}E${episode.episode}: " +
                     "loaded=$loaded links=${links.size} " +
                     "audioTracks=${links.maxOfOrNull { it.audioTracks.size } ?: 0} " +
                     "failure=${failure?.message}"
-                if (loaded && resolvedAvLink != null) break@seriesLoop
+                if (loaded && resolvedPlaybackLink != null) break@seriesLoop
             }
         }
 
         assertTrue(
-            resolvedAvLink != null,
-            "IDLIX did not resolve a current series episode with signed video/audio: $attempts"
+            resolvedPlaybackLink != null,
+            "IDLIX did not resolve a current series episode with a signed master playlist: $attempts"
         )
     }
 
-    private fun isSignedAvLink(link: ExtractorLink): Boolean =
-        IdlixParser.isTrustedPlaybackAsset(link.url) &&
+    private fun isSignedPlaybackLink(link: ExtractorLink): Boolean =
+        IdlixParser.isTrustedMasterUrl(link.url) &&
             hasCurrentSignature(link.url) &&
-            link.audioTracks.isNotEmpty() &&
-            link.audioTracks.all { audio ->
-                IdlixParser.isTrustedPlaybackAsset(audio.url) && hasCurrentSignature(audio.url)
-            }
+            link.type == com.lagradost.cloudstream3.utils.ExtractorLinkType.M3U8
 
     private fun hasCurrentSignature(raw: String): Boolean = runCatching {
         URI(raw).rawQuery.orEmpty().split('&').any { parameter ->

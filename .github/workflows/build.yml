@@ -58,6 +58,11 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Run Unit Tests
+        run: |
+          cd src
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest --no-daemon --console=plain
 
       - name: Build Plugins
         run: |
@@ -73,7 +78,7 @@ jobs:
           cd builds
           echo '{
             "name": "IndoChannel",
-            "description": "Kumpulan provider film dan anime berbahasa Indonesia.",
+            "description": "Ekstensi komunitas CloudStream untuk film, serial, dan anime dari berbagai provider Indonesia.",
             "manifestVersion": 1,
             "pluginLists": [
               "https://raw.githubusercontent.com/${{ github.repository }}/builds/plugins.json"
