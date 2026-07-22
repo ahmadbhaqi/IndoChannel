@@ -19,4 +19,17 @@ class AndroidApiCompatibilityTest {
             "Firestream parser must use Base64Compat for the supported Android API range"
         )
     }
+
+    @Test
+    fun `idlix gate arithmetic avoids Math exact APIs unavailable below Android 24`() {
+        val classLoader = requireNotNull(javaClass.classLoader)
+        val bytecode = requireNotNull(
+            classLoader.getResourceAsStream("com/example/IdlixParser.class")
+        ).use { it.readBytes() }
+            .toString(Charsets.ISO_8859_1)
+
+        assertFalse(bytecode.contains("subtractExact"))
+        assertFalse(bytecode.contains("multiplyExact"))
+        assertFalse(bytecode.contains("addExact"))
+    }
 }

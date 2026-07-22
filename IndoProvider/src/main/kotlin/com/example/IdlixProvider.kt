@@ -37,6 +37,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Interceptor
 import okhttp3.Request
@@ -196,9 +197,18 @@ class IdlixProvider : MainAPI() {
             preflightCookies,
             retryWithPreflight = false
         ) ?: return false
-        val session = claimPlayback(playInfo, request.pageUrl) ?: return false
-        val redeemed = redeemPlayback(session, request.pageUrl) ?: return false
-        val maxHeight = session.node.path("maxHeight").asInt(Qualities.Unknown.value)
+        val direct = IdlixParser.directPlayback(playInfo.node)
+        val session = if (direct == null) {
+            claimPlayback(playInfo, request.pageUrl) ?: return false
+        } else {
+            null
+        }
+        val redeemed = direct
+            ?: redeemPlayback(session ?: return false, request.pageUrl)
+            ?: return false
+        val maxHeight = (session?.node ?: playInfo.node)
+            .path("maxHeight")
+            .asInt(Qualities.Unknown.value)
         val masterUrl = redeemed.textOrNull("url")
             ?.takeIf(IdlixParser::isTrustedMasterUrl)
             ?: return false
@@ -227,19 +237,6 @@ class IdlixProvider : MainAPI() {
             maxHeight
         ) ?: return false
 
-        redeemed.path("subtitles")
-            .takeIf(JsonNode::isArray)
-            ?.take(32)
-            ?.forEach { subtitle ->
-                val subtitleUrl = subtitle.textOrNull("path")
-                    ?.takeIf(IdlixParser::isTrustedPlaybackAsset)
-                    ?: return@forEach
-                val label = subtitle.textOrNull("label")
-                    ?: subtitle.textOrNull("lang")
-                    ?: "Subtitle"
-                subtitleCallback(newSubtitleFile(label, subtitleUrl))
-            }
-
         val resolver = LinkResolutionSession(
             this,
             subtitleCallback,
@@ -255,6 +252,12 @@ class IdlixProvider : MainAPI() {
             "Referer" to request.pageUrl,
             "Origin" to mainUrl
         )
+        (manifest.subtitles + IdlixParser.redeemedSubtitles(redeemed, verifiedMasterUrl))
+            .distinctBy(IdlixParser.SubtitleTrack::url)
+            .take(32)
+            .forEach { track ->
+                subtitleCallback(newIdlixSubtitleFile(track, mediaHeaders))
+            }
         resolver.emitResolved(
             newIdlixMasterLink(
                 source = name,
@@ -278,28 +281,26 @@ class IdlixProvider : MainAPI() {
             ?: return null
         val serverNow = playInfo.node.path("serverNow").asLong(0L)
         val unlockAt = playInfo.node.path("unlockAt").asLong(0L)
-        val waitMs = (unlockAt - serverNow + 900L).coerceIn(0L, IDLIX_MAX_GATE_WAIT_MS)
-        if (waitMs > 0L) delay(waitMs)
-
-        var result = apiPostJson(
-            "/watch/session/claim",
-            mapper.createObjectNode().put("gateToken", token),
-            referer,
-            playInfo.cookies
-        ) ?: return null
-        repeat(2) {
-            if (result.node.textOrNull("kind") != "pending") return result
-            val remaining = result.node.path("remainingMs").asLong(0L)
-                .coerceIn(0L, 3_000L)
-            delay(remaining + 400L)
-            result = apiPostJson(
-                "/watch/session/claim",
-                mapper.createObjectNode().put("gateToken", token),
-                referer,
-                result.cookies
-            ) ?: return null
-        }
-        return result.takeIf { it.node.textOrNull("kind") == "pentos" }
+        val waitMs = IdlixParser.gateWaitMs(serverNow, unlockAt) ?: return null
+        return IdlixParser.pollGateClaim<ApiResult>(
+            initialWaitMs = waitMs,
+            pendingBudgetMs = IDLIX_MAX_GATE_WAIT_MS,
+            sleep = { wait -> if (wait > 0L) delay(wait) },
+            request = { previous, requestBudgetMs ->
+                withTimeoutOrNull(requestBudgetMs) {
+                    apiPostJson(
+                        "/watch/session/claim",
+                        mapper.createObjectNode().put("gateToken", token),
+                        referer,
+                        previous?.cookies ?: playInfo.cookies,
+                        timeoutSeconds = ((requestBudgetMs + 999L) / 1_000L)
+                            .coerceIn(1L, IDLIX_API_TIMEOUT_SECONDS)
+                    )
+                }
+            },
+            kind = { result -> result.node.textOrNull("kind") },
+            remainingMs = { result -> result.node.path("remainingMs").asLong(0L) }
+        )
     }
 
     private suspend fun redeemPlayback(session: ApiResult, referer: String): JsonNode? {
@@ -382,7 +383,8 @@ class IdlixProvider : MainAPI() {
         path: String,
         body: JsonNode,
         referer: String,
-        cookies: Map<String, String>
+        cookies: Map<String, String>,
+        timeoutSeconds: Long = IDLIX_API_TIMEOUT_SECONDS
     ): ApiResult? {
         val response = try {
             app.post(
@@ -392,7 +394,7 @@ class IdlixProvider : MainAPI() {
                 headers = browserHeaders(referer) +
                     cookieHeaders(cookies) +
                     mapOf("Content-Type" to IDLIX_JSON_MEDIA_TYPE),
-                timeout = IDLIX_API_TIMEOUT_SECONDS,
+                timeout = timeoutSeconds,
                 interceptor = cloudflareKiller
             )
         } catch (error: CancellationException) {
@@ -476,6 +478,13 @@ internal suspend fun newIdlixMasterLink(
     this.headers = headers
 }
 
+internal suspend fun newIdlixSubtitleFile(
+    track: IdlixParser.SubtitleTrack,
+    headers: Map<String, String>
+): SubtitleFile = newSubtitleFile(track.label, track.url) {
+    this.headers = headers
+}
+
 /**
  * Keeps IDLIX's parent master intact so Media3 can select its external audio
  * group, while carrying the short-lived master token to trusted child requests.
@@ -507,7 +516,12 @@ internal object IdlixParser {
     data class ContentPage(val type: String, val slug: String, val url: String)
     data class PlaybackRequest(val contentType: String, val contentId: String, val pageUrl: String)
     data class Stream(val url: String, val height: Int)
-    data class MasterManifest(val streams: List<Stream>, val audioUrls: List<String>)
+    data class SubtitleTrack(val label: String, val url: String)
+    data class MasterManifest(
+        val streams: List<Stream>,
+        val audioUrls: List<String>,
+        val subtitles: List<SubtitleTrack>
+    )
 
     fun playerStreams(manifest: MasterManifest): List<Stream> = manifest.streams
         .filter { stream ->
@@ -516,6 +530,80 @@ internal object IdlixParser {
         }
         .distinctBy(Stream::url)
         .take(IDLIX_MAX_STREAMS)
+
+    fun directPlayback(node: JsonNode): JsonNode? = node.takeIf { candidate ->
+        candidate.textOrNull("kind")?.lowercase() !in setOf("gate", "pending", "pentos") &&
+            candidate.textOrNull("url")?.let(::isTrustedMasterUrl) == true
+    }
+
+    fun gateWaitMs(
+        serverNow: Long,
+        unlockAt: Long,
+        graceMs: Long = 900L,
+        capMs: Long = IDLIX_MAX_GATE_WAIT_MS
+    ): Long? {
+        if (serverNow <= 0L || unlockAt <= 0L || graceMs < 0L || capMs < 0L) return null
+        val secondsThreshold = 10_000_000_000L
+        val serverUsesSeconds = serverNow < secondsThreshold
+        val unlockUsesSeconds = unlockAt < secondsThreshold
+        if (serverUsesSeconds != unlockUsesSeconds) return null
+        if (unlockAt <= serverNow) return 0L
+        // Both values are positive and unlockAt is larger, so this subtraction
+        // cannot overflow. Avoid java.lang.Math.*Exact (Android API 24+).
+        val delta = unlockAt - serverNow
+        val deltaMs = if (serverUsesSeconds) {
+            // Second-based timestamps are below secondsThreshold, keeping this
+            // multiplication well inside Long on every supported Android API.
+            delta * 1_000L
+        } else {
+            delta
+        }
+        if (deltaMs >= capMs) return capMs
+        return if (graceMs >= capMs - deltaMs) capMs else deltaMs + graceMs
+    }
+
+    suspend fun <T> pollGateClaim(
+        initialWaitMs: Long,
+        pendingBudgetMs: Long,
+        sleep: suspend (Long) -> Unit,
+        request: suspend (previous: T?, timeoutMs: Long) -> T?,
+        kind: (T) -> String?,
+        remainingMs: (T) -> Long,
+        nowMs: () -> Long = { System.nanoTime() / 1_000_000L },
+        maxRequests: Int = 8
+    ): T? {
+        if (initialWaitMs < 0L || pendingBudgetMs < 0L || maxRequests <= 0) return null
+        if (initialWaitMs > 0L) sleep(initialWaitMs)
+        var previous: T? = null
+        var budgetLeft = pendingBudgetMs
+        repeat(maxRequests) {
+            if (budgetLeft <= 0L) return null
+            val requestStartedAt = nowMs()
+            val result = request(previous, budgetLeft) ?: return null
+            val requestFinishedAt = nowMs()
+            val requestElapsed = (requestFinishedAt - requestStartedAt).coerceAtLeast(0L)
+            budgetLeft = (budgetLeft - requestElapsed.coerceAtMost(budgetLeft)).coerceAtLeast(0L)
+            when (kind(result)?.lowercase()) {
+                "pentos" -> return result
+                "pending" -> {
+                    if (budgetLeft <= 0L) return null
+                    val reported = remainingMs(result).coerceAtLeast(0L)
+                    val desired = if (reported > Long.MAX_VALUE - 400L) {
+                        Long.MAX_VALUE
+                    } else {
+                        reported + 400L
+                    }
+                    val wait = desired.coerceAtMost(budgetLeft)
+                    if (wait <= 0L) return null
+                    sleep(wait)
+                    budgetLeft -= wait
+                    previous = result
+                }
+                else -> return null
+            }
+        }
+        return null
+    }
 
     fun contentPage(raw: String, mainUrl: String): ContentPage? = runCatching {
         val current = URI(mainUrl)
@@ -590,6 +678,7 @@ internal object IdlixParser {
         node: JsonNode,
         contentTypeHint: String? = null
     ): SearchResponse? {
+        if (!node.path("isPublished").asBoolean(true)) return null
         val title = node.textOrNull("title") ?: return null
         val slug = node.textOrNull("slug")
             ?.takeIf { it.matches(Regex("^[a-z0-9][a-z0-9-]{0,159}$")) }
@@ -601,6 +690,10 @@ internal object IdlixParser {
             ?.lowercase()
             ?: contentTypeHint.orEmpty().lowercase()
         val isSeries = contentType in setOf("series", "tv_series", "tv")
+        // Series records intentionally have no video of their own; playback is
+        // attached to their episodes. `hasVideo=false` only makes a movie card
+        // unplayable at this level.
+        if (!isSeries && !node.path("hasVideo").asBoolean(true)) return null
         val url = "https://z2.idlixku.com/${if (isSeries) "series" else "movie"}/$slug"
         val poster = tmdbImage(node.textOrNull("posterPath"), "w500")
         val quality = getQualityFromString(node.textOrNull("quality"))
@@ -650,6 +743,17 @@ internal object IdlixParser {
                 !line.contains("TYPE=AUDIO", ignoreCase = true)) return@mapNotNull null
             attribute(line, "URI")?.let { tokenizedAsset(it, masterUrl) }
         }.distinct().take(8)
+        val subtitles = lines.mapNotNull { line ->
+            if (!line.startsWith("#EXT-X-MEDIA:", ignoreCase = true) ||
+                !line.contains("TYPE=SUBTITLES", ignoreCase = true)) return@mapNotNull null
+            val url = attribute(line, "URI")
+                ?.let { tokenizedAsset(it, masterUrl) }
+                ?: return@mapNotNull null
+            val label = attribute(line, "NAME")
+                ?: attribute(line, "LANGUAGE")
+                ?: "Subtitle"
+            SubtitleTrack(label, url)
+        }.distinctBy(SubtitleTrack::url).take(32)
 
         val hasVariantDeclarations = lines.any {
             it.startsWith("#EXT-X-STREAM-INF:", ignoreCase = true)
@@ -674,7 +778,8 @@ internal object IdlixParser {
             if (hasVariantDeclarations) return null
             return MasterManifest(
                 streams = listOf(Stream(masterUrl, Qualities.Unknown.value)),
-                audioUrls = audio
+                audioUrls = audio,
+                subtitles = subtitles
             ).takeIf { isTrustedMasterUrl(masterUrl) }
         }
         val eligible = if (maxHeight > 0) {
@@ -687,7 +792,8 @@ internal object IdlixParser {
         }
         return MasterManifest(
             streams = selected.sortedByDescending(Stream::height).take(IDLIX_MAX_STREAMS),
-            audioUrls = audio
+            audioUrls = audio,
+            subtitles = subtitles
         ).takeIf { it.streams.isNotEmpty() }
     }
 
@@ -698,22 +804,39 @@ internal object IdlixParser {
                 match.groupValues[1].ifBlank { match.groupValues[2] }.trim()
             }
 
-    private fun tokenizedAsset(raw: String, masterUrl: String): String? = runCatching {
+    private fun tokenizedAsset(raw: String, masterUrl: String): String? =
+        signedPlaybackAsset(masterUrl, raw)
+
+    fun signedPlaybackAsset(masterUrl: String, raw: String): String? = runCatching {
+        if (!isTrustedMasterUrl(masterUrl)) return@runCatching null
         val master = URI(masterUrl)
         val resolved = master.resolve(raw)
         if (!isTrustedPlaybackAsset(resolved.toString())) return@runCatching null
+        val masterParts = master.rawPath.orEmpty().trim('/').split('/')
+        if (
+            masterParts.size !in 3..4 ||
+            masterParts.firstOrNull() != "v" ||
+            !masterParts.last().matches(Regex("^config-[0-9]+\\.json$"))
+        ) {
+            return@runCatching null
+        }
+        val videoPathPrefix = "/${masterParts.dropLast(1).joinToString("/")}/"
+        if (!resolved.rawPath.orEmpty().startsWith(videoPathPrefix)) {
+            return@runCatching null
+        }
         val masterParams = master.rawQuery.orEmpty().split('&')
             .mapNotNull { item ->
                 val key = item.substringBefore('=', "")
                 val value = item.substringAfter('=', "")
                 if (key in setOf("t", "pm") && value.isNotBlank()) key to value else null
             }
-        val existingKeys = resolved.rawQuery.orEmpty().split('&')
-            .map { it.substringBefore('=') }
-            .toSet()
+        val authoritativeKeys = masterParams.map(Pair<String, String>::first).toSet()
+        val resolvedParams = resolved.rawQuery.orEmpty().split('&')
+            .filter(String::isNotBlank)
+            .filterNot { parameter -> parameter.substringBefore('=', "") in authoritativeKeys }
+        val existingKeys = resolvedParams.map { it.substringBefore('=') }.toSet()
         val additions = masterParams.filterNot { it.first in existingKeys }
-        val query = (listOfNotNull(resolved.rawQuery?.takeIf(String::isNotBlank)) +
-            additions.map { (key, value) -> "$key=$value" })
+        val query = (resolvedParams + additions.map { (key, value) -> "$key=$value" })
             .joinToString("&")
             .takeIf(String::isNotBlank)
         URI(
@@ -725,6 +848,25 @@ internal object IdlixParser {
         ).toASCIIString()
     }.getOrNull()
 
+    fun redeemedSubtitles(redeemed: JsonNode, masterUrl: String): List<SubtitleTrack> =
+        redeemed.path("subtitles")
+            .takeIf(JsonNode::isArray)
+            ?.take(32)
+            ?.mapNotNull { subtitle ->
+                val raw = subtitle.textOrNull("path")
+                    ?: subtitle.textOrNull("url")
+                    ?: subtitle.textOrNull("src")
+                    ?: subtitle.textOrNull("file")
+                    ?: return@mapNotNull null
+                val url = signedPlaybackAsset(masterUrl, raw) ?: return@mapNotNull null
+                val label = subtitle.textOrNull("label")
+                    ?: subtitle.textOrNull("lang")
+                    ?: "Subtitle"
+                SubtitleTrack(label, url)
+            }
+            ?.distinctBy(SubtitleTrack::url)
+            .orEmpty()
+
     fun isTrustedRedeemUrl(raw: String): Boolean = trustedUri(raw) { uri ->
         val host = uri.host.orEmpty().lowercase()
         (host == "majorplay.net" || host.endsWith(".majorplay.net")) &&
@@ -733,51 +875,21 @@ internal object IdlixParser {
 
     fun isTrustedMasterUrl(raw: String): Boolean = trustedUri(raw) { uri ->
         isTrustedPlaybackHost(uri.host.orEmpty()) &&
-            uri.path.orEmpty().matches(Regex("^/v/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/config-[0-9]+\\.json$")) &&
-            uri.rawQuery.orEmpty().split('&').any { it.startsWith("t=") }
+            uri.rawPath.orEmpty().matches(
+                Regex("^/v/(?:[A-Za-z0-9_-]+/){1,2}config-[0-9]+\\.json$")
+            ) &&
+            uri.rawQuery.orEmpty().split('&').any { parameter ->
+                parameter.substringBefore('=', "") == "t" &&
+                    parameter.substringAfter('=', "").isNotBlank()
+            }
     }
 
     fun isTrustedPlaybackAsset(raw: String): Boolean = trustedUri(raw) { uri ->
-        isTrustedPlaybackHost(uri.host.orEmpty()) && uri.path.orEmpty().startsWith("/v/")
+        isTrustedPlaybackHost(uri.host.orEmpty()) && uri.rawPath.orEmpty().startsWith("/v/")
     }
 
-    fun playbackRequestUrl(masterUrl: String, requestUrl: String): String = runCatching {
-        if (!isTrustedMasterUrl(masterUrl) || !isTrustedPlaybackAsset(requestUrl)) {
-            return@runCatching requestUrl
-        }
-        val master = URI(masterUrl)
-        val request = URI(requestUrl)
-        val masterParts = master.rawPath.orEmpty().trim('/').split('/')
-        if (masterParts.size < 4 || masterParts.firstOrNull() != "v") {
-            return@runCatching requestUrl
-        }
-        val videoPathPrefix = "/${masterParts.take(3).joinToString("/")}/"
-        if (!request.rawPath.orEmpty().startsWith(videoPathPrefix)) {
-            return@runCatching requestUrl
-        }
-
-        val masterParameters = master.rawQuery.orEmpty().split('&').mapNotNull { parameter ->
-            val key = parameter.substringBefore('=', "")
-            val value = parameter.substringAfter('=', "")
-            if (key in setOf("t", "pm") && value.isNotBlank()) key to value else null
-        }
-        val existingKeys = request.rawQuery.orEmpty().split('&')
-            .map { it.substringBefore('=') }
-            .toSet()
-        val additions = masterParameters.filterNot { it.first in existingKeys }
-        if (additions.isEmpty()) return@runCatching requestUrl
-        val query = (
-            listOfNotNull(request.rawQuery?.takeIf(String::isNotBlank)) +
-                additions.map { (key, value) -> "$key=$value" }
-            ).joinToString("&")
-        URI(
-            request.scheme,
-            request.rawAuthority,
-            request.rawPath,
-            query,
-            request.rawFragment
-        ).toASCIIString()
-    }.getOrDefault(requestUrl)
+    fun playbackRequestUrl(masterUrl: String, requestUrl: String): String =
+        signedPlaybackAsset(masterUrl, requestUrl) ?: requestUrl
 
     private fun trustedUri(raw: String, predicate: (URI) -> Boolean): Boolean = runCatching {
         if (raw.length !in 8..8192 || !isSafeRemoteHttpUrl(raw)) return@runCatching false
@@ -791,6 +903,8 @@ internal object IdlixParser {
     private fun isTrustedPlaybackHost(raw: String): Boolean {
         val host = raw.lowercase().trimEnd('.')
         return host == "majorplay.net" || host.endsWith(".majorplay.net") ||
+            host == "asia9sports.com" || host.endsWith(".asia9sports.com") ||
+            host.endsWith(".akamaized.net") ||
             (host.substringBefore('.').matches(Regex("^g\\d+$")) &&
                 PLAYBACK_CDN_SUFFIXES.any { host == it || host.endsWith(".$it") })
     }

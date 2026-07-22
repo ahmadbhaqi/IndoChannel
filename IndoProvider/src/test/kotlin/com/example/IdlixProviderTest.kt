@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
@@ -29,6 +30,41 @@ class IdlixProviderTest {
         assertEquals(
             "https://z2.idlixku.com/series/the-east-palace-2026",
             result?.url
+        )
+    }
+
+    @Test
+    fun `explicitly unavailable search records are not exposed as playable cards`() {
+        val node = mapper.readTree(
+            """
+            {
+              "title": "Unavailable Movie",
+              "slug": "unavailable-movie-2026",
+              "contentType": "movie",
+              "hasVideo": false
+            }
+            """.trimIndent()
+        )
+
+        assertNull(IdlixParser.searchResult(IdlixProvider(), node))
+    }
+
+    @Test
+    fun `series cards remain visible when video lives on their episodes`() {
+        val node = mapper.readTree(
+            """
+            {
+              "title": "The Vampire Lestat",
+              "slug": "the-vampire-lestat-2026",
+              "isPublished": true,
+              "hasVideo": false
+            }
+            """.trimIndent()
+        )
+
+        assertEquals(
+            "https://z2.idlixku.com/series/the-vampire-lestat-2026",
+            IdlixParser.searchResult(IdlixProvider(), node, "series")?.url
         )
     }
 
@@ -81,6 +117,314 @@ class IdlixProviderTest {
                     "?t=signed-token&pm=browser"
             ),
             manifest?.audioUrls
+        )
+    }
+
+    @Test
+    fun `master parser preserves signed subtitle renditions`() {
+        val masterUrl = "https://e2e.majorplay.net/v/z2/video-id/config-615304.json" +
+            "?t=signed-token&pm=browser"
+        val manifest = IdlixParser.masterManifest(
+            """
+            #EXTM3U
+            #EXT-X-MEDIA:TYPE=SUBTITLES,URI="/v/z2/video-id/sub/id.vtt",GROUP-ID="subs",LANGUAGE="id",NAME="Bahasa Indonesia",DEFAULT=YES
+            #EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,SUBTITLES="subs"
+            /v/z2/video-id/p/key/video-720.json
+            """.trimIndent(),
+            masterUrl,
+            maxHeight = 720
+        )
+
+        assertEquals(
+            listOf(
+                IdlixParser.SubtitleTrack(
+                    "Bahasa Indonesia",
+                    "https://e2e.majorplay.net/v/z2/video-id/sub/id.vtt" +
+                        "?t=signed-token&pm=browser"
+                )
+            ),
+            manifest?.subtitles
+        )
+    }
+
+    @Test
+    fun `relative playback siblings inherit the signed master token`() {
+        val masterUrl = "https://e2e.majorplay.net/v/z2/video-id/config-615304.json" +
+            "?t=signed-token&pm=browser"
+
+        assertEquals(
+            "https://e2e.majorplay.net/v/z2/video-id/sub/id.vtt" +
+                "?t=signed-token&pm=browser",
+            IdlixParser.playbackRequestUrl(
+                masterUrl,
+                "/v/z2/video-id/sub/id.vtt"
+            )
+        )
+        assertEquals(
+            "https://e2e.majorplay.net/v/z2/video-id/sub/id.vtt" +
+                "?t=signed-token&pm=browser",
+            IdlixParser.playbackRequestUrl(
+                masterUrl,
+                "https://e2e.majorplay.net/v/z2/video-id/sub/id.vtt?t=&pm="
+            )
+        )
+        assertEquals(
+            "https://e2e.majorplay.net/v/z2/video-id/sub/id.vtt" +
+                "?download=1&t=signed-token&pm=browser",
+            IdlixParser.playbackRequestUrl(
+                masterUrl,
+                "https://e2e.majorplay.net/v/z2/video-id/sub/id.vtt" +
+                    "?t=expired&download=1&pm=download"
+            )
+        )
+        assertEquals(
+            "https://e2e.majorplay.net/v/z2/other-id/sub/id.vtt",
+            IdlixParser.playbackRequestUrl(
+                masterUrl,
+                "https://e2e.majorplay.net/v/z2/other-id/sub/id.vtt"
+            )
+        )
+    }
+
+    @Test
+    fun `direct play info is accepted only for a trusted top level master`() {
+        val trusted = mapper.readTree(
+            """
+            {
+              "url": "https://e2e.majorplay.net/v/z2/video-id/config-615304.json?t=signed-token&pm=browser",
+              "subtitles": []
+            }
+            """.trimIndent()
+        )
+        val hostile = mapper.readTree(
+            """
+            {
+              "url": "https://evil.example/v/z2/video-id/config-615304.json?t=signed-token",
+              "subtitles": []
+            }
+            """.trimIndent()
+        )
+        val unsigned = mapper.readTree(
+            """
+            {
+              "url": "https://e2e.majorplay.net/v/z2/video-id/config-615304.json?t=",
+              "subtitles": []
+            }
+            """.trimIndent()
+        )
+        val gateWithUrl = mapper.readTree(
+            """
+            {
+              "kind": "gate",
+              "url": "https://e2e.majorplay.net/v/z2/video-id/config-615304.json?t=signed-token",
+              "subtitles": []
+            }
+            """.trimIndent()
+        )
+
+        assertNotNull(IdlixParser.directPlayback(trusted))
+        assertNull(IdlixParser.directPlayback(hostile))
+        assertNull(IdlixParser.directPlayback(unsigned))
+        assertNull(IdlixParser.directPlayback(gateWithUrl))
+        assertFalse(
+            IdlixParser.isTrustedMasterUrl(
+                "https://e2e.majorplay.net/v/z2%2Fvideo-id/config-615304.json?t=signed-token"
+            )
+        )
+    }
+
+    @Test
+    fun `gate wait normalizes seconds and milliseconds without mixing units`() {
+        assertEquals(15_900L, IdlixParser.gateWaitMs(1_789_000_000L, 1_789_000_015L))
+        assertEquals(
+            15_900L,
+            IdlixParser.gateWaitMs(1_789_000_000_000L, 1_789_000_015_000L)
+        )
+        assertNull(IdlixParser.gateWaitMs(1_789_000_000L, 1_789_000_015_000L))
+        assertEquals(0L, IdlixParser.gateWaitMs(1_789_000_015_000L, 1_789_000_000_000L))
+    }
+
+    @Test
+    fun `gate polling honors the full pending delay and previous response`() = runBlocking {
+        data class ClaimFixture(val kind: String, val remainingMs: Long)
+
+        val responses = listOf(
+            ClaimFixture("pending", 12_000L),
+            ClaimFixture("pentos", 0L)
+        )
+        val sleeps = mutableListOf<Long>()
+        val previousKinds = mutableListOf<String?>()
+        val requestBudgets = mutableListOf<Long>()
+        var nowMs = 0L
+        var index = 0
+
+        val result = IdlixParser.pollGateClaim(
+            initialWaitMs = 15_900L,
+            pendingBudgetMs = 20_000L,
+            sleep = { wait ->
+                sleeps += wait
+                nowMs += wait
+            },
+            request = { previous, requestBudgetMs ->
+                previousKinds += previous?.kind
+                requestBudgets += requestBudgetMs
+                responses.getOrNull(index++)
+            },
+            kind = ClaimFixture::kind,
+            remainingMs = ClaimFixture::remainingMs,
+            nowMs = { nowMs }
+        )
+
+        assertEquals("pentos", result?.kind)
+        assertEquals(listOf(15_900L, 12_400L), sleeps)
+        assertEquals(listOf(null, "pending"), previousKinds)
+        assertEquals(listOf(20_000L, 7_600L), requestBudgets)
+    }
+
+    @Test
+    fun `gate polling counts request duration against its deadline`() = runBlocking {
+        data class ClaimFixture(val kind: String, val remainingMs: Long)
+
+        var nowMs = 0L
+        var requests = 0
+        val result = IdlixParser.pollGateClaim(
+            initialWaitMs = 0L,
+            pendingBudgetMs = 20_000L,
+            sleep = { nowMs += it },
+            request = { _, requestBudgetMs ->
+                requests++
+                assertEquals(20_000L, requestBudgetMs)
+                nowMs += 21_000L
+                ClaimFixture("pending", 0L)
+            },
+            kind = ClaimFixture::kind,
+            remainingMs = ClaimFixture::remainingMs,
+            nowMs = { nowMs }
+        )
+
+        assertNull(result)
+        assertEquals(1, requests)
+    }
+
+    @Test
+    fun `redeemed subtitles resolve signed siblings and carry playback headers`() = runBlocking {
+        val masterUrl = "https://e2e.majorplay.net/v/z2/video-id/config-615304.json" +
+            "?t=signed-token&pm=browser"
+        val redeemed = mapper.readTree(
+            """
+            {
+              "subtitles": [
+                {"label":"Bahasa Indonesia","lang":"id","path":"/v/z2/video-id/sub/id.vtt"},
+                {"lang":"en","url":"https://e2e.majorplay.net/v/z2/video-id/sub/en.vtt"},
+                {"label":"Wrong video","path":"/v/z2/other-id/sub/id.vtt"},
+                {"label":"Foreign","path":"https://evil.example/sub/id.vtt"}
+              ]
+            }
+            """.trimIndent()
+        )
+        val tracks = IdlixParser.redeemedSubtitles(redeemed, masterUrl)
+
+        assertEquals(
+            listOf(
+                IdlixParser.SubtitleTrack(
+                    "Bahasa Indonesia",
+                    "https://e2e.majorplay.net/v/z2/video-id/sub/id.vtt" +
+                        "?t=signed-token&pm=browser"
+                ),
+                IdlixParser.SubtitleTrack(
+                    "en",
+                    "https://e2e.majorplay.net/v/z2/video-id/sub/en.vtt" +
+                        "?t=signed-token&pm=browser"
+                )
+            ),
+            tracks
+        )
+
+        val headers = mapOf(
+            "User-Agent" to "fixture-agent",
+            "Referer" to "https://z2.idlixku.com/movie/example",
+            "Origin" to "https://z2.idlixku.com"
+        )
+        val subtitle = newIdlixSubtitleFile(tracks.first(), headers)
+        assertEquals(headers, subtitle.headers)
+    }
+
+    @Test
+    fun `playback trust follows the current IDLIX media CSP`() {
+        assertTrue(
+            IdlixParser.isTrustedPlaybackAsset(
+                "https://edge.asia9sports.com/v/z2/video-id/video-720.m3u8"
+            )
+        )
+        assertTrue(
+            IdlixParser.isTrustedPlaybackAsset(
+                "https://edge.akamaized.net/v/z2/video-id/segment.ts"
+            )
+        )
+    }
+
+    @Test
+    fun `current compact master layout keeps signed subtitle siblings`() {
+        val masterUrl = "https://e2e.majorplay.net/v/video-id/config-964732.json" +
+            "?t=signed-token&pm=browser"
+        val redeemed = mapper.readTree(
+            """
+            {
+              "url": "$masterUrl",
+              "subtitles": [
+                {
+                  "lang": "id",
+                  "label": "Indonesian",
+                  "path": "https://e2e.majorplay.net/v/video-id/subs-legacy/subtitle.vtt"
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        assertTrue(IdlixParser.isTrustedMasterUrl(masterUrl))
+        assertNotNull(IdlixParser.directPlayback(redeemed))
+        assertEquals(
+            listOf(
+                IdlixParser.SubtitleTrack(
+                    "Indonesian",
+                    "https://e2e.majorplay.net/v/video-id/subs-legacy/subtitle.vtt" +
+                        "?t=signed-token&pm=browser"
+                )
+            ),
+            IdlixParser.redeemedSubtitles(redeemed, masterUrl)
+        )
+        val manifest = IdlixParser.masterManifest(
+            """
+            #EXTM3U
+            #EXT-X-MEDIA:TYPE=AUDIO,URI="/v/video-id/audio/audio.json",GROUP-ID="audio"
+            #EXT-X-MEDIA:TYPE=SUBTITLES,URI="/v/video-id/subs-legacy/subtitle.vtt",GROUP-ID="subs",NAME="Indonesian"
+            #EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,AUDIO="audio",SUBTITLES="subs"
+            /v/video-id/video/video-720.json
+            """.trimIndent(),
+            masterUrl,
+            maxHeight = 720
+        )
+        assertEquals(
+            "https://e2e.majorplay.net/v/video-id/video/video-720.json" +
+                "?t=signed-token&pm=browser",
+            manifest?.streams?.single()?.url
+        )
+        assertEquals(
+            "https://e2e.majorplay.net/v/video-id/audio/audio.json" +
+                "?t=signed-token&pm=browser",
+            manifest?.audioUrls?.single()
+        )
+        assertEquals(
+            "https://e2e.majorplay.net/v/video-id/subs-legacy/subtitle.vtt" +
+                "?t=signed-token&pm=browser",
+            manifest?.subtitles?.single()?.url
+        )
+        val otherVideoSubtitle =
+            "https://e2e.majorplay.net/v/other-video/subs-legacy/subtitle.vtt"
+        assertEquals(
+            otherVideoSubtitle,
+            IdlixParser.playbackRequestUrl(masterUrl, otherVideoSubtitle)
         )
     }
 

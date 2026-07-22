@@ -61,39 +61,28 @@ class IdlixProviderLiveTest {
     }
 
     @Test
-    fun `idlix current search detail and signed av playback remain available`() = runBlocking {
+    fun `idlix current search detail signed media and subtitle playback remain available`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
             org.junit.Assume.assumeTrue(false)
             return@runBlocking
         }
 
         val provider = IdlixProvider()
-        val moviePage = provider.mainPage.first { it.data == "movie" }
-        val catalog = withTimeout(45_000) {
-            provider.getMainPage(
-                1,
-                MainPageRequest(moviePage.name, moviePage.data, moviePage.horizontalImages)
-            )
-        }.items
-            .flatMap { it.list }
-            .filter { it.url.startsWith("${provider.mainUrl}/movie/") }
-            .distinctBy { it.url }
-
-        assertTrue(catalog.isNotEmpty(), "IDLIX returned an empty current movie catalog")
-
-        val searchSeed = catalog.first()
+        val searchSeed = "Inception"
         val searchResults = withTimeout(45_000) {
-            provider.search(searchSeed.name)
+            provider.search(searchSeed)
         }.filter { it.url.startsWith("${provider.mainUrl}/movie/") }
+            .distinctBy { it.url }
 
         assertTrue(
             searchResults.isNotEmpty(),
-            "IDLIX search returned no movie results for a title from its current catalog"
+            "IDLIX search returned no movie results for the non-dashboard query $searchSeed"
         )
 
         val attempts = mutableListOf<String>()
         var resolvedPlaybackLink: ExtractorLink? = null
-        for (candidate in (searchResults + catalog).distinctBy { it.url }.take(4)) {
+        var resolvedSubtitles = emptyList<SubtitleFile>()
+        for (candidate in searchResults.take(4)) {
             val detail = try {
                 withTimeoutOrNull(45_000) { provider.load(candidate.url) }
             } catch (error: CancellationException) {
@@ -127,13 +116,35 @@ class IdlixProviderLiveTest {
             resolvedPlaybackLink = links.firstOrNull(::isSignedPlaybackLink)
             attempts += "${candidate.name}: loaded=$loaded links=${links.size} " +
                 "audioTracks=${links.maxOfOrNull { it.audioTracks.size } ?: 0} " +
+                "subtitles=${subtitles.size} " +
                 "failure=${failure?.message}"
-            if (loaded && resolvedPlaybackLink != null) break
+            if (loaded && resolvedPlaybackLink != null && subtitles.isNotEmpty()) {
+                resolvedSubtitles = subtitles.toList()
+                break
+            }
         }
 
         assertTrue(
             resolvedPlaybackLink != null,
             "IDLIX did not resolve a signed, validated master playlist: $attempts"
+        )
+        assertTrue(
+            resolvedSubtitles.isNotEmpty(),
+            "IDLIX emitted no subtitles for the search-only movie flow: $attempts"
+        )
+        assertTrue(
+            resolvedSubtitles.all { subtitle ->
+                val headers = subtitle.headers.orEmpty()
+                headers["User-Agent"].isNullOrBlank().not() &&
+                    headers["Referer"]?.startsWith("${provider.mainUrl}/movie/") == true &&
+                    headers["Origin"] == provider.mainUrl
+            },
+            "IDLIX subtitles did not carry the signed playback request context"
+        )
+        val subtitleCodes = resolvedSubtitles.map { subtitle -> probeSubtitle(subtitle) }
+        assertTrue(
+            subtitleCodes.any { it in 200..299 },
+            "IDLIX emitted subtitles, but none of their signed URLs were reachable: $subtitleCodes"
         )
         val playback = resolvedPlaybackLink
         val videoProbe = playback?.let {
@@ -146,7 +157,6 @@ class IdlixProviderLiveTest {
         }.orEmpty()
         assertTrue(
             videoProbe?.isReachable() == true &&
-                audioProbes.isNotEmpty() &&
                 audioProbes.all(PlaylistProbe::isReachable),
             "IDLIX emitted playlists whose init/first segments were not authorized: " +
                 "video=$videoProbe audio=$audioProbes"
@@ -226,7 +236,6 @@ class IdlixProviderLiveTest {
     private fun isSignedPlaybackLink(link: ExtractorLink): Boolean =
         IdlixParser.isTrustedPlaybackAsset(link.url) &&
             hasCurrentSignature(link.url) &&
-            link.audioTracks.isNotEmpty() &&
             link.audioTracks.all { audio ->
                 IdlixParser.isTrustedPlaybackAsset(audio.url) &&
                     hasCurrentSignature(audio.url)
@@ -242,36 +251,98 @@ class IdlixProviderLiveTest {
     private data class PlaylistProbe(
         val playlistCode: Int?,
         val isHls: Boolean,
-        val childCodes: Map<String, Int?>
+        val mediaCodes: List<Int?>,
+        val audioCodes: List<Int?>,
+        val audioDeclared: Boolean
     ) {
         fun isReachable(): Boolean =
             playlistCode in 200..299 &&
                 isHls &&
-                childCodes.isNotEmpty() &&
-                childCodes.values.all { it in 200..299 }
+                mediaCodes.isNotEmpty() &&
+                mediaCodes.all { it in 200..299 } &&
+                (!audioDeclared ||
+                    (audioCodes.isNotEmpty() && audioCodes.all { it in 200..299 }))
     }
+
+    private enum class ProbeBranch { MEDIA, AUDIO }
+    private data class PlaylistLevelProbe(
+        val code: Int?,
+        val isHls: Boolean,
+        val audioDeclared: Boolean
+    )
 
     private suspend fun probeFirstMediaObject(
         playlistUrl: String,
         referer: String,
         headers: Map<String, String>
     ): PlaylistProbe {
-        val playlist = runCatching {
+        val mediaCodes = mutableListOf<Int?>()
+        val audioCodes = mutableListOf<Int?>()
+        val root = probePlaylistBranch(
+            masterUrl = playlistUrl,
+            currentUrl = playlistUrl,
+            referer = referer,
+            headers = headers,
+            depth = 0,
+            branch = null,
+            mediaCodes = mediaCodes,
+            audioCodes = audioCodes
+        )
+        return PlaylistProbe(
+            root.code,
+            root.isHls,
+            mediaCodes,
+            audioCodes,
+            root.audioDeclared
+        )
+    }
+
+    private suspend fun probePlaylistBranch(
+        masterUrl: String,
+        currentUrl: String,
+        referer: String,
+        headers: Map<String, String>,
+        depth: Int,
+        branch: ProbeBranch?,
+        mediaCodes: MutableList<Int?>,
+        audioCodes: MutableList<Int?>
+    ): PlaylistLevelProbe {
+        val playlist = try {
             withTimeout(30_000) {
                 app.get(
-                    playlistUrl,
+                    currentUrl,
                     referer = referer,
                     headers = headers,
                     timeout = 30L
                 )
             }
-        }.getOrNull() ?: return PlaylistProbe(null, false, emptyMap())
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            null
+        } ?: return PlaylistLevelProbe(null, false, false)
+        when (branch) {
+            ProbeBranch.MEDIA -> mediaCodes += playlist.code
+            ProbeBranch.AUDIO -> audioCodes += playlist.code
+            null -> Unit
+        }
         val body = playlist.text
         val isHls = body.lineSequence()
             .map(String::trim)
             .firstOrNull(String::isNotBlank)
             .equals("#EXTM3U", ignoreCase = true)
-        if (!isHls) return PlaylistProbe(playlist.code, false, emptyMap())
+        if (!isHls) return PlaylistLevelProbe(playlist.code, false, false)
+        val audioReferences = Regex(
+            "(?i)#EXT-X-MEDIA:[^\\n]*TYPE=AUDIO[^\\n]*URI=\"([^\"]+)\""
+        ).findAll(body)
+            .mapNotNull { it.groupValues.getOrNull(1) }
+            .take(1)
+            .toList()
+        val integratedAudio = body.lineSequence().any { line ->
+            line.startsWith("#EXT-X-STREAM-INF:", ignoreCase = true) &&
+                Regex("(?i)CODECS=\"[^\"]*(?:mp4a|ac-3|ec-3|opus|vorbis)")
+                    .containsMatchIn(line)
+        }
         val initReference = Regex("(?i)#EXT-X-MAP:[^\\n]*URI=\"([^\"]+)\"")
             .find(body)
             ?.groupValues
@@ -279,22 +350,108 @@ class IdlixProviderLiveTest {
         val segmentReference = body.lineSequence()
             .map(String::trim)
             .firstOrNull { it.isNotBlank() && !it.startsWith('#') }
-        val childCodes = listOfNotNull(initReference, segmentReference)
-            .distinct()
-            .associate { reference ->
-                val childUrl = URI(playlist.url).resolve(reference).toASCIIString()
-                val childCode = runCatching {
-                    withTimeout(30_000) {
-                        app.get(
-                            childUrl,
-                            referer = referer,
-                            headers = headers + ("Range" to "bytes=0-31"),
-                            timeout = 30L
-                        ).code
-                    }
-                }.getOrNull()
-                childUrl to childCode
+        audioReferences.forEach { reference ->
+            probeChildReference(
+                masterUrl,
+                playlist.url,
+                reference,
+                referer,
+                headers,
+                depth,
+                ProbeBranch.AUDIO,
+                mediaCodes,
+                audioCodes
+            )
+        }
+        listOfNotNull(initReference, segmentReference).distinct().forEach { reference ->
+            probeChildReference(
+                masterUrl,
+                playlist.url,
+                reference,
+                referer,
+                headers,
+                depth,
+                branch ?: ProbeBranch.MEDIA,
+                mediaCodes,
+                audioCodes
+            )
+        }
+        return PlaylistLevelProbe(
+            playlist.code,
+            true,
+            audioReferences.isNotEmpty() || integratedAudio
+        )
+    }
+
+    private suspend fun probeChildReference(
+        masterUrl: String,
+        parentUrl: String,
+        reference: String,
+        referer: String,
+        headers: Map<String, String>,
+        depth: Int,
+        branch: ProbeBranch,
+        mediaCodes: MutableList<Int?>,
+        audioCodes: MutableList<Int?>
+    ) {
+        val resolved = URI(parentUrl).resolve(reference).toASCIIString()
+        val childUrl = IdlixParser.playbackRequestUrl(masterUrl, resolved)
+        val looksLikePlaylist = URI(childUrl).rawPath.orEmpty()
+            .matches(Regex("(?i).*\\.(?:json|m3u8)$"))
+        if (looksLikePlaylist && depth < 2) {
+            val child = probePlaylistBranch(
+                masterUrl,
+                childUrl,
+                referer,
+                headers,
+                depth + 1,
+                branch,
+                mediaCodes,
+                audioCodes
+            )
+            if (child.code == null || !child.isHls) {
+                when (branch) {
+                    ProbeBranch.MEDIA -> mediaCodes += null
+                    ProbeBranch.AUDIO -> audioCodes += null
+                }
             }
-        return PlaylistProbe(playlist.code, true, childCodes)
+            return
+        }
+        val code = try {
+            withTimeout(30_000) {
+                app.get(
+                    childUrl,
+                    referer = referer,
+                    headers = headers + ("Range" to "bytes=0-31"),
+                    timeout = 30L
+                ).code
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            null
+        }
+        when (branch) {
+            ProbeBranch.MEDIA -> mediaCodes += code
+            ProbeBranch.AUDIO -> audioCodes += code
+        }
+    }
+
+    private suspend fun probeSubtitle(subtitle: SubtitleFile): Int? {
+        val headers = subtitle.headers.orEmpty()
+        return try {
+            withTimeout(30_000) {
+                app.get(
+                    subtitle.url,
+                    referer = headers["Referer"].orEmpty(),
+                    headers = headers,
+                    timeout = 30L
+                ).code
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            null
+        }
     }
 }
