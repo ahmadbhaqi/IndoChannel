@@ -5,7 +5,7 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.runBlocking
+import kotlin.coroutines.cancellation.CancellationException
 import org.jsoup.nodes.Element
 
 class SamehadakuProvider : MainAPI() {
@@ -85,54 +85,84 @@ class SamehadakuProvider : MainAPI() {
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val document = app.get(data).document
-        var loaded = false
-
-        // 1) Streaming servers (embed players). These are resolved through a
-        // WordPress admin-ajax.php call and usually serve device-friendly
-        // streams, so the user can actually switch between streaming servers.
-        document.select("div#server ul li div, div.east_player_option").forEach { el ->
-            val post = el.attr("data-post")
-            val nume = el.attr("data-nume")
-            val type = el.attr("data-type")
-            if (post.isBlank() || nume.isBlank()) return@forEach
-            try {
-                val embed = app.post(
-                    "$mainUrl/wp-admin/admin-ajax.php",
-                    data = mapOf("action" to "player_ajax", "post" to post, "nume" to nume, "type" to type),
-                    referer = data,
-                    headers = mapOf("X-Requested-With" to "XMLHttpRequest")
-                ).document.selectFirst("iframe")?.attr("src")?.let { fixIframeUrl(it) }
-                if (!embed.isNullOrBlank()) {
-                    loaded = loadResolvedExtractorWithResult(
-                        embed,
-                        "$mainUrl/",
-                        subtitleCallback,
-                        callback
-                    ) || loaded
-                }
-            } catch (_: Exception) {}
-        }
-
-        // 2) Download mirrors (kept for download support and as a fallback).
-        document.select("div#downloadb li").forEach { el ->
-            el.select("a").forEach {
-                loadExtractor(fixUrl(it.attr("href")), "$mainUrl/", subtitleCallback) { link ->
-                    loaded = true
-                    runBlocking {
-                        callback.invoke(
-                            newExtractorLink(link.source, link.name, link.url, link.type) {
-                                this.referer = link.referer
-                                this.quality = el.select("strong").text().fixQuality()
-                                this.headers = link.headers
-                                this.extractorData = link.extractorData
-                            }.withSimpleServerName(name)
-                        )
+        val document = app.get(data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS).document
+        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        val bloggerResolver = BloggerVideoResolver(name, resolver::emitResolved)
+        val streamingCandidates = document
+            .select("div#server ul li div, div.east_player_option")
+            .mapNotNull { element ->
+                val post = element.attr("data-post").trim()
+                val nume = element.attr("data-nume").trim()
+                if (post.isBlank() || nume.isBlank()) return@mapNotNull null
+                SamehadakuStreamRequest(
+                    post = post,
+                    number = nume,
+                    type = element.attr("data-type").trim()
+                )
+            }
+        val downloadCandidates = document
+            .select("div#downloadb li")
+            .flatMap { container ->
+                val quality = container.select("strong").text().fixQuality()
+                container.select("a[href]").mapNotNull { element ->
+                    element.attr("href").trim().takeIf { it.isNotBlank() }?.let { raw ->
+                        SamehadakuDownloadRequest(fixUrl(raw), quality)
                     }
                 }
             }
-        }
-        return loaded
+
+        return SamehadakuPlaybackScheduler.resolve(
+            streamingCandidates = streamingCandidates,
+            downloadCandidates = downloadCandidates,
+            canContinue = { resolver.canContinue },
+            streamResolver = streamResolver@{ request ->
+                val embed = resolver.withinBudget {
+                    app.post(
+                        "$mainUrl/wp-admin/admin-ajax.php",
+                        data = mapOf(
+                            "action" to "player_ajax",
+                            "post" to request.post,
+                            "nume" to request.number,
+                            "type" to request.type
+                        ),
+                        referer = data,
+                        headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                        timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+                    ).document.selectFirst("iframe")
+                        ?.attr("src")
+                        ?.let(::fixIframeUrl)
+                } ?: return@streamResolver false
+
+                val bloggerLoaded = if (InlineDataParser.bloggerToken(embed) != null) {
+                    resolver.withinBudget { bloggerResolver.resolve(embed, data) } == true
+                } else {
+                    false
+                }
+                bloggerLoaded || resolver.resolve(embed, data)
+            },
+            downloadResolver = { candidate ->
+                val before = resolver.linkCount
+                val extractedLinks = mutableListOf<ExtractorLink>()
+                resolver.withinBudget {
+                    loadExtractorWithResult(
+                        candidate.url,
+                        "$mainUrl/",
+                        subtitleCallback
+                    ) { link -> extractedLinks += link }
+                }
+                extractedLinks.forEach { link ->
+                    resolver.emitResolved(
+                        newExtractorLink(link.source, link.name, link.url, link.type) {
+                            referer = link.referer
+                            quality = candidate.quality
+                            headers = link.headers
+                            extractorData = link.extractorData
+                        }.withSimpleServerName(name)
+                    )
+                }
+                resolver.linkCount > before
+            }
+        )
     }
 
     private fun fixIframeUrl(url: String): String = when {
@@ -141,8 +171,55 @@ class SamehadakuProvider : MainAPI() {
         else -> fixUrl(url)
     }
 
-    private fun String.fixQuality(): Int = when (this.uppercase()) {
-        "4K" -> Qualities.P2160.value; "FULLHD" -> Qualities.P1080.value; "MP4HD" -> Qualities.P720.value
-        else -> this.filter { it.isDigit() }.toIntOrNull() ?: Qualities.Unknown.value
+    private fun String.fixQuality(): Int = when (uppercase()) {
+        "4K" -> Qualities.P2160.value
+        "FULLHD" -> Qualities.P1080.value
+        "MP4HD" -> Qualities.P720.value
+        else -> filter { it.isDigit() }.toIntOrNull() ?: Qualities.Unknown.value
+    }
+}
+
+internal data class SamehadakuStreamRequest(
+    val post: String,
+    val number: String,
+    val type: String
+)
+
+internal data class SamehadakuDownloadRequest(
+    val url: String,
+    val quality: Int
+)
+
+internal object SamehadakuPlaybackScheduler {
+    suspend fun <S, D> resolve(
+        streamingCandidates: Iterable<S>,
+        downloadCandidates: Iterable<D>,
+        streamResolver: suspend (S) -> Boolean,
+        downloadResolver: suspend (D) -> Boolean,
+        canContinue: () -> Boolean = { true }
+    ): Boolean {
+        var streamingLoaded = false
+        for (candidate in streamingCandidates.distinct()) {
+            if (!canContinue()) break
+            streamingLoaded = attempt(candidate, streamResolver) || streamingLoaded
+        }
+        if (streamingLoaded) return true
+
+        for (candidate in downloadCandidates.distinct()) {
+            if (!canContinue()) break
+            if (attempt(candidate, downloadResolver)) return true
+        }
+        return false
+    }
+
+    private suspend fun <T> attempt(
+        candidate: T,
+        resolver: suspend (T) -> Boolean
+    ): Boolean = try {
+        resolver(candidate)
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        false
     }
 }

@@ -12,9 +12,12 @@ private const val KITANONTON_PAGE_TIMEOUT_SECONDS = 20L
 private const val KITANONTON_PAGE_ATTEMPTS = 2
 private const val KITANONTON_PLAYBACK_PAGE_TIMEOUT_SECONDS = 10L
 private const val KITANONTON_TARGET_LINKS = 2
+private const val KITANONTON_MAIN_URL = "https://kitanonton2.casa"
+private val KITANONTON_LEGACY_HOSTS = setOf("kitanonton2.surf")
 
 class KitanontonProvider : MainAPI() {
-    override var mainUrl = "https://kitanonton2.surf"
+    override var mainUrl = KITANONTON_MAIN_URL
+    private val legacyHosts = KITANONTON_LEGACY_HOSTS
     override var name = "KitaNonton"
     override val hasMainPage = true
     override var lang = "id"
@@ -49,7 +52,7 @@ class KitanontonProvider : MainAPI() {
 
     private fun Element.toMovieResult(): SearchResponse? {
         val link = selectFirst("a.ml-mask[href]") ?: return null
-        val href = ProviderHtmlParser.normalizeProviderPageUrl(link.attr("href"), mainUrl)
+        val href = normalizePageUrl(link.attr("href"))
             ?: return null
         val rawTitle = link.attr("title").trim().takeIf { it.isNotBlank() }
             ?: selectFirst(".mli-info h2")?.text()?.trim()?.takeIf { it.isNotBlank() }
@@ -74,7 +77,7 @@ class KitanontonProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val detailUrl = ProviderHtmlParser.normalizeProviderPageUrl(url, mainUrl) ?: return null
+        val detailUrl = normalizePageUrl(url) ?: return null
         val fetch = fetchProviderPage(detailUrl) ?: return null
         val document = fetch.document
         val titleElement = document.selectFirst("h1, h3[itemprop=name], meta[property=og:title]")
@@ -105,7 +108,7 @@ class KitanontonProvider : MainAPI() {
         val legacyEpisodes = document.select(
             ".episodios a[href], .les-content a[href], .episode a[href], a[href*='/episode/']"
         ).mapNotNull { link ->
-            val href = ProviderHtmlParser.normalizeProviderPageUrl(link.attr("href"), mainUrl)
+            val href = normalizePageUrl(link.attr("href"))
                 ?: return@mapNotNull null
             val label = link.text().trim().ifBlank { link.attr("title").trim() }
             val episodeNumber = Regex("""(?:Episode|Ep\.?|E)(\d+)""", RegexOption.IGNORE_CASE)
@@ -131,7 +134,7 @@ class KitanontonProvider : MainAPI() {
         }.getOrDefault(false)
         val watchUrl = if (isSeriesDetail) {
             KitanontonPlayerParser.watchPageUrl(document, fetch.url)
-                ?.let { ProviderHtmlParser.normalizeProviderPageUrl(it, mainUrl) }
+                ?.let(::normalizePageUrl)
         } else {
             null
         }
@@ -199,9 +202,9 @@ class KitanontonProvider : MainAPI() {
         )
         if (KitanontonPlayerParser.isEpisodeData(data)) {
             val request = KitanontonPlayerParser.decodeEpisodeData(data) ?: return false
-            val detailUrl = ProviderHtmlParser.normalizeProviderPageUrl(request.detailUrl, mainUrl)
+            val detailUrl = normalizePageUrl(request.detailUrl)
                 ?: return false
-            val watchUrl = ProviderHtmlParser.normalizeProviderPageUrl(request.watchUrl, mainUrl)
+            val watchUrl = normalizePageUrl(request.watchUrl)
                 ?: return false
             try {
                 val fetch = resolver.withinBudget {
@@ -227,7 +230,7 @@ class KitanontonProvider : MainAPI() {
             return resolver.loaded
         }
 
-        val detailUrl = ProviderHtmlParser.normalizeProviderPageUrl(data, mainUrl) ?: return false
+        val detailUrl = normalizePageUrl(data) ?: return false
         for (page in listOfNotNull(
             KitanontonPlayerParser.playPageUrl(detailUrl),
             detailUrl
@@ -272,7 +275,7 @@ class KitanontonProvider : MainAPI() {
         referer: String? = null,
         timeoutSeconds: Long = KITANONTON_PAGE_TIMEOUT_SECONDS
     ): ProviderPage? {
-        val requestUrl = ProviderHtmlParser.normalizeProviderPageUrl(url, mainUrl) ?: return null
+        val requestUrl = normalizePageUrl(url) ?: return null
         return KitanontonPlayerParser.retryPageFetch(KITANONTON_PAGE_ATTEMPTS) {
             val response = app.get(
                 requestUrl,
@@ -280,7 +283,7 @@ class KitanontonProvider : MainAPI() {
                 timeout = timeoutSeconds
             )
             if (response.code !in 200..399) return@retryPageFetch null
-            val pageUrl = ProviderHtmlParser.normalizeProviderPageUrl(response.url, mainUrl)
+            val pageUrl = normalizePageUrl(response.url)
                 ?: return@retryPageFetch null
             val document = response.document
             if (ProviderHtmlParser.isNonContentPage(document.outerHtml())) {
@@ -289,6 +292,9 @@ class KitanontonProvider : MainAPI() {
             ProviderPage(document, pageUrl)
         }
     }
+
+    private fun normalizePageUrl(raw: String?): String? =
+        ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, legacyHosts)
 
     private fun String.backgroundImageUrl(): String? {
         return substringAfter("url(", "")
@@ -319,17 +325,22 @@ internal object KitanontonPlayerParser {
     )
 
     fun watchPageUrl(document: Document, detailUrl: String): String? {
-        val detailHost = runCatching { URI(detailUrl).host.orEmpty().lowercase() }
-            .getOrDefault("")
-        if (detailHost.isBlank()) return null
+        val canonicalDetailUrl = ProviderHtmlParser.normalizeProviderPageUrl(
+            detailUrl,
+            KITANONTON_MAIN_URL,
+            KITANONTON_LEGACY_HOSTS
+        ) ?: return null
 
         return document.select("#mv-info > a[href], a.thumb.mvi-cover[href]").firstNotNullOfOrNull { link ->
-            ProviderHtmlParser.absoluteUrl(link.attr("href"), detailUrl)
-                ?.takeIf(::isWatchPageUrl)
-                ?.takeIf { watchUrl ->
-                    runCatching { URI(watchUrl).host.orEmpty().lowercase() }
-                        .getOrDefault("") == detailHost
+            ProviderHtmlParser.absoluteUrl(link.attr("href"), canonicalDetailUrl)
+                ?.let { rawWatchUrl ->
+                    ProviderHtmlParser.normalizeProviderPageUrl(
+                        rawWatchUrl,
+                        KITANONTON_MAIN_URL,
+                        KITANONTON_LEGACY_HOSTS
+                    )
                 }
+                ?.takeIf(::isWatchPageUrl)
         }
     }
 

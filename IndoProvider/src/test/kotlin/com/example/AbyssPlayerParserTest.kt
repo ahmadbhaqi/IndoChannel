@@ -272,6 +272,77 @@ class AbyssPlayerParserTest {
         assertEquals(listOf("https://video.example/full-720.mp4"), links.map { it.url })
     }
 
+    @Test
+    fun `resolver treats the current abysscdn host as an Abyss player`() = runBlocking {
+        val media = """
+            {"mp4":{
+              "sources":[{
+                "label":"720p",
+                "res_id":4,
+                "size":406038866,
+                "sub":"current-subdomain",
+                "status":true
+              }],
+              "domains":["current-subdomain.sssrr.org"]
+            }}
+        """.trimIndent()
+        val playerUrl = "https://abysscdn.com/?v=current-movie"
+        val playerPage = abyssPage(media)
+        val links = mutableListOf<ExtractorLink>()
+        var genericAttempts = 0
+        val session = LinkResolutionSession(
+            api = KeBioskopProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                assertEquals(playerUrl, url)
+                playerPage
+            },
+            extractorLoader = { _, _, _, _ ->
+                genericAttempts++
+                false
+            },
+            mediaLinkProbe = { link -> link }
+        )
+
+        assertTrue(
+            session.resolve(
+                playerUrl,
+                "https://streaming.kebioskop21.pro/apidrive.php?token=current"
+            )
+        )
+        assertEquals(0, genericAttempts, "The first-party Abyss adapter must handle abysscdn directly")
+        assertEquals(1, links.size)
+        assertTrue(links.single().url.startsWith("https://current-subdomain.sssrr.org/sora/406038866/"))
+        assertEquals(720, links.single().quality)
+    }
+
+    @Test
+    fun `resolver does not trust abysscdn lookalike hosts`() = runBlocking {
+        val lookalikes = listOf(
+            "https://abysscdn.com.evil.example/?v=current-movie",
+            "https://evilabysscdn.com/?v=current-movie",
+            "https://subdomain.abysscdn.com/?v=current-movie"
+        )
+        val genericAttempts = mutableListOf<String>()
+        val session = LinkResolutionSession(
+            api = KeBioskopProvider(),
+            subtitleCallback = {},
+            callback = {},
+            pageFetcher = { _, _ -> error("Lookalike hosts must not enter the trusted Abyss adapter") },
+            extractorLoader = { url, _, _, _ ->
+                genericAttempts += url
+                false
+            },
+            mediaLinkProbe = { link -> link }
+        )
+
+        lookalikes.forEach { url ->
+            assertFalse(session.resolve(url, "https://kebioskop21.cfd/movie/current/"))
+        }
+        assertEquals(lookalikes, genericAttempts)
+    }
+
     private fun abyssPage(
         media: String,
         urlSafe: Boolean = false,

@@ -619,7 +619,8 @@ class ProviderHtmlParserTest {
     }
 
     @Test
-    fun `resolution session expands PlaySobat payload through extractors`() = runBlocking {
+    fun `resolution session routes a PlaySobat mirror through extractors`() = runBlocking {
+        val nestedPlayer = "https://generic-player.example/embed/UDPNmR2acq"
         val links = mutableListOf<ExtractorLink>()
         val extractorRequests = mutableListOf<Pair<String, String?>>()
         val session = LinkResolutionSession(
@@ -635,7 +636,7 @@ class ProviderHtmlParserTest {
             },
             extractorLoader = { url, referer, _, callback ->
                 extractorRequests += url to referer
-                if (url.startsWith("https://abysscdn.com/")) {
+                if (url == nestedPlayer) {
                     callback(
                         directExtractorLink(
                             "test",
@@ -651,13 +652,14 @@ class ProviderHtmlParserTest {
                 } else {
                     false
                 }
-            }
+            },
+            playSobatUrlParser = { listOf(nestedPlayer) }
         )
 
         assertTrue(session.resolve("https://playsobat.xyz/embed/1", "https://provider.example/item"))
         assertEquals(
             listOf<Pair<String, String?>>(
-                "https://abysscdn.com/?v=UDPNmR2acq" to "https://playsobat.xyz/embed/1"
+                nestedPlayer to "https://playsobat.xyz/embed/1"
             ),
             extractorRequests
         )
@@ -704,6 +706,7 @@ class ProviderHtmlParserTest {
 
     @Test
     fun `resolution session follows one generic iframe through PlaySobat adapter`() = runBlocking {
+        val nestedPlayer = "https://generic-player.example/embed/UDPNmR2acq"
         val links = mutableListOf<ExtractorLink>()
         val extractorRequests = mutableListOf<Pair<String, String?>>()
         val session = LinkResolutionSession(
@@ -723,7 +726,7 @@ class ProviderHtmlParserTest {
             },
             extractorLoader = { url, referer, _, callback ->
                 extractorRequests += url to referer
-                if (url.startsWith("https://abysscdn.com/")) {
+                if (url == nestedPlayer) {
                     callback(
                         directExtractorLink(
                             "test",
@@ -739,14 +742,15 @@ class ProviderHtmlParserTest {
                 } else {
                     false
                 }
-            }
+            },
+            playSobatUrlParser = { listOf(nestedPlayer) }
         )
 
         assertTrue(session.resolve("https://player.example/embed/1", "https://provider.example/item"))
         assertEquals(
             listOf<Pair<String, String?>>(
                 "https://player.example/embed/1" to "https://provider.example/item",
-                "https://abysscdn.com/?v=UDPNmR2acq" to "https://playsobat.xyz/embed/1"
+                nestedPlayer to "https://playsobat.xyz/embed/1"
             ),
             extractorRequests
         )

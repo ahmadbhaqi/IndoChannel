@@ -18,7 +18,7 @@ class RotatingMovieProvidersLiveTest {
             org.junit.Assume.assumeTrue(false)
             return@runBlocking
         }
-        verify(NgefilmProvider(), "https://new38.ngefilm.site/gangland-2025/")
+        verify(NgefilmProvider(), "https://new38.ngefilm.site/hungry-2026/")
     }
 
     @Test
@@ -36,7 +36,19 @@ class RotatingMovieProvidersLiveTest {
             org.junit.Assume.assumeTrue(false)
             return@runBlocking
         }
-        verify(DutamovieProvider(), "https://austincomputerworks.org/lunok-2026/")
+        verify(DutamovieProvider(), "https://restaurantesabadell.com/lunok-2026/")
+    }
+
+    @Test
+    fun `kebioskop emits reachable media`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+        verify(
+            KeBioskopProvider(),
+            "https://kebioskop21.cfd/nonton-film-peaky-blinders-the-immortal-man-2026-sub-indo/"
+        )
     }
 
     private suspend fun verify(provider: MainAPI, pageUrl: String) {

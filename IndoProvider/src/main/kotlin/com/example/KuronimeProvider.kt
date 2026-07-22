@@ -52,11 +52,8 @@ open class KuronimeProvider : MainAPI() {
             ?.takeIf { it.isNotBlank() }
     }
 
-    private suspend fun emitKuroplayerLink(raw: String, callback: (ExtractorLink) -> Unit): Boolean {
-        val isKuroplayer = runCatching {
-            java.net.URI(raw).host.orEmpty().endsWith(".kuroplayer.xyz", ignoreCase = true)
-        }.getOrDefault(false)
-        if (!isKuroplayer || directMediaType(raw) != ExtractorLinkType.M3U8) return false
+    private suspend fun emitKuroplayerLink(raw: String, resolver: LinkResolutionSession): Boolean {
+        if (!KuronimeSourceScheduler.isKuroplayerHls(raw)) return false
 
         val quality = Regex("""/(\d{3,4})p/""")
             .find(raw)
@@ -64,7 +61,8 @@ open class KuronimeProvider : MainAPI() {
             ?.getOrNull(1)
             ?.toIntOrNull()
             ?: Qualities.Unknown.value
-        callback(
+        val before = resolver.linkCount
+        resolver.emitResolved(
             newExtractorLink(name, "$name HLS", raw, ExtractorLinkType.M3U8) {
                 referer = KUROPLAYER_REFERER
                 this.quality = quality
@@ -74,7 +72,7 @@ open class KuronimeProvider : MainAPI() {
                 )
             }.withSimpleServerName(name)
         )
-        return true
+        return resolver.linkCount > before
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -148,7 +146,7 @@ open class KuronimeProvider : MainAPI() {
         val fetch = app.get(data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
         val document = fetch.document
         val html = fetch.text
-        var loaded = false
+        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
 
         InlineDataParser.kuronimeSourceId(html)?.let { sourceId ->
             try {
@@ -164,29 +162,23 @@ open class KuronimeProvider : MainAPI() {
                     timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                 ).text
                 val apiUrls = InlineDataParser.kuronimeApiUrls(response)
-                var emittedKuroplayer = false
-                apiUrls.forEach { raw ->
-                    emittedKuroplayer = emitKuroplayerLink(raw, callback) || emittedKuroplayer
-                }
-                if (emittedKuroplayer) {
-                    loaded = true
-                } else {
-                    apiUrls.forEach { raw ->
-                        loaded = loadResolvedExtractorWithResult(raw, data, subtitleCallback, callback) || loaded
-                    }
-                }
+                KuronimeSourceScheduler.resolve(
+                    candidates = apiUrls,
+                    resolveKuroplayer = { raw -> emitKuroplayerLink(raw, resolver) },
+                    resolveGeneric = { raw -> resolver.resolve(raw, data) }
+                )
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {}
         }
 
         ProviderHtmlParser.mediaSources(document).forEach { src ->
-            loaded = loadResolvedExtractorWithResult(src, "$mainUrl/", subtitleCallback, callback) || loaded
+            resolver.resolve(src, "$mainUrl/")
         }
 
         document.select("div.video-nav a[href], #linksDDLContainer a[href]").forEach { link ->
             val src = ProviderHtmlParser.absoluteUrl(link.attr("href"), data)
-            loaded = loadResolvedExtractorWithResult(src, data, subtitleCallback, callback) || loaded
+            resolver.resolve(src, data)
         }
 
         document.select("select.mirror > option[value]").forEach { option ->
@@ -195,16 +187,46 @@ open class KuronimeProvider : MainAPI() {
                 val iframe = org.jsoup.Jsoup.parse(decoded).selectFirst("iframe")?.let {
                     ProviderHtmlParser.firstIframeSource(it)
                 }
-                loaded = loadResolvedExtractorWithResult(iframe, "$mainUrl/", subtitleCallback, callback) || loaded
+                resolver.resolve(iframe, "$mainUrl/")
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {}
         }
-        return loaded
+        return resolver.linkCount > 0
     }
 
     private companion object {
         const val KUROPLAYER_ORIGIN = "https://player.animeku.org"
         const val KUROPLAYER_REFERER = "$KUROPLAYER_ORIGIN/"
+    }
+}
+
+internal object KuronimeSourceScheduler {
+    internal suspend fun resolve(
+        candidates: List<String>,
+        resolveKuroplayer: suspend (String) -> Boolean,
+        resolveGeneric: suspend (String) -> Boolean
+    ): Boolean {
+        var loaded = false
+        candidates.forEach { candidate ->
+            try {
+                loaded = if (isKuroplayerHls(candidate)) {
+                    resolveKuroplayer(candidate) || loaded
+                } else {
+                    resolveGeneric(candidate) || loaded
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+            }
+        }
+        return loaded
+    }
+
+    internal fun isKuroplayerHls(raw: String): Boolean {
+        val isKuroplayer = runCatching {
+            java.net.URI(raw).host.orEmpty().endsWith(".kuroplayer.xyz", ignoreCase = true)
+        }.getOrDefault(false)
+        return isKuroplayer && directMediaType(raw) == ExtractorLinkType.M3U8
     }
 }

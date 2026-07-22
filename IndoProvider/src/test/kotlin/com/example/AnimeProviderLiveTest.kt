@@ -1,8 +1,13 @@
 package com.example
 
+import com.lagradost.cloudstream3.AnimeLoadResponse
+import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.MainPageRequest
+import com.lagradost.cloudstream3.TvSeriesLoadResponse
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertTrue
@@ -39,9 +44,10 @@ class AnimeProviderLiveTest {
             return@runBlocking
         }
 
+        val pageUrl = "https://oploverz.org/anime/dr-stone-season-4-science-future-episode-26-subtitle-indonesia/"
         val links = mutableListOf<ExtractorLink>()
         val loaded = OploverzProvider().loadLinks(
-            "https://oploverz.org/anime/dr-stone-season-4-science-future-episode-26-subtitle-indonesia/",
+            pageUrl,
             false,
             {},
             links::add
@@ -56,7 +62,47 @@ class AnimeProviderLiveTest {
     }
 
     @Test
-    fun `kuronime emits decrypted kuroplayer hls`() = runBlocking {
+    fun `samehadaku resolves a current catalog episode`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        assertCurrentCatalogPlayable(SamehadakuProvider())
+    }
+
+    @Test
+    fun `anoboy resolves a current catalog episode`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        assertCurrentCatalogPlayable(AnoboyProvider())
+    }
+
+    @Test
+    fun `otakudesu resolves a current catalog episode`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        assertCurrentCatalogPlayable(OtakudesuProvider())
+    }
+
+    @Test
+    fun `zoronime resolves a current catalog episode`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        assertCurrentCatalogPlayable(ZoronimeProvider())
+    }
+
+    @Test
+    fun `kuronime emits reachable media after mirror fallback`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
             org.junit.Assume.assumeTrue(false)
             return@runBlocking
@@ -71,11 +117,49 @@ class AnimeProviderLiveTest {
         )
 
         assertTrue(loaded, "Kuronime did not report a resolved link")
-        assertTrue(
-            links.any { it.url.contains(".kuroplayer.xyz/") && it.url.contains(".m3u8") },
-            "Kuronime did not emit its decrypted Kuroplayer HLS"
-        )
+        assertTrue(links.isNotEmpty(), "Kuronime emitted no media after trying its mirrors")
         assertReachable("Kuronime", links)
+    }
+
+    private suspend fun assertCurrentCatalogPlayable(provider: MainAPI) {
+        val page = provider.mainPage.firstOrNull()
+            ?: error("${provider.name} has no main-page category")
+        val response = withTimeout(45_000) {
+            provider.getMainPage(
+                1,
+                MainPageRequest(page.name, page.data, page.horizontalImages)
+            )
+        }
+        val item = response?.items
+            ?.flatMap { it.list }
+            .orEmpty()
+            .firstOrNull { it.url.startsWith("http") }
+            ?: error("${provider.name} returned an empty current catalog")
+        val links = mutableListOf<ExtractorLink>()
+        val detail = withTimeout(45_000) { provider.load(item.url) }
+        val playbackData = when (detail) {
+            is AnimeLoadResponse -> detail.episodes.values.flatten()
+                .maxByOrNull { it.episode ?: Int.MIN_VALUE }
+                ?.data
+            is TvSeriesLoadResponse -> detail.episodes
+                .maxByOrNull { it.episode ?: Int.MIN_VALUE }
+                ?.data
+            else -> null
+        } ?: item.url
+        println("${provider.name} current=${item.url} playback=$playbackData")
+        val loaded = try {
+            withTimeout(120_000) {
+                provider.loadLinks(playbackData, false, {}, links::add)
+            }
+        } catch (error: TimeoutCancellationException) {
+            println("${provider.name} timed out with links=${links.map { it.url }}")
+            throw error
+        }
+
+        println("${provider.name} current=${item.url} loaded=$loaded links=${links.map { it.url }}")
+        assertTrue(loaded, "${provider.name} did not resolve its current catalog episode: ${item.url}")
+        assertTrue(links.isNotEmpty(), "${provider.name} emitted no media for ${item.url}")
+        assertReachable(provider.name, links)
     }
 
     private suspend fun assertReachable(label: String, links: List<ExtractorLink>) {

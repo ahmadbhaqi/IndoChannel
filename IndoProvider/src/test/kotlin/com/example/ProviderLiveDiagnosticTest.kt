@@ -41,7 +41,7 @@ class ProviderLiveDiagnosticTest {
         }
 
         val provider = DutamovieProvider()
-        val detailUrl = "https://austincomputerworks.org/tv/the-east-palace-2026/"
+        val detailUrl = "https://restaurantesabadell.com/tv/the-east-palace-2026/"
         val detail = withTimeout(45_000) { provider.load(detailUrl) }
         val episodes = (detail as? TvSeriesLoadResponse)?.episodes.orEmpty()
         assertTrue(episodes.isNotEmpty(), "Dutamovie discarded compact S1 Eps1 labels")
@@ -64,7 +64,7 @@ class ProviderLiveDiagnosticTest {
         }
 
         val provider = KitanontonProvider()
-        val detailUrl = "https://kitanonton2.surf/series/nonton-film-key-to-the-phoenix-heart-2026/"
+        val detailUrl = "https://kitanonton2.casa/series/nonton-film-key-to-the-phoenix-heart-2026/"
         val detail = withTimeout(45_000) { provider.load(detailUrl) }
         val episodes = (detail as? TvSeriesLoadResponse)?.episodes.orEmpty()
         assertTrue(episodes.isNotEmpty(), "KitaNonton series exposed no episodes")
@@ -104,7 +104,7 @@ class ProviderLiveDiagnosticTest {
             return@runBlocking
         }
 
-        val page = "https://kitanonton2.surf/nonton-one-piece-heroines-2026-sub-indo/"
+        val page = "https://kitanonton2.casa/nonton-one-piece-heroines-2026-sub-indo/"
         val links = mutableListOf<ExtractorLink>()
         val loaded = withTimeout(35_000) {
             KitanontonProvider().loadLinks(page, false, {}, links::add)
@@ -156,7 +156,7 @@ class ProviderLiveDiagnosticTest {
         val links = mutableListOf<ExtractorLink>()
         val subtitles = mutableListOf<SubtitleFile>()
         val loaded = KitanontonProvider().loadLinks(
-            "https://kitanonton2.surf/nonton-hold-the-fort-2025-sub-indo/",
+            "https://kitanonton2.casa/nonton-hold-the-fort-2025-sub-indo/",
             false,
             subtitles::add,
             links::add

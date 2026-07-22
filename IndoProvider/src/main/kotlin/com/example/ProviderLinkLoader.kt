@@ -116,7 +116,10 @@ internal class LinkResolutionSession(
     sessionTimeoutMs: Long = SESSION_TIMEOUT_MS,
     private val playSobatUrlParser: PlaySobatUrlParser = InlineDataParser::playSobatUrls,
     private val playSobatMirrorTimeoutMs: Long = PLAY_SOBAT_MIRROR_TIMEOUT_MS,
-    private val mediaLinkProbe: MediaLinkProbe = ::probeExtractorLink,
+    private val mediaProbeTimeoutSeconds: Long = MEDIA_PROBE_TIMEOUT_SECONDS,
+    private val mediaLinkProbe: MediaLinkProbe = { link ->
+        probeExtractorLink(link, mediaProbeTimeoutSeconds)
+    },
     private val directLinkFactory: DirectLinkFactory = { source, name, url, referer, quality, type, headers ->
         newExtractorLink(source, name, url, type) {
             this.referer = referer
@@ -267,7 +270,8 @@ internal class LinkResolutionSession(
             }
 
             if (host == "abyssplayer.com" || host.endsWith(".abyssplayer.com") ||
-                host == "abyss.to" || host.endsWith(".abyss.to")
+                host == "abyss.to" || host.endsWith(".abyss.to") ||
+                host == "abysscdn.com"
             ) {
                 val html = pageFetcher(url, referer)
                 cachedHtml = html
@@ -499,6 +503,7 @@ internal class LinkResolutionSession(
                         resolveCandidate(playable, url, genericDepth, candidateDeadlineNanos)
                     }
                 }
+                if (emittedLinks.size > beforeAdapter) return
                 // Keep the cached generic fallback: some PlaySobat pages also
                 // expose a direct iframe/source outside the encrypted mirrors.
             }
@@ -724,7 +729,11 @@ internal class LinkResolutionSession(
         }
     }
 
-    internal suspend fun emitResolved(link: ExtractorLink) = emitVerified(link)
+    internal suspend fun emitResolved(link: ExtractorLink): Boolean {
+        val before = emittedLinks.size
+        emitVerified(link)
+        return emittedLinks.size > before
+    }
 
     private suspend fun emitVerified(link: ExtractorLink) {
         val verified = verifyMediaLink(link) ?: return
@@ -754,7 +763,7 @@ internal class LinkResolutionSession(
         val remainingMs = remainingBudgetMs()
         if (remainingMs == 0L) return null
         return withTimeoutOrNull(
-            minOf(MEDIA_PROBE_TIMEOUT_SECONDS * 1_000L, remainingMs)
+            minOf(mediaProbeTimeoutSeconds.coerceIn(1L, 60L) * 1_000L, remainingMs)
         ) {
             mediaLinkProbe(link)
         }
@@ -809,10 +818,15 @@ private suspend fun fetchBoundedHowNetworkApi(request: HowNetworkApiRequest): St
  * MP4/HLS, which otherwise surfaces in Cloudstream as parsing code 3003.
  */
 @Suppress("DEPRECATION_ERROR")
-private suspend fun probeExtractorLink(link: ExtractorLink): ExtractorLink? {
+private suspend fun probeExtractorLink(
+    link: ExtractorLink,
+    timeoutSeconds: Long
+): ExtractorLink? {
     if (!link.hasSafeMediaUrls()) return null
     if (link is ExtractorLinkPlayList) {
-        return validateExtractorPlaylist(link, ::probeExtractorLink)
+        return validateExtractorPlaylist(link) { entry ->
+            probeExtractorLink(entry, timeoutSeconds)
+        }
     }
 
     val requestedUri = runCatching { URI(link.url) }.getOrNull() ?: return null
@@ -843,7 +857,7 @@ private suspend fun probeExtractorLink(link: ExtractorLink): ExtractorLink? {
             link.url,
             referer = explicitReferer ?: link.referer.takeIf { it.isNotBlank() },
             headers = requestHeaders,
-            timeout = MEDIA_PROBE_TIMEOUT_SECONDS
+            timeout = timeoutSeconds.coerceIn(1L, 60L)
         )
         if (response.code !in 200..299 || !isSafeRemoteHttpUrl(response.url)) {
             response.body.close()
@@ -867,7 +881,11 @@ private suspend fun probeExtractorLink(link: ExtractorLink): ExtractorLink? {
         // same redirect, while DRM, playlist and alternate-audio metadata stay
         // intact and origin-bound headers are not moved onto a foreign CDN URL.
         link.type = detectedType
-        if (validateAuxiliaryAudioTracks(link, ::probeExtractorLink) == null) return null
+        if (
+            validateAuxiliaryAudioTracks(link) { track ->
+                probeExtractorLink(track, timeoutSeconds)
+            } == null
+        ) return null
         link
     } catch (error: CancellationException) {
         throw error

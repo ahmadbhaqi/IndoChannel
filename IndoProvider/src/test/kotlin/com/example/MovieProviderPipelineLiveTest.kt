@@ -33,7 +33,9 @@ class MovieProviderPipelineLiveTest {
             NgefilmProvider(),
             DutamovieProvider(),
             KitanontonProvider(),
-            FilmapikProvider()
+            FilmapikProvider(),
+            PusatfilmProvider(),
+            KeBioskopProvider()
         ).forEach { provider ->
             val pageData = provider.mainPage.first()
             val request = MainPageRequest(pageData.name, pageData.data, pageData.horizontalImages)
@@ -88,18 +90,28 @@ class MovieProviderPipelineLiveTest {
             ),
             DetailCase(
                 DutamovieProvider(),
-                "https://austincomputerworks.org/bagong-tukso-2-2026/",
+                "https://restaurantesabadell.com/bagong-tukso-2-2026/",
                 "Bagong Tukso 2"
             ),
             DetailCase(
                 KitanontonProvider(),
-                "https://kitanonton2.surf/nonton-hold-the-fort-2025-sub-indo/",
+                "https://kitanonton2.casa/nonton-hold-the-fort-2025-sub-indo/",
                 "Hold the Fort"
             ),
             DetailCase(
                 FilmapikProvider(),
                 "https://filmapik.college/nonton-film-summers-last-resort-2026-subtitle-indonesia",
                 "Summer's Last Resort"
+            ),
+            DetailCase(
+                PusatfilmProvider(),
+                "https://v4.pusatfilm21info.com/royal-2025/",
+                "Royal"
+            ),
+            DetailCase(
+                KeBioskopProvider(),
+                "https://kebioskop21.cfd/nonton-film-peaky-blinders-the-immortal-man-2026-sub-indo/",
+                "Peaky Blinders: The Immortal Man"
             )
         )
 

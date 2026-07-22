@@ -2,10 +2,13 @@ package com.example
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import java.net.URI
+import kotlin.coroutines.cancellation.CancellationException
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class AnoboyProvider : MainAPI() {
-    override var mainUrl = "https://ww1.anoboy.boo"
+    override var mainUrl = "https://anoboy.xyz"
     override var name = "Anoboy"
     override val hasMainPage = true
     override var lang = "id"
@@ -26,7 +29,7 @@ class AnoboyProvider : MainAPI() {
 
     private fun Element.toSearchResult(): AnimeSearchResponse? {
         val title = attr("title").ifBlank { selectFirst("h3.ibox1")?.text() }?.trim() ?: return null
-        val href = fixUrlNull(attr("href")) ?: return null
+        val href = normalizePageUrl(attr("href")) ?: return null
         val posterUrl = fixUrlNull(ProviderHtmlParser.imageSource(selectFirst("img")))
         val epNum = Regex("Episode\\s*(\\d+)", RegexOption.IGNORE_CASE).find(title)?.groupValues?.getOrNull(1)?.toIntOrNull()
         return newAnimeSearchResponse(title, href, TvType.Anime) {
@@ -41,7 +44,8 @@ class AnoboyProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val document = app.get(url).document
+        val pageUrl = normalizePageUrl(url) ?: return null
+        val document = app.get(pageUrl).document
         val rawTitle = document.selectFirst("h1.entry-title, h2.entry-title")?.text()?.trim() ?: return null
         val title = rawTitle.replace("Subtitle Indonesia", "", ignoreCase = true).trim()
         val description = document.select("div.entry-content p, div.sisi.entry-content").text().trim().takeIf { it.isNotBlank() }
@@ -50,14 +54,14 @@ class AnoboyProvider : MainAPI() {
         val type = if (rawTitle.contains("Movie", ignoreCase = true)) TvType.AnimeMovie else TvType.Anime
 
         val episodes = listOf(
-            newEpisode(url) {
+            newEpisode(pageUrl) {
                 this.name = rawTitle
                 this.episode = episode
                 this.posterUrl = poster
             }
         )
 
-        return newAnimeLoadResponse(title, url, type) {
+        return newAnimeLoadResponse(title, pageUrl, type) {
             posterUrl = poster
             plot = description
             addEpisodes(DubStatus.Subbed, episodes)
@@ -70,31 +74,140 @@ class AnoboyProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
-        var loaded = false
-
-        val candidates = (
-            ProviderHtmlParser.mediaSources(document, "iframe#mediaplayer, iframe") +
-                document.select("a[data-video]").mapNotNull { it.attr("data-video").takeIf { value -> value.isNotBlank() } }
-            ).distinct()
-
-        candidates.forEach { raw ->
-            val url = toPlayableUrl(raw) ?: return@forEach
-            val resolvedSources = if (url.contains("/uploads/", ignoreCase = true)) {
+        val pageUrl = normalizePageUrl(data) ?: return false
+        val fetch = try {
+            app.get(pageUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            return false
+        }
+        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        val bloggerResolver = BloggerVideoResolver(name, resolver::emitResolved)
+        val router = AnoboyCandidateRouter(
+            wrapperFetcher = wrapperFetcher@{ candidate, referer ->
                 try {
-                    ProviderHtmlParser.mediaSources(app.get(url).document)
+                    val wrapper = resolver.withinBudget {
+                        app.get(
+                            candidate,
+                            referer = referer,
+                            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+                        )
+                    } ?: return@wrapperFetcher null
+                    AnoboyFetchedPage(wrapper.url, wrapper.document)
+                } catch (error: CancellationException) {
+                    throw error
                 } catch (_: Exception) {
-                    emptyList()
+                    null
                 }
-            } else {
-                listOf(url)
-            }
+            },
+            bloggerResolver = { candidate, referer ->
+                resolver.withinBudget { bloggerResolver.resolve(candidate, referer) } == true
+            },
+            genericResolver = { candidate, referer -> resolver.resolve(candidate, referer) },
+            canContinue = { resolver.canContinue }
+        )
+        return router.resolveAll(AnoboyPlaybackParser.episodeCandidates(fetch.document, fetch.url))
+    }
 
-            resolvedSources.forEach { source ->
-                loaded = loadResolvedExtractorWithResult(source, mainUrl, subtitleCallback, callback) || loaded
+    private fun normalizePageUrl(raw: String?): String? =
+        ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, ANOBOY_LEGACY_HOSTS)
+
+    private companion object {
+        val ANOBOY_LEGACY_HOSTS = setOf("ww1.anoboy.boo")
+    }
+}
+
+internal data class AnoboyPlayerCandidate(
+    val url: String,
+    val referer: String
+)
+
+internal data class AnoboyFetchedPage(
+    val url: String,
+    val document: Document
+)
+
+internal object AnoboyPlaybackParser {
+    fun episodeCandidates(document: Document, pageUrl: String): List<AnoboyPlayerCandidate> =
+        (ProviderHtmlParser.mediaSources(document, "iframe#mediaplayer, iframe") +
+            document.select("a[data-video]").mapNotNull { link ->
+                link.attr("data-video").trim().takeIf { it.isNotBlank() }
+            })
+            .mapNotNull { raw -> ProviderHtmlParser.absoluteUrl(raw, pageUrl) }
+            .distinct()
+            .map { url -> AnoboyPlayerCandidate(url, pageUrl) }
+
+    fun wrapperCandidates(document: Document, wrapperUrl: String): List<AnoboyPlayerCandidate> =
+        ProviderHtmlParser.mediaSources(document)
+            .mapNotNull { raw -> ProviderHtmlParser.absoluteUrl(raw, wrapperUrl) }
+            .distinct()
+            .map { url -> AnoboyPlayerCandidate(url, wrapperUrl) }
+}
+
+internal class AnoboyCandidateRouter(
+    private val wrapperFetcher: suspend (url: String, referer: String) -> AnoboyFetchedPage?,
+    private val bloggerResolver: suspend (url: String, referer: String) -> Boolean,
+    private val genericResolver: suspend (url: String, referer: String) -> Boolean,
+    private val canContinue: () -> Boolean = { true },
+    private val maxDepth: Int = 3,
+    private val maxCandidates: Int = 24
+) {
+    private val visited = mutableSetOf<String>()
+
+    suspend fun resolve(raw: String, referer: String): Boolean = resolve(raw, referer, depth = 0)
+
+    private suspend fun resolve(raw: String, referer: String, depth: Int): Boolean {
+        if (
+            !canContinue() ||
+            depth > maxDepth.coerceAtLeast(0) ||
+            visited.size >= maxCandidates.coerceAtLeast(1) ||
+            !isSafeRemoteHttpUrl(raw)
+        ) return false
+        if (!visited.add(raw)) return false
+
+        return if (raw.isUploadsWrapper()) {
+            val wrapper = wrapperFetcher(raw, referer) ?: return false
+            resolveAll(
+                AnoboyPlaybackParser.wrapperCandidates(wrapper.document, wrapper.url),
+                depth + 1
+            )
+        } else {
+            resolveDirect(raw, referer)
+        }
+    }
+
+    suspend fun resolveAll(candidates: List<AnoboyPlayerCandidate>): Boolean =
+        resolveAll(candidates, depth = 0)
+
+    private suspend fun resolveAll(candidates: List<AnoboyPlayerCandidate>, depth: Int): Boolean {
+        var loaded = false
+        candidates.forEach { candidate ->
+            if (!canContinue()) return@forEach
+            try {
+                loaded = resolve(candidate.url, candidate.referer, depth) || loaded
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // A failed mirror must not prevent subsequent candidates from resolving.
             }
         }
-
         return loaded
     }
+
+    private fun String.isUploadsWrapper(): Boolean = runCatching {
+        directMediaType(this) == null && URI(this).path.orEmpty().contains("/uploads/", ignoreCase = true)
+    }.getOrDefault(false)
+
+    private suspend fun resolveDirect(url: String, referer: String): Boolean {
+        if (url.isBloggerVideoUrl() && bloggerResolver(url, referer)) return true
+        return genericResolver(url, referer)
+    }
+
+    private fun String.isBloggerVideoUrl(): Boolean = runCatching {
+        if (!isSafeRemoteHttpUrl(this)) return@runCatching false
+        val uri = URI(this)
+        val host = uri.host?.lowercase()?.removeSuffix(".") ?: return@runCatching false
+        (host == "blogger.com" || host.endsWith(".blogger.com")) && uri.path == "/video.g"
+    }.getOrDefault(false)
 }

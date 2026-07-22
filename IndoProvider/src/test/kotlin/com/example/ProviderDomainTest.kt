@@ -14,16 +14,25 @@ class ProviderDomainTest {
 
     private fun source(fileName: String): String = File(sourceRoot, fileName).readText()
 
+    private fun normalizePageUrl(provider: Any, raw: String): String? {
+        val normalizer = provider.javaClass.declaredMethods.singleOrNull { method ->
+            method.name == "normalizePageUrl" &&
+                method.parameterCount == 1 &&
+                method.parameterTypes.single() == String::class.java
+        } ?: return null
+        normalizer.isAccessible = true
+        return normalizer.invoke(provider, raw) as? String
+    }
+
     @Test
     fun `new movie providers use requested domains`() {
         val expectedDomains = mapOf(
             "LayarKacaProvider.kt" to """override var mainUrl = "https://tv.nontonfilm.red"""",
             "NgefilmProvider.kt" to """override var mainUrl = "https://new38.ngefilm.site"""",
             "PusatfilmProvider.kt" to """override var mainUrl = "https://v4.pusatfilm21info.com"""",
-            "DutamovieProvider.kt" to """override var mainUrl = "https://austincomputerworks.org"""",
+            "DutamovieProvider.kt" to """override var mainUrl = "https://restaurantesabadell.com"""",
             "IndoxxiProvider.kt" to """override var mainUrl = "https://filmbioskop21.lk21.in.net"""",
             "FilmapikProvider.kt" to """override var mainUrl = "https://filmapik.college"""",
-            "KitanontonProvider.kt" to """override var mainUrl = "https://kitanonton2.surf"""",
             "RebahinProvider.kt" to """override var mainUrl = "https://rebahinxxi3.lol""""
         )
 
@@ -51,8 +60,9 @@ class ProviderDomainTest {
         val expectedRegistrations = listOf(
             "registerMainAPI(IndoxxiProvider())",
             "registerMainAPI(FilmapikProvider())",
-            "registerMainAPI(RebahinProvider())",
             "registerMainAPI(IdlixProvider())",
+            "registerMainAPI(PusatfilmProvider())",
+            "registerMainAPI(KeBioskopProvider())",
             "registerMainAPI(AnimeindoProvider())",
             "registerMainAPI(OploverzProvider())",
             "registerMainAPI(ZoronimeProvider())"
@@ -69,6 +79,7 @@ class ProviderDomainTest {
             "NgefilmProvider.kt",
             "DutamovieProvider.kt",
             "PusatfilmProvider.kt",
+            "KeBioskopProvider.kt",
             "KitanontonProvider.kt",
             "FilmapikProvider.kt",
             "RebahinProvider.kt"
@@ -93,12 +104,12 @@ class ProviderDomainTest {
     }
 
     @Test
-    fun `plugin keeps every provider registered`() {
+    fun `plugin keeps every approved provider registered`() {
         val plugin = source("IndoPlugin.kt")
         val expected = listOf(
             "LayarKacaProvider", "NgefilmProvider", "DutamovieProvider",
-            "KitanontonProvider", "IndoxxiProvider", "FilmapikProvider", "RebahinProvider",
-            "IdlixProvider",
+            "KitanontonProvider", "IndoxxiProvider", "FilmapikProvider",
+            "IdlixProvider", "PusatfilmProvider", "KeBioskopProvider",
             "OtakudesuProvider", "SamehadakuProvider", "AnoboyProvider",
             "KuronimeProvider", "AnimeindoProvider", "OploverzProvider", "ZoronimeProvider"
         )
@@ -106,6 +117,57 @@ class ProviderDomainTest {
         expected.forEach { provider ->
             assertTrue(plugin.contains("registerMainAPI($provider())"), "$provider must remain visible")
         }
+    }
+
+    @Test
+    fun `plugin does not register rebahin beside the same team kitanonton provider`() {
+        val plugin = source("IndoPlugin.kt")
+        assertTrue(plugin.contains("registerMainAPI(KitanontonProvider())"))
+        assertFalse(plugin.contains("registerMainAPI(RebahinProvider())"))
+    }
+
+    @Test
+    fun `dutamovie uses the current official domain`() {
+        assertEquals("https://restaurantesabadell.com", DutamovieProvider().mainUrl)
+    }
+
+    @Test
+    fun `dutamovie rehomes cached provider urls without trusting foreign hosts`() {
+        val provider = DutamovieProvider()
+        val cachedUrls = mapOf(
+            "https://austincomputerworks.org/lunok-2026/?server=2#player" to
+                "https://restaurantesabadell.com/lunok-2026/?server=2#player",
+            "https://wavereview.com/tv/series/episode-7/?quality=720p#watch" to
+                "https://restaurantesabadell.com/tv/series/episode-7/?quality=720p#watch"
+        )
+
+        cachedUrls.forEach { (cached, expected) ->
+            assertEquals(expected, normalizePageUrl(provider, cached))
+        }
+        assertEquals(null, normalizePageUrl(provider, "https://foreign.example/lunok-2026/"))
+    }
+
+    @Test
+    fun `kitanonton uses the current casa domain`() {
+        assertEquals("https://kitanonton2.casa", KitanontonProvider().mainUrl)
+    }
+
+    @Test
+    fun `kebioskop uses the current verified domain`() {
+        assertEquals("https://kebioskop21.cfd", KeBioskopProvider().mainUrl)
+    }
+
+    @Test
+    fun `kitanonton rehomes cached surf urls without trusting foreign hosts`() {
+        val provider = KitanontonProvider()
+        assertEquals(
+            "https://kitanonton2.casa/series/example/watch?episode=7#server-2",
+            normalizePageUrl(
+                provider,
+                "https://kitanonton2.surf/series/example/watch?episode=7#server-2"
+            )
+        )
+        assertEquals(null, normalizePageUrl(provider, "https://foreign.example/series/example/watch"))
     }
 
     @Test
@@ -126,11 +188,11 @@ class ProviderDomainTest {
     }
 
     @Test
-    fun `pusatfilm stays disabled while its only upstream has no files`() {
+    fun `pusatfilm is registered after its playback upstream recovered`() {
         val plugin = source("IndoPlugin.kt")
-        assertFalse(
+        assertTrue(
             plugin.contains("registerMainAPI(PusatfilmProvider())"),
-            "Pusatfilm must stay disabled while every Kotakajaib file returns File Error"
+            "Pusatfilm must be visible after its current playback pipeline emitted a verified link"
         )
     }
 
@@ -214,7 +276,7 @@ class ProviderDomainTest {
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
         assertTrue(
-            Regex("""(?m)^version\s*=\s*10\s*$""").containsMatchIn(moduleBuild.readText()),
+            Regex("""(?m)^version\s*=\s*11\s*$""").containsMatchIn(moduleBuild.readText()),
             "Cloudstream must see these provider fixes as a new plugin release"
         )
     }

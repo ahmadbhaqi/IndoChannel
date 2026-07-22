@@ -148,7 +148,7 @@ class KitanontonPlayerParserTest {
 
     @Test
     fun `series detail discovers same-host watch page`() {
-        val detailUrl = "https://kitanonton.example/series/example/"
+        val detailUrl = "https://kitanonton2.casa/series/example/"
         val document = Jsoup.parse(
             """
             <div id="mv-info"><a href="/series/example/watch">Watch</a></div>
@@ -157,7 +157,7 @@ class KitanontonPlayerParserTest {
         )
 
         assertEquals(
-            "https://kitanonton.example/series/example/watch",
+            "https://kitanonton2.casa/series/example/watch",
             KitanontonPlayerParser.watchPageUrl(document, detailUrl)
         )
 
@@ -166,6 +166,20 @@ class KitanontonPlayerParserTest {
             detailUrl
         )
         assertNull(KitanontonPlayerParser.watchPageUrl(crossHost, detailUrl))
+    }
+
+    @Test
+    fun `series detail rehomes legacy surf watch page`() {
+        val detailUrl = "https://kitanonton2.casa/series/example/"
+        val legacyWatchPage = Jsoup.parse(
+            """<div id="mv-info"><a href="https://kitanonton2.surf/series/example/watch">Watch</a></div>""",
+            detailUrl
+        )
+
+        assertEquals(
+            "https://kitanonton2.casa/series/example/watch",
+            KitanontonPlayerParser.watchPageUrl(legacyWatchPage, detailUrl)
+        )
     }
 
     @Test

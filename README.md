@@ -45,16 +45,19 @@ Nama repositori dapat diisi bebas, misalnya `IndoChannel`. Letak dan nama menu b
 
 Provider berikut terdaftar di dalam ekstensi `IndoProvider` saat ini:
 
-| Film & Serial    | Anime      |
-| ---------------- | ---------- |
-| LayarKaca (LK21) | Otakudesu  |
-| Ngefilm          | Samehadaku |
-| Dutamovie        | Anoboy     |
-| KitaNonton       | Kuronime   |
-| IndoXXI          | Animeindo  |
-| Filmapik         | Oploverz   |
-| Rebahin          | Zoronime   |
-| IDLIX            |            |
+| Film & serial | Anime |
+| --- | --- |
+| LayarKaca (LK21) | Otakudesu |
+| Ngefilm | Samehadaku |
+| Dutamovie | Anoboy |
+| KitaNonton | Kuronime |
+| IndoXXI | Animeindo |
+| Filmapik | Oploverz |
+| IDLIX | Zoronime |
+| Pusatfilm |  |
+| keBioskop21 |  |
+
+Rebahin tidak didaftarkan bersamaan dengan KitaNonton karena keduanya dikelola oleh tim yang sama; KitaNonton dipertahankan sebagai provider aktif.
 
 Fitur yang tersedia dapat berbeda antarprovider, tetapi umumnya mencakup katalog, pencarian, detail judul, episode, metadata, subtitle, dan pilihan server jika disediakan oleh situs sumber.
 

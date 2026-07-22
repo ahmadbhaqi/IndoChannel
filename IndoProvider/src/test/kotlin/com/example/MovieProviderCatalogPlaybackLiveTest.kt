@@ -28,7 +28,9 @@ class MovieProviderCatalogPlaybackLiveTest {
         listOf(
             ProviderCase(DutamovieProvider()),
             ProviderCase(FilmapikProvider()),
-            ProviderCase(LayarKacaProvider())
+            ProviderCase(LayarKacaProvider()),
+            ProviderCase(PusatfilmProvider()),
+            ProviderCase(KeBioskopProvider())
         ).forEach { case ->
             try {
                 verifyCurrentSamples(case)

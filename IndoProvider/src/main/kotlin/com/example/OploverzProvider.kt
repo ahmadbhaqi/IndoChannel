@@ -3,14 +3,8 @@ package com.example
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import java.net.URLDecoder
-import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -173,73 +167,18 @@ class OploverzProvider : MainAPI() {
             return false
         }
         val document = fetch.document
-        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
-        val emittedBloggerUrls = mutableSetOf<String>()
-
-        suspend fun emitBloggerVideo(url: String) {
-            if (!emittedBloggerUrls.add(url)) return
-            callback(
-                newExtractorLink(name, "$name Blogger", url, ExtractorLinkType.VIDEO) {
-                    referer = "$BLOGGER_ORIGIN/"
-                    quality = Qualities.Unknown.value
-                    headers = mapOf("Referer" to "$BLOGGER_ORIGIN/")
-                }.withSimpleServerName(name)
-            )
-        }
-
-        suspend fun resolveBlogger(playerUrl: String, pageReferer: String): Boolean {
-            val token = InlineDataParser.bloggerToken(playerUrl) ?: return false
-            val beforePlayer = emittedBloggerUrls.size
-            return try {
-                val bootstrapResponse = app.get(
-                    playerUrl,
-                    referer = pageReferer,
-                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-                )
-                for (url in InlineDataParser.bloggerVideoUrls(bootstrapResponse.text)) {
-                    emitBloggerVideo(url)
-                }
-                if (emittedBloggerUrls.size > beforePlayer) return true
-
-                val bootstrap = InlineDataParser.bloggerBootstrap(bootstrapResponse.text) ?: return false
-                val endpoint = buildString {
-                    append("$BLOGGER_ORIGIN/_/BloggerVideoPlayerUi/data/batchexecute")
-                    append("?rpcids=WcwnYd&source-path=%2Fvideo.g")
-                    append("&f.sid=")
-                    append(URLEncoder.encode(bootstrap.sid, Charsets.UTF_8.name()))
-                    append("&bl=")
-                    append(URLEncoder.encode(bootstrap.buildLabel, Charsets.UTF_8.name()))
-                    append("&hl=en-US")
-                    append("&_reqid=1&rt=c")
-                }
-                val rpcResponse = app.post(
-                    endpoint,
-                    requestBody = InlineDataParser.bloggerRpcFormBody(token)
-                        .toRequestBody("application/x-www-form-urlencoded;charset=UTF-8".toMediaType()),
-                    referer = "$BLOGGER_ORIGIN/",
-                    headers = mapOf(
-                        "Accept" to "application/json,text/plain,*/*",
-                        "Content-Type" to "application/x-www-form-urlencoded;charset=UTF-8",
-                        "Origin" to BLOGGER_ORIGIN,
-                        "X-Same-Domain" to "1"
-                    ),
-                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-                ).text
-                for (url in InlineDataParser.bloggerVideoUrls(rpcResponse)) {
-                    emitBloggerVideo(url)
-                }
-                emittedBloggerUrls.size > beforePlayer
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                false
-            }
-        }
+        val resolver = LinkResolutionSession(
+            this,
+            subtitleCallback,
+            callback,
+            mediaProbeTimeoutSeconds = 30L
+        )
+        val bloggerResolver = BloggerVideoResolver(name, resolver::emitResolved)
 
         suspend fun resolveCandidate(raw: String?, pageReferer: String) {
             val candidate = ProviderHtmlParser.absoluteUrl(raw, pageReferer) ?: return
             if (InlineDataParser.bloggerToken(candidate) != null) {
-                if (resolveBlogger(candidate, pageReferer)) return
+                if (resolver.withinBudget { bloggerResolver.resolve(candidate, pageReferer) } == true) return
             }
             resolver.resolve(candidate, pageReferer)
         }
@@ -253,7 +192,7 @@ class OploverzProvider : MainAPI() {
                 ?: encoded.takeIf { it.startsWith("http://") || it.startsWith("https://") }
             resolveCandidate(server, fetch.url)
         }
-        return emittedBloggerUrls.isNotEmpty() || resolver.loaded
+        return resolver.loaded
     }
 
     private fun String.decodeOploverzMirror(): String? {
@@ -279,10 +218,6 @@ class OploverzProvider : MainAPI() {
         return replace(Regex("""\s*(?:Subtitle\s+Indonesia|Sub\s+Indo).*$""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""\s+"""), " ")
             .trim(' ', '-', '|')
-    }
-
-    private companion object {
-        const val BLOGGER_ORIGIN = "https://www.blogger.com"
     }
 }
 
