@@ -95,14 +95,10 @@ class PusatfilmProvider : MainAPI() {
             val episodes = episodeElements
                 .mapNotNull { eps ->
                     val href = normalizePageUrl(eps.attr("href")) ?: return@mapNotNull null
-                    val name = eps.text()
-                    val episode = name.split(" ").lastOrNull()?.filter { it.isDigit() }?.toIntOrNull()
-                    newEpisode(href) {
-                        this.name = "Episode $episode"
-                        this.episode = episode
-                        this.posterUrl = poster
-                    }
-                }.filter { it.episode != null }
+                    val rawTitle = eps.attr("title").takeIf { it.isNotBlank() } ?: eps.text()
+                    val label = rawTitle.replaceFirst(Regex("(?i)Permalink ke\\s*"), "").trim()
+                    DutamoviePlayerParser.newEpisode(this, href, label, poster)
+                }
 
             newTvSeriesLoadResponse(title, canonicalUrl, TvType.TvSeries, episodes) {
                 this.posterUrl = poster

@@ -33,8 +33,7 @@ class FilmapikProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val path = request.data.takeIf { it.isNotBlank() }?.format(page)?.let { "/$it" }.orEmpty()
-        val document = app.get("$mainUrl$path").document
+        val document = app.get(FilmapikCatalogParser.pageUrl(mainUrl, request.data, page)).document
         return newHomePageResponse(request.name, document.toMovieResults())
     }
 
@@ -273,6 +272,19 @@ internal data class FilmapikMediaSource(
     val url: String,
     val quality: Int
 )
+
+internal object FilmapikCatalogParser {
+    fun pageUrl(baseUrl: String, route: String, page: Int): String {
+        val safePage = page.coerceAtLeast(1)
+        val normalizedBaseUrl = baseUrl.trimEnd('/')
+        val path = if (route.isBlank()) {
+            if (safePage == 1) "/" else "/page/$safePage"
+        } else {
+            "/${route.format(safePage).trimStart('/')}"
+        }
+        return "$normalizedBaseUrl$path"
+    }
+}
 
 internal object FilmapikPlayerParser {
     private val legacyHosts = setOf("filmapik.to", "filmapik.fitness")

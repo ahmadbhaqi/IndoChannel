@@ -134,6 +134,36 @@ class RotatingMovieProviderRegressionTest {
     }
 
     @Test
+    fun `ngefilm and pusatfilm keep episode links when only the slug has season and episode`() {
+        val providers = listOf(
+            Triple("NgefilmProvider.kt", "https://new39.ngefilm.site", NgefilmProvider()),
+            Triple("PusatfilmProvider.kt", "https://v4.pusatfilm21info.com", PusatfilmProvider())
+        )
+
+        providers.forEach { (fileName, baseUrl, provider) ->
+            val episodeUrl = "$baseUrl/eps/example-season-2-episode-7/"
+            val parsed = DutamoviePlayerParser.newEpisode(
+                api = provider,
+                href = episodeUrl,
+                label = "Lihat Episode",
+                poster = "https://image.example/poster.jpg"
+            )
+
+            assertEquals(episodeUrl, parsed?.data)
+            assertEquals("Episode 7", parsed?.name)
+            assertEquals(2, parsed?.season)
+            assertEquals(7, parsed?.episode)
+            assertEquals("https://image.example/poster.jpg", parsed?.posterUrl)
+
+            val source = File(sourceRoot, fileName).readText()
+            assertTrue(
+                source.contains("DutamoviePlayerParser.newEpisode(this, href, label, poster)"),
+                "$fileName must use the shared, directly tested episode mapper"
+            )
+        }
+    }
+
+    @Test
     fun `dutamovie does not infer mirror host from mutable player numbers`() {
         val pages = listOf(
             "https://austincomputerworks.org/movie/?player=1",

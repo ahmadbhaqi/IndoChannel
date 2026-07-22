@@ -106,14 +106,7 @@ class DutamovieProvider : MainAPI() {
                     href.substringBefore('?').substringBefore('#').trimEnd('/') ==
                     canonicalUrl.substringBefore('?').substringBefore('#').trimEnd('/')
                 ) return@mapNotNull null
-                val numbers = DutamoviePlayerParser.episodeNumbers(href, label)
-                val epNum = numbers.episode ?: return@mapNotNull null
-                newEpisode(href) {
-                    this.name = "Episode $epNum"
-                    this.season = numbers.season
-                    this.episode = epNum
-                    this.posterUrl = poster
-                }
+                DutamoviePlayerParser.newEpisode(this, href, label, poster)
             }.distinctBy { it.data }
             newTvSeriesLoadResponse(title, canonicalUrl, TvType.TvSeries, episodes) {
                 posterUrl = poster; this.year = year; plot = description; this.tags = tags; addActors(actors); addTrailer(trailer)
@@ -291,6 +284,17 @@ internal object DutamoviePlayerParser {
                 .find(path)?.groupValues?.getOrNull(1)?.toIntOrNull()
         return EpisodeNumbers(season, episode)
     }
+
+    fun newEpisode(api: MainAPI, href: String, label: String, poster: String?) =
+        episodeNumbers(href, label).let { numbers ->
+            val episode = numbers.episode ?: return@let null
+            api.newEpisode(href) {
+                name = "Episode $episode"
+                season = numbers.season
+                this.episode = episode
+                posterUrl = poster
+            }
+        }
 
     fun detailMediaUrls(document: Document, detailUrl: String): List<String> {
         return pageMediaUrls(document, detailUrl)

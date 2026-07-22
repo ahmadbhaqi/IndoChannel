@@ -17,6 +17,85 @@ import kotlin.test.assertTrue
 
 class IdlixProviderLiveTest {
     @Test
+    fun `idlix exposes every Young Sheldon season and episode`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val provider = IdlixProvider()
+        val detail = withTimeout(90_000) {
+            provider.load("${provider.mainUrl}/series/young-sheldon-2017")
+        } as? TvSeriesLoadResponse
+        val counts = detail?.episodes.orEmpty()
+            .groupingBy { it.season }
+            .eachCount()
+            .toSortedMap(compareBy(nullsFirst()) { it })
+
+        assertTrue(
+            counts == mapOf<Int?, Int>(
+                1 to 22,
+                2 to 22,
+                3 to 21,
+                4 to 18,
+                5 to 22,
+                6 to 22,
+                7 to 14
+            ),
+            "IDLIX Young Sheldon episode matrix was incomplete: $counts"
+        )
+        val expectedBySeason = mapOf(1 to 22, 2 to 22, 3 to 21, 4 to 18, 5 to 22, 6 to 22, 7 to 14)
+        expectedBySeason.forEach { (season, expectedCount) ->
+            val actualEpisodes = detail?.episodes.orEmpty()
+                .filter { it.season == season }
+                .mapNotNull { it.episode }
+                .toSet()
+            assertTrue(
+                actualEpisodes == (1..expectedCount).toSet(),
+                "IDLIX Young Sheldon season $season episode numbers were incomplete: $actualEpisodes"
+            )
+        }
+    }
+
+    @Test
+    fun `idlix Young Sheldon episode keeps Indonesian subtitles with its stream`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val provider = IdlixProvider()
+        val detail = withTimeout(90_000) {
+            provider.load("${provider.mainUrl}/series/young-sheldon-2017")
+        } as? TvSeriesLoadResponse
+        val episode = detail?.episodes.orEmpty().firstOrNull {
+            it.season == 1 && it.episode == 1
+        }
+        assertTrue(episode != null, "IDLIX Young Sheldon S1E1 was missing")
+
+        val links = mutableListOf<ExtractorLink>()
+        val subtitles = mutableListOf<SubtitleFile>()
+        val loaded = withTimeout(105_000) {
+            provider.loadLinks(episode!!.data, false, subtitles::add, links::add)
+        }
+
+        assertTrue(
+            loaded && links.any(::isSignedPlaybackLink),
+            "IDLIX Young Sheldon S1E1 emitted no signed playback stream"
+        )
+        assertTrue(
+            subtitles.isNotEmpty() && subtitles.all { it.lang == "id" },
+            "IDLIX Young Sheldon S1E1 subtitles were missing or not Indonesian: " +
+                subtitles.map { it.lang }
+        )
+        val subtitleCodes = subtitles.map { probeSubtitle(it) }
+        assertTrue(
+            subtitleCodes.any { it in 200..299 },
+            "IDLIX Young Sheldon S1E1 subtitle URLs were unreachable: $subtitleCodes"
+        )
+    }
+
+    @Test
     fun `idlix current movie matrix reports every playback outcome`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
             org.junit.Assume.assumeTrue(false)
@@ -131,6 +210,10 @@ class IdlixProviderLiveTest {
         assertTrue(
             resolvedSubtitles.isNotEmpty(),
             "IDLIX emitted no subtitles for the search-only movie flow: $attempts"
+        )
+        assertTrue(
+            resolvedSubtitles.all { it.lang == "id" },
+            "IDLIX emitted non-Indonesian subtitle tracks: ${resolvedSubtitles.map { it.lang }}"
         )
         assertTrue(
             resolvedSubtitles.all { subtitle ->

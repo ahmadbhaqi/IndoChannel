@@ -11,7 +11,61 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.runBlocking
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.URI
+
+internal data class OtakudesuEpisodeEntry(
+    val href: String,
+    val number: Int
+)
+
+internal object OtakudesuEpisodeParser {
+    private val episodePath = Regex("(?i)(?:^|/)episode(?:/|$)")
+    private val labelNumber = Regex(
+        "(?i)(?:episode|eps?|ep)[-\\s._:]*(\\d+)"
+    )
+    private val pathNumber = Regex(
+        "(?i)(?:^|[-/_.])(?:episode|eps?|ep)[-_.]*(\\d+)(?=$|[-/_.])"
+    )
+
+    fun episodes(document: Document): List<OtakudesuEpisodeEntry> =
+        document.select("div.episodelist ul > li a")
+            .mapNotNull { link ->
+                val href = link.attr("href").trim().takeIf(String::isNotBlank)
+                    ?: return@mapNotNull null
+                if (!isProviderEpisodeLink(href, document.baseUri())) {
+                    return@mapNotNull null
+                }
+                val label = link.attr("title").ifBlank { link.text() }
+                val number = labelNumber.find(label)
+                    ?.groupValues
+                    ?.getOrNull(1)
+                    ?.toIntOrNull()
+                    ?: pathNumber.find(href)
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.toIntOrNull()
+                    ?: return@mapNotNull null
+                OtakudesuEpisodeEntry(href, number)
+            }
+            .distinctBy(OtakudesuEpisodeEntry::href)
+
+    private fun isProviderEpisodeLink(href: String, baseUri: String): Boolean =
+        runCatching {
+            val uri = URI(href)
+            if (!episodePath.containsMatchIn(uri.path.orEmpty())) {
+                return@runCatching false
+            }
+            if (uri.scheme != null && uri.scheme.lowercase() !in setOf("http", "https")) {
+                return@runCatching false
+            }
+
+            val linkHost = uri.host ?: return@runCatching uri.rawAuthority == null
+            val providerHost = URI(baseUri).host ?: return@runCatching false
+            linkHost.equals(providerHost, ignoreCase = true)
+        }.getOrDefault(false)
+}
 
 class OtakudesuProvider : MainAPI() {
     override var mainUrl = "https://otakudesu.blog/"
@@ -63,11 +117,11 @@ class OtakudesuProvider : MainAPI() {
         val year = Regex("\\d, (\\d*)").find(document.select("div.infozingle > p:nth-child(9) > span").text())?.groupValues?.get(1)?.toIntOrNull()
         val status = getStatus(document.selectFirst("div.infozingle > p:nth-child(6) > span")!!.ownText().replace(":", "").trim())
         val description = document.select("div.sinopc > p").text()
-        val episodes = document.select("div.episodelist")[1].select("ul > li").mapNotNull {
-            val name = it.selectFirst("a")?.text() ?: return@mapNotNull null
-            val episode = Regex("Episode\\s?(\\d+)").find(name)?.groupValues?.getOrNull(0) ?: it.selectFirst("a")?.text()
-            val link = fixUrl(it.selectFirst("a")!!.attr("href"))
-            newEpisode(link) { this.episode = episode?.toIntOrNull() }
+        val episodes = OtakudesuEpisodeParser.episodes(document).map { entry ->
+            newEpisode(fixUrl(entry.href)) {
+                name = "Episode ${entry.number}"
+                episode = entry.number
+            }
         }.reversed()
         val tracker = APIHolder.getTracker(listOf(title), TrackerType.getTypes(type), year, true)
         return newAnimeLoadResponse(title, url, type) {

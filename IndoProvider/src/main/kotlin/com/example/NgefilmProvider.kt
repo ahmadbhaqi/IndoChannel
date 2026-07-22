@@ -99,17 +99,9 @@ class NgefilmProvider : MainAPI() {
                 .mapNotNull { eps ->
                     val href = normalizePageUrl(eps.attr("href")) ?: return@mapNotNull null
                     val rawTitle = eps.attr("title").takeIf { it.isNotBlank() } ?: eps.text()
-                    val cleanTitle = rawTitle.replaceFirst(Regex("(?i)Permalink ke\\s*"), "").trim()
-                    val epNum = Regex("Episode\\s*(\\d+)").find(cleanTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                        ?: cleanTitle.split(" ").lastOrNull()?.filter { it.isDigit() }?.toIntOrNull()
-                    val formattedName = epNum?.let { "Episode $it" } ?: cleanTitle
-
-                    newEpisode(href) {
-                        this.name = formattedName
-                        this.episode = epNum
-                        this.posterUrl = poster
-                    }
-                }.filter { it.episode != null }
+                    val label = rawTitle.replaceFirst(Regex("(?i)Permalink ke\\s*"), "").trim()
+                    DutamoviePlayerParser.newEpisode(this, href, label, poster)
+                }
 
             newTvSeriesLoadResponse(title, canonicalUrl, TvType.TvSeries, episodes) {
                 this.posterUrl = poster

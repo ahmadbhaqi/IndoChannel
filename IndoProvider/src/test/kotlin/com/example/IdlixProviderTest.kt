@@ -14,6 +14,11 @@ class IdlixProviderTest {
     private val mapper = jacksonObjectMapper()
 
     @Test
+    fun `provider display name uses normal capitalization`() {
+        assertEquals("Idlix", IdlixProvider().name)
+    }
+
+    @Test
     fun `dedicated series catalog hint survives missing contentType field`() {
         val node = mapper.readTree(
             """
@@ -66,6 +71,92 @@ class IdlixProviderTest {
             "https://z2.idlixku.com/series/the-vampire-lestat-2026",
             IdlixParser.searchResult(IdlixProvider(), node, "series")?.url
         )
+    }
+
+    @Test
+    fun `search pagination continues until every reported result is covered`() {
+        assertTrue(
+            IdlixParser.shouldLoadNextSearchPage(
+                total = 200,
+                loadedCount = 30,
+                currentPageCount = 30,
+                currentPage = 1
+            )
+        )
+        assertFalse(
+            IdlixParser.shouldLoadNextSearchPage(
+                total = 30,
+                loadedCount = 30,
+                currentPageCount = 30,
+                currentPage = 1
+            )
+        )
+        assertFalse(
+            IdlixParser.shouldLoadNextSearchPage(
+                total = 200,
+                loadedCount = 42,
+                currentPageCount = 12,
+                currentPage = 2
+            )
+        )
+        assertFalse(
+            IdlixParser.shouldLoadNextSearchPage(
+                total = 5_000,
+                loadedCount = 600,
+                currentPageCount = 30,
+                currentPage = 20
+            )
+        )
+    }
+
+    @Test
+    fun `search pager carries cookies deduplicates in order and stops on repeated pages`() = runBlocking {
+        val requests = mutableListOf<Triple<Int, Map<String, String>, Long>>()
+        var nowMs = 0L
+
+        val results = IdlixSearchPager.collect(
+            pageSize = 2,
+            maxPages = 10,
+            budgetMs = 1_000L,
+            nowMs = { nowMs },
+            key = { it }
+        ) { page, cookies, timeoutMs ->
+            requests += Triple(page, cookies, timeoutMs)
+            nowMs += 100L
+            when (page) {
+                1 -> IdlixSearchPager.Page(listOf("alpha", "beta"), 10, mapOf("session" to "one"))
+                2 -> IdlixSearchPager.Page(listOf("beta", "gamma"), 10, mapOf("session" to "two"))
+                else -> IdlixSearchPager.Page(listOf("beta", "gamma"), 10, mapOf("session" to "three"))
+            }
+        }
+
+        assertEquals(listOf("alpha", "beta", "gamma"), results)
+        assertEquals(listOf(1, 2, 3), requests.map { it.first })
+        assertEquals(emptyMap(), requests[0].second)
+        assertEquals(mapOf("session" to "one"), requests[1].second)
+        assertEquals(mapOf("session" to "two"), requests[2].second)
+        assertEquals(listOf(1_000L, 900L, 800L), requests.map { it.third })
+    }
+
+    @Test
+    fun `search pager enforces one aggregate deadline across all pages`() = runBlocking {
+        val requestedPages = mutableListOf<Int>()
+        var nowMs = 0L
+
+        val results = IdlixSearchPager.collect(
+            pageSize = 1,
+            maxPages = 20,
+            budgetMs = 50L,
+            nowMs = { nowMs },
+            key = { it }
+        ) { page, _, _ ->
+            requestedPages += page
+            nowMs = 50L
+            IdlixSearchPager.Page(listOf("only-result"), 200, emptyMap())
+        }
+
+        assertEquals(listOf("only-result"), results)
+        assertEquals(listOf(1), requestedPages)
     }
 
     @Test
@@ -128,6 +219,8 @@ class IdlixProviderTest {
             """
             #EXTM3U
             #EXT-X-MEDIA:TYPE=SUBTITLES,URI="/v/z2/video-id/sub/id.vtt",GROUP-ID="subs",LANGUAGE="id",NAME="Bahasa Indonesia",DEFAULT=YES
+            #EXT-X-MEDIA:TYPE=SUBTITLES,URI="/v/z2/video-id/sub/en.vtt",GROUP-ID="subs",LANGUAGE="en",NAME="English"
+            #EXT-X-MEDIA:TYPE=SUBTITLES,URI="/v/z2/video-id/sub/unknown.vtt",GROUP-ID="subs",NAME="Subtitle"
             #EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,SUBTITLES="subs"
             /v/z2/video-id/p/key/video-720.json
             """.trimIndent(),
@@ -316,6 +409,8 @@ class IdlixProviderTest {
               "subtitles": [
                 {"label":"Bahasa Indonesia","lang":"id","path":"/v/z2/video-id/sub/id.vtt"},
                 {"lang":"en","url":"https://e2e.majorplay.net/v/z2/video-id/sub/en.vtt"},
+                {"label":"Indonesian","lang":"en","path":"/v/z2/video-id/sub/conflict.vtt"},
+                {"path":"/v/z2/video-id/sub/unknown.vtt"},
                 {"label":"Wrong video","path":"/v/z2/other-id/sub/id.vtt"},
                 {"label":"Foreign","path":"https://evil.example/sub/id.vtt"}
               ]
@@ -330,11 +425,6 @@ class IdlixProviderTest {
                     "Bahasa Indonesia",
                     "https://e2e.majorplay.net/v/z2/video-id/sub/id.vtt" +
                         "?t=signed-token&pm=browser"
-                ),
-                IdlixParser.SubtitleTrack(
-                    "en",
-                    "https://e2e.majorplay.net/v/z2/video-id/sub/en.vtt" +
-                        "?t=signed-token&pm=browser"
                 )
             ),
             tracks
@@ -346,6 +436,7 @@ class IdlixProviderTest {
             "Origin" to "https://z2.idlixku.com"
         )
         val subtitle = newIdlixSubtitleFile(tracks.first(), headers)
+        assertEquals("id", subtitle.lang)
         assertEquals(headers, subtitle.headers)
     }
 
@@ -549,6 +640,97 @@ class IdlixProviderTest {
                 "https://z2.idlixku.com/series/the-east-palace-2026"
             ),
             IdlixParser.decodePlayback(episodes.single().data, "https://z2.idlixku.com")
+        )
+    }
+
+    @Test
+    fun `series parser unwraps the current season endpoint response`() {
+        val response = mapper.readTree(
+            """
+            {
+              "series": {
+                "id": "70df8519-3b7a-4d8d-9640-f2f05bfb0a5c",
+                "slug": "young-sheldon-2017"
+              },
+              "season": {
+                "id": "ecd7f050-7df7-4632-9502-d91712de9170",
+                "seasonNumber": 1,
+                "episodeCount": 22,
+                "episodes": [
+                  {
+                    "id": "9ca1e44e-b846-43a0-90c6-e92a50f15523",
+                    "episodeNumber": 1,
+                    "name": "Pilot",
+                    "isPublished": true,
+                    "hasVideo": true
+                  },
+                  {
+                    "id": "50a45345-d8a1-494b-8bb9-a46e851fb8f3",
+                    "episodeNumber": 22,
+                    "name": "Vanilla Ice Cream",
+                    "isPublished": true,
+                    "hasVideo": true
+                  }
+                ]
+              }
+            }
+            """.trimIndent()
+        )
+
+        val episodes = IdlixParser.episodes(
+            IdlixProvider(),
+            response,
+            1,
+            "https://z2.idlixku.com/series/young-sheldon-2017"
+        )
+
+        assertEquals(listOf(1, 22), episodes.mapNotNull { it.episode })
+        assertTrue(episodes.all { it.season == 1 })
+    }
+
+    @Test
+    fun `invalid season endpoint payload falls back to the matching embedded season`() {
+        val fallback = mapper.readTree(
+            """
+            {
+              "seasonNumber": 1,
+              "episodes": [
+                {
+                  "id": "9ca1e44e-b846-43a0-90c6-e92a50f15523",
+                  "episodeNumber": 1,
+                  "isPublished": true,
+                  "hasVideo": true
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+        val invalidCandidates = listOf(
+            mapper.readTree("""{"error":"temporarily unavailable"}"""),
+            mapper.readTree("""{"season":{"seasonNumber":1}}"""),
+            mapper.readTree("""{"season":{"seasonNumber":2,"episodes":[]}}""")
+        )
+
+        invalidCandidates.forEach { endpoint ->
+            assertEquals(
+                fallback,
+                IdlixParser.selectSeasonPayload(endpoint, fallback, expectedSeasonNumber = 1)
+            )
+        }
+    }
+
+    @Test
+    fun `matching endpoint season payload takes precedence over embedded fallback`() {
+        val endpoint = mapper.readTree(
+            """{"season":{"seasonNumber":1,"episodes":[]}}"""
+        )
+        val fallback = mapper.readTree(
+            """{"seasonNumber":1,"episodes":[{"episodeNumber":1}]}"""
+        )
+
+        assertEquals(
+            endpoint,
+            IdlixParser.selectSeasonPayload(endpoint, fallback, expectedSeasonNumber = 1)
         )
     }
 }

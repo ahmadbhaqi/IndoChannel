@@ -64,14 +64,17 @@ class KitanontonPlayerParserTest {
             api = KitanontonProvider(),
             subtitleCallback = {},
             callback = {},
-            candidateTimeoutMs = 50L,
+            candidateTimeoutMs = 100L,
             sessionTimeoutMs = 500L
         )
 
         val result = resolver.withinBudget {
-            KitanontonPlayerParser.retryPageFetch(attempts = 2) {
+            KitanontonPlayerParser.retryPageFetch(attempts = 3) {
                 attempts++
-                delay(30L)
+                // Enter the second attempt deterministically, then let the
+                // candidate deadline cancel it. A swallowed cancellation
+                // would incorrectly start the third attempt.
+                if (attempts == 2) delay(5_000L)
                 null
             }
         }

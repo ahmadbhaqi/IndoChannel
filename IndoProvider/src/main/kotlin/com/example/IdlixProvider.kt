@@ -49,18 +49,73 @@ private const val IDLIX_MAX_JSON_BYTES = 2_000_000
 private const val IDLIX_MAX_HTML_BYTES = 2_000_000
 private const val IDLIX_MAX_MANIFEST_BYTES = 500_000
 private const val IDLIX_MAX_GATE_WAIT_MS = 20_000L
-private const val IDLIX_MAX_SEASONS = 30
 private const val IDLIX_SEASON_CONCURRENCY = 4
 private const val IDLIX_MAX_STREAMS = 6
+private const val IDLIX_SEARCH_PAGE_SIZE = 30
+private const val IDLIX_MAX_SEARCH_PAGES = 20
+private const val IDLIX_SEARCH_BUDGET_MS = 30_000L
 private const val IDLIX_JSON_MEDIA_TYPE = "application/json;charset=UTF-8"
 private const val IDLIX_PLAYBACK_PATH = "/__idlix_playback__/"
 private const val IDLIX_USER_AGENT =
     "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
+internal object IdlixSearchPager {
+    data class Page<T>(
+        val items: List<T>,
+        val total: Int,
+        val cookies: Map<String, String>,
+        val receivedCount: Int = items.size
+    )
+
+    suspend fun <T, K> collect(
+        pageSize: Int,
+        maxPages: Int,
+        budgetMs: Long,
+        nowMs: () -> Long = { System.nanoTime() / 1_000_000L },
+        key: (T) -> K,
+        fetch: suspend (page: Int, cookies: Map<String, String>, timeoutMs: Long) -> Page<T>?
+    ): List<T> {
+        if (pageSize <= 0 || maxPages <= 0 || budgetMs <= 0L) return emptyList()
+        val startedAt = nowMs()
+        val results = mutableListOf<T>()
+        val seenKeys = LinkedHashSet<K>()
+        var cookies = emptyMap<String, String>()
+        var page = 1
+        var loadedCount = 0
+
+        while (page <= maxPages) {
+            val elapsedMs = (nowMs() - startedAt).coerceAtLeast(0L)
+            val remainingMs = budgetMs - elapsedMs
+            if (remainingMs <= 0L) break
+            val response = withTimeoutOrNull(remainingMs) {
+                fetch(page, cookies, remainingMs)
+            } ?: break
+            cookies = response.cookies
+            val previousUniqueCount = seenKeys.size
+            response.items.forEach { item ->
+                if (seenKeys.add(key(item))) results += item
+            }
+            loadedCount += response.receivedCount
+            if (seenKeys.size == previousUniqueCount ||
+                !IdlixParser.shouldLoadNextSearchPage(
+                    total = response.total,
+                    loadedCount = loadedCount,
+                    currentPageCount = response.receivedCount,
+                    currentPage = page,
+                    pageSize = pageSize,
+                    maxPages = maxPages
+                )
+            ) break
+            page++
+        }
+        return results
+    }
+}
+
 class IdlixProvider : MainAPI() {
     override var mainUrl = "https://z2.idlixku.com"
-    override var name = "IDLIX"
+    override var name = "Idlix"
     override var lang = "id"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AsianDrama)
@@ -92,20 +147,39 @@ class IdlixProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val clean = query.trim().takeIf { it.isNotBlank() } ?: return emptyList()
         val encoded = URLEncoder.encode(clean, Charsets.UTF_8.name())
-        val root = apiGetJson(
-            "/search?q=$encoded&page=1&limit=30",
-            "$mainUrl/search?q=$encoded"
-        )?.node ?: return emptyList()
-        return root.path("results")
-            .takeIf(JsonNode::isArray)
-            ?.mapNotNull { IdlixParser.searchResult(this@IdlixProvider, it) }
-            .orEmpty()
+        val referer = "$mainUrl/search?q=$encoded"
+        return IdlixSearchPager.collect<SearchResponse, String>(
+            pageSize = IDLIX_SEARCH_PAGE_SIZE,
+            maxPages = IDLIX_MAX_SEARCH_PAGES,
+            budgetMs = IDLIX_SEARCH_BUDGET_MS,
+            key = SearchResponse::url
+        ) { page, cookies, timeoutMs ->
+            val response = apiGetJson(
+                "/search?q=$encoded&page=$page&limit=$IDLIX_SEARCH_PAGE_SIZE",
+                referer,
+                cookies,
+                timeoutMs = timeoutMs
+            ) ?: return@collect null
+            val pageNodes = response.node.path("results")
+                .takeIf(JsonNode::isArray)
+                ?.toList()
+                .orEmpty()
+            IdlixSearchPager.Page(
+                items = pageNodes.mapNotNull {
+                    IdlixParser.searchResult(this@IdlixProvider, it)
+                },
+                total = response.node.path("total").asInt(-1),
+                cookies = response.cookies,
+                receivedCount = pageNodes.size
+            )
+        }
     }
 
     override suspend fun load(url: String): LoadResponse? {
         val page = IdlixParser.contentPage(url, mainUrl) ?: return null
         val endpoint = if (page.type == "movie") "movies" else "series"
-        val root = apiGetJson("/$endpoint/${page.slug}", page.url)?.node ?: return null
+        val detail = apiGetJson("/$endpoint/${page.slug}", page.url) ?: return null
+        val root = detail.node
         val title = root.textOrNull("title") ?: return null
         val contentId = root.textOrNull("id")?.takeIf(IdlixParser::isUuid) ?: return null
         val year = (root.textOrNull("releaseDate") ?: root.textOrNull("firstAirDate"))
@@ -143,7 +217,7 @@ class IdlixProvider : MainAPI() {
             }
         }
 
-        val episodes = loadSeriesEpisodes(root, page)
+        val episodes = loadSeriesEpisodes(root, page, detail.cookies)
         return newTvSeriesLoadResponse(title, page.url, TvType.TvSeries, episodes) {
             posterUrl = poster
             this.year = year
@@ -154,12 +228,15 @@ class IdlixProvider : MainAPI() {
         }
     }
 
-    private suspend fun loadSeriesEpisodes(root: JsonNode, page: IdlixParser.ContentPage) =
+    private suspend fun loadSeriesEpisodes(
+        root: JsonNode,
+        page: IdlixParser.ContentPage,
+        cookies: Map<String, String>
+    ) =
         coroutineScope {
             val seasons = root.path("seasons")
                 .takeIf(JsonNode::isArray)
                 ?.filter { season -> season.path("isPublished").asBoolean(true) }
-                ?.take(IDLIX_MAX_SEASONS)
                 .orEmpty()
             val defaultSeason = root.path("defaultSeason")
                 .takeUnless(JsonNode::isMissingNode)
@@ -170,12 +247,19 @@ class IdlixProvider : MainAPI() {
                     semaphore.withPermit {
                         val number = season.path("seasonNumber").asInt(-1).takeIf { it >= 0 }
                             ?: return@withPermit emptyList()
-                        val seasonNode = defaultSeason
-                            ?.takeIf { it.path("seasonNumber").asInt(-1) == number }
-                            ?: apiGetJson(
+                        // The embedded defaultSeason may be only a preview. Prefer
+                        // the dedicated endpoint for every season and keep the
+                        // embedded payload solely as a network-failure fallback.
+                        val endpointSeason = apiGetJson(
                                 "/series/${page.slug}/season/$number",
-                                page.url
+                                page.url,
+                                cookies
                             )?.node
+                        val seasonNode = IdlixParser.selectSeasonPayload(
+                            endpointSeason,
+                            defaultSeason,
+                            number
+                        )
                             ?: return@withPermit emptyList()
                         IdlixParser.episodes(this@IdlixProvider, seasonNode, number, page.url)
                     }
@@ -347,36 +431,43 @@ class IdlixProvider : MainAPI() {
         path: String,
         referer: String,
         cookies: Map<String, String> = emptyMap(),
-        retryWithPreflight: Boolean = true
+        retryWithPreflight: Boolean = true,
+        timeoutMs: Long = IDLIX_API_TIMEOUT_SECONDS * 1_000L
     ): ApiResult? {
-        suspend fun request(requestCookies: Map<String, String>): ApiResult? {
-            val response = try {
-                app.get(
-                    "$apiUrl$path",
-                    referer = referer,
-                    headers = browserHeaders(referer) + cookieHeaders(requestCookies),
-                    timeout = IDLIX_API_TIMEOUT_SECONDS,
-                    interceptor = cloudflareKiller
-                )
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                return null
-            }
-            val text = response.text
-            if (
-                response.code !in 200..299 ||
-                text.length !in 2..IDLIX_MAX_JSON_BYTES ||
-                text.trimStart().firstOrNull() !in setOf('{', '[')
-            ) return null
-            val node = runCatching { mapper.readTree(text) }.getOrNull() ?: return null
-            return ApiResult(node, requestCookies + response.cookies)
-        }
+        if (timeoutMs <= 0L) return null
+        return withTimeoutOrNull(timeoutMs) {
+            val requestTimeoutSeconds = ((timeoutMs + 999L) / 1_000L)
+                .coerceIn(1L, IDLIX_API_TIMEOUT_SECONDS)
 
-        request(cookies)?.let { return it }
-        if (!retryWithPreflight) return null
-        val pageCookies = preflightPage(referer) ?: return null
-        return request(cookies + pageCookies)
+            suspend fun request(requestCookies: Map<String, String>): ApiResult? {
+                val response = try {
+                    app.get(
+                        "$apiUrl$path",
+                        referer = referer,
+                        headers = browserHeaders(referer) + cookieHeaders(requestCookies),
+                        timeout = requestTimeoutSeconds,
+                        interceptor = cloudflareKiller
+                    )
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    return null
+                }
+                val text = response.text
+                if (
+                    response.code !in 200..299 ||
+                    text.length !in 2..IDLIX_MAX_JSON_BYTES ||
+                    text.trimStart().firstOrNull() !in setOf('{', '[')
+                ) return null
+                val node = runCatching { mapper.readTree(text) }.getOrNull() ?: return null
+                return ApiResult(node, requestCookies + response.cookies)
+            }
+
+            request(cookies)?.let { return@withTimeoutOrNull it }
+            if (!retryWithPreflight) return@withTimeoutOrNull null
+            val pageCookies = preflightPage(referer) ?: return@withTimeoutOrNull null
+            request(cookies + pageCookies)
+        }
     }
 
     private suspend fun apiPostJson(
@@ -481,7 +572,7 @@ internal suspend fun newIdlixMasterLink(
 internal suspend fun newIdlixSubtitleFile(
     track: IdlixParser.SubtitleTrack,
     headers: Map<String, String>
-): SubtitleFile = newSubtitleFile(track.label, track.url) {
+): SubtitleFile = newSubtitleFile("id", track.url) {
     this.headers = headers
 }
 
@@ -522,6 +613,20 @@ internal object IdlixParser {
         val audioUrls: List<String>,
         val subtitles: List<SubtitleTrack>
     )
+
+    fun shouldLoadNextSearchPage(
+        total: Int,
+        loadedCount: Int,
+        currentPageCount: Int,
+        currentPage: Int,
+        pageSize: Int = IDLIX_SEARCH_PAGE_SIZE,
+        maxPages: Int = IDLIX_MAX_SEARCH_PAGES
+    ): Boolean =
+        pageSize > 0 &&
+            maxPages > 0 &&
+            currentPage in 1 until maxPages &&
+            currentPageCount >= pageSize &&
+            (total < 0 || loadedCount < total)
 
     fun playerStreams(manifest: MasterManifest): List<Stream> = manifest.streams
         .filter { stream ->
@@ -711,8 +816,7 @@ internal object IdlixParser {
     }
 
     fun episodes(api: MainAPI, seasonNode: JsonNode, seasonNumber: Int, pageUrl: String) =
-        seasonNode.path("episodes")
-            .takeIf(JsonNode::isArray)
+        episodeArray(seasonNode)
             ?.mapNotNull { episode ->
                 if (!episode.path("isPublished").asBoolean(true) ||
                     !episode.path("hasVideo").asBoolean(false)) return@mapNotNull null
@@ -728,6 +832,30 @@ internal object IdlixParser {
                 }
             }
             .orEmpty()
+
+    fun selectSeasonPayload(
+        endpoint: JsonNode?,
+        fallback: JsonNode?,
+        expectedSeasonNumber: Int
+    ): JsonNode? = endpoint
+        ?.takeIf { isValidSeasonPayload(it, expectedSeasonNumber) }
+        ?: fallback?.takeIf { isValidSeasonPayload(it, expectedSeasonNumber) }
+
+    private fun isValidSeasonPayload(candidate: JsonNode, expectedSeasonNumber: Int): Boolean {
+        val payload = candidate.path("season").takeIf(JsonNode::isObject) ?: candidate
+        val episodes = payload.path("episodes")
+        if (!episodes.isArray) return false
+        val suppliedSeasonNumber = payload.path("seasonNumber")
+            .takeUnless(JsonNode::isMissingNode)
+            ?.takeUnless(JsonNode::isNull)
+            ?.asInt(Int.MIN_VALUE)
+        return suppliedSeasonNumber == null || suppliedSeasonNumber == expectedSeasonNumber
+    }
+
+    private fun episodeArray(candidate: JsonNode): JsonNode? {
+        val payload = candidate.path("season").takeIf(JsonNode::isObject) ?: candidate
+        return payload.path("episodes").takeIf(JsonNode::isArray)
+    }
 
     fun tmdbImage(path: String?, size: String): String? = path
         ?.trim()
@@ -746,13 +874,13 @@ internal object IdlixParser {
         val subtitles = lines.mapNotNull { line ->
             if (!line.startsWith("#EXT-X-MEDIA:", ignoreCase = true) ||
                 !line.contains("TYPE=SUBTITLES", ignoreCase = true)) return@mapNotNull null
+            val language = attribute(line, "LANGUAGE")
+            val label = attribute(line, "NAME") ?: language
+            if (!isIndonesianSubtitle(language, label)) return@mapNotNull null
             val url = attribute(line, "URI")
                 ?.let { tokenizedAsset(it, masterUrl) }
                 ?: return@mapNotNull null
-            val label = attribute(line, "NAME")
-                ?: attribute(line, "LANGUAGE")
-                ?: "Subtitle"
-            SubtitleTrack(label, url)
+            SubtitleTrack(label ?: "Bahasa Indonesia", url)
         }.distinctBy(SubtitleTrack::url).take(32)
 
         val hasVariantDeclarations = lines.any {
@@ -859,13 +987,37 @@ internal object IdlixParser {
                     ?: subtitle.textOrNull("file")
                     ?: return@mapNotNull null
                 val url = signedPlaybackAsset(masterUrl, raw) ?: return@mapNotNull null
-                val label = subtitle.textOrNull("label")
-                    ?: subtitle.textOrNull("lang")
-                    ?: "Subtitle"
-                SubtitleTrack(label, url)
+                val language = subtitle.textOrNull("lang")
+                    ?: subtitle.textOrNull("language")
+                val label = subtitle.textOrNull("label") ?: language
+                if (!isIndonesianSubtitle(language, label)) return@mapNotNull null
+                SubtitleTrack(label ?: "Bahasa Indonesia", url)
             }
             ?.distinctBy(SubtitleTrack::url)
             .orEmpty()
+
+    private fun isIndonesianSubtitle(language: String?, label: String?): Boolean {
+        fun normalized(raw: String?): String? = raw
+            ?.trim()
+            ?.lowercase()
+            ?.replace('_', '-')
+            ?.replace(Regex("\\s+"), " ")
+            ?.takeIf(String::isNotBlank)
+
+        fun matches(value: String): Boolean =
+            value == "id" ||
+                value.startsWith("id-") ||
+                value in setOf("in", "ind", "indonesian", "indonesia", "bahasa indonesia") ||
+                value.contains("bahasa indonesia") ||
+                Regex("(?:^|[^a-z])indonesian(?:[^a-z]|$)").containsMatchIn(value)
+
+        val explicitLanguage = normalized(language)
+        return if (explicitLanguage != null) {
+            matches(explicitLanguage)
+        } else {
+            normalized(label)?.let(::matches) == true
+        }
+    }
 
     fun isTrustedRedeemUrl(raw: String): Boolean = trustedUri(raw) { uri ->
         val host = uri.host.orEmpty().lowercase()
