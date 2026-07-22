@@ -15,13 +15,13 @@ import kotlin.test.assertTrue
 class ContentXPlayerParserTest {
     private val mapper = jacksonObjectMapper()
     private val playerUrl = "https://playerngefilm21.rpmlive.online/#oe5w9x"
-    private val providerUrl = "https://new38.ngefilm.site/gangland-2025/"
+    private val providerUrl = "https://new39.ngefilm.site/gangland-2025/"
 
     @Test
     fun `builds the current encrypted video endpoint from a fragment embed`() {
         assertEquals(
             "https://playerngefilm21.rpmlive.online/api/v1/video" +
-                "?id=oe5w9x&w=1920&h=1080&r=new38.ngefilm.site",
+                "?id=oe5w9x&w=1920&h=1080&r=new39.ngefilm.site",
             ContentXPlayerParser.apiUrl(playerUrl, providerUrl)
         )
         assertNull(ContentXPlayerParser.apiUrl("https://playerngefilm21.rpmlive.online/", providerUrl))

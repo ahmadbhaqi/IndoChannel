@@ -28,7 +28,7 @@ class ProviderDomainTest {
     fun `new movie providers use requested domains`() {
         val expectedDomains = mapOf(
             "LayarKacaProvider.kt" to """override var mainUrl = "https://tv.nontonfilm.red"""",
-            "NgefilmProvider.kt" to """override var mainUrl = "https://new38.ngefilm.site"""",
+            "NgefilmProvider.kt" to """override var mainUrl = "https://new39.ngefilm.site"""",
             "PusatfilmProvider.kt" to """override var mainUrl = "https://v4.pusatfilm21info.com"""",
             "DutamovieProvider.kt" to """override var mainUrl = "https://restaurantesabadell.com"""",
             "IndoxxiProvider.kt" to """override var mainUrl = "https://filmbioskop21.lk21.in.net"""",
@@ -153,6 +153,23 @@ class ProviderDomainTest {
     }
 
     @Test
+    fun `ngefilm uses new39 and rehomes every previous numbered domain`() {
+        val provider = NgefilmProvider()
+        assertEquals("https://new39.ngefilm.site", provider.mainUrl)
+
+        (33..38).forEach { number ->
+            assertEquals(
+                "https://new39.ngefilm.site/tv/example/?player=2#play",
+                normalizePageUrl(
+                    provider,
+                    "https://new$number.ngefilm.site/tv/example/?player=2#play"
+                )
+            )
+        }
+        assertEquals(null, normalizePageUrl(provider, "https://foreign.example/tv/example/"))
+    }
+
+    @Test
     fun `kebioskop uses the current verified domain`() {
         assertEquals("https://kebioskop21.cfd", KeBioskopProvider().mainUrl)
     }
@@ -224,8 +241,9 @@ class ProviderDomainTest {
         assertTrue(provider.contains("/watch/session/claim"))
         assertTrue(provider.contains("val verifiedMasterUrl"))
         assertTrue(provider.contains("IdlixParser.masterManifest("))
-        assertTrue(provider.contains("newExtractorLink(name, \"\$name Auto\""))
-        assertFalse(provider.contains("LinkResolutionSession("))
+        assertTrue(provider.contains("IdlixParser.playerStreams(manifest)"))
+        assertFalse(provider.contains("\"\$name Auto\", verifiedMasterUrl"))
+        assertTrue(provider.contains("LinkResolutionSession("))
         assertTrue(source("IndoPlugin.kt").contains("registerMainAPI(IdlixProvider())"))
     }
 
@@ -276,7 +294,7 @@ class ProviderDomainTest {
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
         assertTrue(
-            Regex("""(?m)^version\s*=\s*11\s*$""").containsMatchIn(moduleBuild.readText()),
+            Regex("""(?m)^version\s*=\s*12\s*$""").containsMatchIn(moduleBuild.readText()),
             "Cloudstream must see these provider fixes as a new plugin release"
         )
     }

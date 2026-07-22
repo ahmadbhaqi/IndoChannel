@@ -68,6 +68,8 @@ private const val MAX_BYSE_API_RESPONSE_BYTES = 2_000_000
 private const val MAX_JUSTPLAY_API_RESPONSE_BYTES = 2_000_000
 private const val MAX_EMBED4ME_API_RESPONSE_BYTES = 4_000_000
 private const val MAX_HOWNETWORK_API_RESPONSE_BYTES = 2_000_000
+private const val MAX_FIRESTREAM_API_RESPONSE_BYTES = 256_000
+private const val FIRESTREAM_RESOLVE_ATTEMPTS = 2
 private const val MAX_MEDIA_PROBE_BYTES = 65_536
 private const val MEDIA_PROBE_TIMEOUT_SECONDS = 10L
 private const val MAX_ABYSS_QUALITY_PROBES = 8
@@ -107,6 +109,7 @@ internal class LinkResolutionSession(
     private val byseApiFetcher: PlayerPageFetcher = ::fetchBoundedByseApi,
     private val justPlayApiFetcher: JustPlayApiFetcher = ::fetchBoundedJustPlayApi,
     private val howNetworkApiFetcher: HowNetworkApiFetcher = ::fetchBoundedHowNetworkApi,
+    private val firestreamApiFetcher: FirestreamApiFetcher = ::fetchBoundedFirestreamApi,
     private val extractorLoader: CloudstreamExtractorLoader = ::loadExtractorWithResult,
     private val inlineSourceParser: InlineSourceParser? = null,
     private val maxDepth: Int = 2,
@@ -223,6 +226,37 @@ internal class LinkResolutionSession(
                 // These fragment embeds require the encrypted API. Their HTML is
                 // only a JavaScript loading shell, so a generic extractor cannot
                 // recover a media URL when the API itself has no usable source.
+                return
+            }
+
+            if (FirestreamPlayerParser.supports(host)) {
+                val beforeAdapter = emittedLinks.size
+                repeat(FIRESTREAM_RESOLVE_ATTEMPTS) {
+                    val html = try {
+                        pageFetcher(url, referer)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        return@repeat
+                    }
+                    cachedHtml = html
+                    if (ProviderHtmlParser.isNonContentPage(html)) return@repeat
+                    val request = FirestreamPlayerParser.resolveRequest(html, url)
+                        ?: return@repeat
+                    val response = try {
+                        firestreamApiFetcher(request)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        return@repeat
+                    }
+                    FirestreamPlayerParser.signedVideoUrl(response)?.let { mediaUrl ->
+                        emitDirect(mediaUrl, url, ExtractorLinkType.VIDEO)
+                    }
+                    if (emittedLinks.size > beforeAdapter) return
+                }
+                // A Firestream page is only a token-exchange shell. Generic
+                // extractors cannot recover its signed media URL.
                 return
             }
 
@@ -810,6 +844,17 @@ private suspend fun fetchBoundedHowNetworkApi(request: HowNetworkApiRequest): St
         timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
     )
     return readBoundedBody(response.body, MAX_HOWNETWORK_API_RESPONSE_BYTES)
+}
+
+private suspend fun fetchBoundedFirestreamApi(request: FirestreamResolveRequest): String {
+    val response = app.post(
+        request.apiUrl,
+        requestBody = request.body.toRequestBody(JSON_MEDIA_TYPE.toMediaType()),
+        referer = request.playerUrl,
+        headers = request.headers,
+        timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+    )
+    return readBoundedBody(response.body, MAX_FIRESTREAM_API_RESPONSE_BYTES)
 }
 
 /**

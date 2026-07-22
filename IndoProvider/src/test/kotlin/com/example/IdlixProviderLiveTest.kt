@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.MovieLoadResponse
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import java.net.URI
 import kotlin.coroutines.cancellation.CancellationException
@@ -134,6 +135,22 @@ class IdlixProviderLiveTest {
             resolvedPlaybackLink != null,
             "IDLIX did not resolve a signed, validated master playlist: $attempts"
         )
+        val playback = resolvedPlaybackLink
+        val videoProbe = playback?.let {
+            probeFirstMediaObject(it.url, it.referer, it.headers)
+        }
+        val audioProbes = playback?.let { link ->
+            link.audioTracks.map { audio ->
+                probeFirstMediaObject(audio.url, link.referer, audio.headers.orEmpty())
+            }
+        }.orEmpty()
+        assertTrue(
+            videoProbe?.isReachable() == true &&
+                audioProbes.isNotEmpty() &&
+                audioProbes.all(PlaylistProbe::isReachable),
+            "IDLIX emitted playlists whose init/first segments were not authorized: " +
+                "video=$videoProbe audio=$audioProbes"
+        )
     }
 
     @Test
@@ -207,8 +224,13 @@ class IdlixProviderLiveTest {
     }
 
     private fun isSignedPlaybackLink(link: ExtractorLink): Boolean =
-        IdlixParser.isTrustedMasterUrl(link.url) &&
+        IdlixParser.isTrustedPlaybackAsset(link.url) &&
             hasCurrentSignature(link.url) &&
+            link.audioTracks.isNotEmpty() &&
+            link.audioTracks.all { audio ->
+                IdlixParser.isTrustedPlaybackAsset(audio.url) &&
+                    hasCurrentSignature(audio.url)
+            } &&
             link.type == com.lagradost.cloudstream3.utils.ExtractorLinkType.M3U8
 
     private fun hasCurrentSignature(raw: String): Boolean = runCatching {
@@ -216,4 +238,63 @@ class IdlixProviderLiveTest {
             parameter.substringBefore('=') == "t" && parameter.substringAfter('=', "").isNotBlank()
         }
     }.getOrDefault(false)
+
+    private data class PlaylistProbe(
+        val playlistCode: Int?,
+        val isHls: Boolean,
+        val childCodes: Map<String, Int?>
+    ) {
+        fun isReachable(): Boolean =
+            playlistCode in 200..299 &&
+                isHls &&
+                childCodes.isNotEmpty() &&
+                childCodes.values.all { it in 200..299 }
+    }
+
+    private suspend fun probeFirstMediaObject(
+        playlistUrl: String,
+        referer: String,
+        headers: Map<String, String>
+    ): PlaylistProbe {
+        val playlist = runCatching {
+            withTimeout(30_000) {
+                app.get(
+                    playlistUrl,
+                    referer = referer,
+                    headers = headers,
+                    timeout = 30L
+                )
+            }
+        }.getOrNull() ?: return PlaylistProbe(null, false, emptyMap())
+        val body = playlist.text
+        val isHls = body.lineSequence()
+            .map(String::trim)
+            .firstOrNull(String::isNotBlank)
+            .equals("#EXTM3U", ignoreCase = true)
+        if (!isHls) return PlaylistProbe(playlist.code, false, emptyMap())
+        val initReference = Regex("(?i)#EXT-X-MAP:[^\\n]*URI=\"([^\"]+)\"")
+            .find(body)
+            ?.groupValues
+            ?.getOrNull(1)
+        val segmentReference = body.lineSequence()
+            .map(String::trim)
+            .firstOrNull { it.isNotBlank() && !it.startsWith('#') }
+        val childCodes = listOfNotNull(initReference, segmentReference)
+            .distinct()
+            .associate { reference ->
+                val childUrl = URI(playlist.url).resolve(reference).toASCIIString()
+                val childCode = runCatching {
+                    withTimeout(30_000) {
+                        app.get(
+                            childUrl,
+                            referer = referer,
+                            headers = headers + ("Range" to "bytes=0-31"),
+                            timeout = 30L
+                        ).code
+                    }
+                }.getOrNull()
+                childUrl to childCode
+            }
+        return PlaylistProbe(playlist.code, true, childCodes)
+    }
 }

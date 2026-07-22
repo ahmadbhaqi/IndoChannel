@@ -18,7 +18,7 @@ class RotatingMovieProvidersLiveTest {
             org.junit.Assume.assumeTrue(false)
             return@runBlocking
         }
-        verify(NgefilmProvider(), "https://new38.ngefilm.site/hungry-2026/")
+        verify(NgefilmProvider(), "https://new39.ngefilm.site/senin-harga-naik-2026/")
     }
 
     @Test

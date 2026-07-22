@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import java.net.URI
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
@@ -76,6 +77,52 @@ class IndoxxiLayarKacaLiveTest {
             "https://tv.nontonfilm.red/evil-dead-burn-2026/",
             probeMedia = false
         )
+    }
+
+    @Test
+    fun `layarkaca resolves the current Firestream fallback`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        repeat(2) { attempt ->
+            val links = verify(
+                LayarKacaProvider(),
+                "https://tv.nontonfilm.red/scary-movie-2026/",
+                probeMedia = false
+            )
+            val firestream = links.firstOrNull { link ->
+                runCatching {
+                    val uri = URI(link.url)
+                    uri.scheme.equals("https", ignoreCase = true) &&
+                        (uri.host.equals("firestream.to", ignoreCase = true) ||
+                            uri.host.orEmpty().endsWith(".firestream.to", ignoreCase = true))
+                }.getOrDefault(false)
+            }
+            assertTrue(
+                firestream != null,
+                "LayarKaca attempt ${attempt + 1} did not emit the Firestream fallback: " +
+                    links.map { it.url }
+            )
+            val code = firestream?.let { link ->
+                runCatching {
+                    withTimeout(30_000) {
+                        app.get(
+                            link.url,
+                            referer = link.referer,
+                            headers = link.headers + ("Range" to "bytes=0-31"),
+                            timeout = 30L
+                        ).code
+                    }
+                }.getOrNull()
+            }
+            assertTrue(
+                code in 200..299,
+                "LayarKaca attempt ${attempt + 1} emitted an unreachable " +
+                    "Firestream media URL (HTTP $code)"
+            )
+        }
     }
 
     private suspend fun verify(

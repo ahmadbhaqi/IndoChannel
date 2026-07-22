@@ -135,7 +135,16 @@ internal object MovieMetadataParser {
             ?.takeIf { it.length >= 5 }
             ?: return null
         val lower = value.lowercase()
-        if (lower in setOf("n/a", "tidak ada sinopsis", "no overview found", "coming soon")) return null
+        if (
+            lower in setOf(
+                "n/a",
+                "tidak ada sinopsis",
+                "no overview found",
+                "coming soon",
+                "segera hadir",
+                "segara hadir"
+            )
+        ) return null
         if (boilerplateMarkers.any(lower::contains)) return null
         return value
     }

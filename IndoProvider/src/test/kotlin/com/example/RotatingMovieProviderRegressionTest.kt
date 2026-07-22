@@ -17,11 +17,11 @@ class RotatingMovieProviderRegressionTest {
 
     @Test
     fun `legacy detail URLs are rehomed without losing path query or fragment`() {
-        val ngefilmLegacyHosts = (33..37).mapTo(mutableSetOf()) { "new$it.ngefilm.site" }
-        val cases = (33..37).map { number ->
+        val ngefilmLegacyHosts = (33..38).mapTo(mutableSetOf()) { "new$it.ngefilm.site" }
+        val cases = (33..38).map { number ->
             Triple(
                 "https://new$number.ngefilm.site/tv/example/?player=2#play",
-                "https://new38.ngefilm.site",
+                "https://new39.ngefilm.site",
                 ngefilmLegacyHosts
             )
         } + listOf(

@@ -87,6 +87,20 @@ class MovieMetadataParserTest {
     }
 
     @Test
+    fun `Indonesian coming soon placeholders are not exposed as a synopsis`() {
+        listOf("Segera Hadir", "Segara Hadir").forEach { placeholder ->
+            val document = Jsoup.parse(
+                """
+                <div class="entry-content"><p>$placeholder</p></div>
+                <meta name="description" content="$placeholder">
+                """.trimIndent()
+            )
+
+            assertNull(MovieMetadataParser.synopsis(document), placeholder)
+        }
+    }
+
+    @Test
     fun `common Windows 1252 UTF 8 mojibake is repaired`() {
         val mojibake = "Drama \u00E2\u20AC\u201C kisah cinta \u00C3\u00A9lite"
 

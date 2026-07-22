@@ -16,6 +16,7 @@ import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.getQualityFromString
 import com.lagradost.cloudstream3.mainPageOf
+import com.lagradost.cloudstream3.newAudioFile
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
@@ -231,27 +232,67 @@ class IdlixProvider : MainAPI() {
                 subtitleCallback(newSubtitleFile(label, subtitleUrl))
             }
 
+        val resolver = LinkResolutionSession(
+            this,
+            subtitleCallback,
+            callback,
+            candidateTimeoutMs = 25_000L,
+            sessionTimeoutMs = 75_000L
+        )
         val mediaHeaders = mapOf(
             "User-Agent" to IDLIX_USER_AGENT,
             "Referer" to request.pageUrl,
             "Origin" to mainUrl
         )
-        // The signed master was fetched and parsed above, so it is already a
-        // verified HLS playlist. Let ExoPlayer read the master itself: this
-        // preserves its alternate-audio group and avoids rebuilding an
-        // ExtractorLink with the newer audioTracks constructor, which breaks on
-        // older CloudStream releases before their callback can receive a link.
-        val quality = manifest.streams.maxOfOrNull { it.height }
-            ?.takeIf { it > 0 }
-            ?: Qualities.Unknown.value
-        callback(
-            newExtractorLink(name, "$name Auto", verifiedMasterUrl, ExtractorLinkType.M3U8) {
-                referer = request.pageUrl
-                this.quality = quality
-                headers = mediaHeaders
+        val audioTracks = try {
+            manifest.audioUrls.map { audioUrl ->
+                newAudioFile(audioUrl) {
+                    headers = mediaHeaders
+                }
             }
-        )
-        return true
+        } catch (_: LinkageError) {
+            // Very old CloudStream builds do not expose AudioFile yet. They
+            // still receive the authenticated video variant below instead of
+            // the unusable parent master.
+            emptyList()
+        }
+        for (stream in IdlixParser.playerStreams(manifest)) {
+            val link = if (audioTracks.isEmpty()) {
+                newExtractorLink(
+                    name,
+                    "$name ${stream.height.takeIf { it > 0 }?.let { "${it}p" }.orEmpty()}".trim(),
+                    stream.url,
+                    ExtractorLinkType.M3U8
+                ) {
+                    referer = request.pageUrl
+                    quality = stream.height
+                    headers = mediaHeaders
+                }
+            } else {
+                try {
+                    @Suppress("DEPRECATION", "DEPRECATION_ERROR")
+                    ExtractorLink(
+                        source = name,
+                        name = "$name ${stream.height.takeIf { it > 0 }?.let { "${it}p" }.orEmpty()}".trim(),
+                        url = stream.url,
+                        referer = request.pageUrl,
+                        quality = stream.height,
+                        headers = mediaHeaders,
+                        extractorData = null,
+                        type = ExtractorLinkType.M3U8,
+                        audioTracks = audioTracks
+                    )
+                } catch (_: LinkageError) {
+                    newExtractorLink(name, "$name Auto", stream.url, ExtractorLinkType.M3U8) {
+                        referer = request.pageUrl
+                        quality = stream.height
+                        headers = mediaHeaders
+                    }
+                }
+            }
+            resolver.emitResolved(link)
+        }
+        return resolver.loaded
     }
 
     private suspend fun claimPlayback(
@@ -452,6 +493,14 @@ internal object IdlixParser {
     data class PlaybackRequest(val contentType: String, val contentId: String, val pageUrl: String)
     data class Stream(val url: String, val height: Int)
     data class MasterManifest(val streams: List<Stream>, val audioUrls: List<String>)
+
+    fun playerStreams(manifest: MasterManifest): List<Stream> = manifest.streams
+        .filter { stream ->
+            isTrustedPlaybackAsset(stream.url) &&
+                stream.url.containsCurrentPlaybackToken()
+        }
+        .distinctBy(Stream::url)
+        .take(IDLIX_MAX_STREAMS)
 
     fun contentPage(raw: String, mainUrl: String): ContentPage? = runCatching {
         val current = URI(mainUrl)
@@ -692,6 +741,13 @@ internal object IdlixParser {
             (host.substringBefore('.').matches(Regex("^g\\d+$")) &&
                 PLAYBACK_CDN_SUFFIXES.any { host == it || host.endsWith(".$it") })
     }
+
+    private fun String.containsCurrentPlaybackToken(): Boolean = runCatching {
+        URI(this).rawQuery.orEmpty().split('&').any { parameter ->
+            parameter.substringBefore('=') == "t" &&
+                parameter.substringAfter('=', "").isNotBlank()
+        }
+    }.getOrDefault(false)
 
     private val PLAYBACK_CDN_SUFFIXES = setOf(
         "akademivo.website",

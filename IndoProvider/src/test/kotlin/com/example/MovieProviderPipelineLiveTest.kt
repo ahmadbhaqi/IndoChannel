@@ -85,7 +85,7 @@ class MovieProviderPipelineLiveTest {
             ),
             DetailCase(
                 NgefilmProvider(),
-                "https://new38.ngefilm.site/gangland-2025/",
+                "https://new39.ngefilm.site/gangland-2025/",
                 "Gangland"
             ),
             DetailCase(

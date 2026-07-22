@@ -10,8 +10,8 @@ import kotlin.coroutines.cancellation.CancellationException
 import org.jsoup.nodes.Element
 
 class NgefilmProvider : MainAPI() {
-    override var mainUrl = "https://new38.ngefilm.site"
-    private val legacyHosts = (33..37).mapTo(mutableSetOf()) { number ->
+    override var mainUrl = "https://new39.ngefilm.site"
+    private val legacyHosts = (33..38).mapTo(mutableSetOf()) { number ->
         "new$number.ngefilm.site"
     }
     override var name = "Ngefilm"

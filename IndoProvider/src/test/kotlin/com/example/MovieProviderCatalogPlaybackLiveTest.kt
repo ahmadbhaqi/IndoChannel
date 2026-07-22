@@ -29,6 +29,7 @@ class MovieProviderCatalogPlaybackLiveTest {
             ProviderCase(DutamovieProvider()),
             ProviderCase(FilmapikProvider()),
             ProviderCase(LayarKacaProvider()),
+            ProviderCase(NgefilmProvider()),
             ProviderCase(PusatfilmProvider()),
             ProviderCase(KeBioskopProvider())
         ).forEach { case ->
@@ -65,6 +66,25 @@ class MovieProviderCatalogPlaybackLiveTest {
     }
 
     @Test
+    fun `kitanonton resolves sampled titles from both movie rows`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        listOf("Movies", "Film Terbaru").forEach { category ->
+            verifyCurrentSamples(
+                ProviderCase(
+                    provider = KitanontonProvider(),
+                    categoryName = category,
+                    sampleSize = 6,
+                    requireAll = true
+                )
+            )
+        }
+    }
+
+    @Test
     fun `indoxxi resolves current Indonesia catalog samples`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
             org.junit.Assume.assumeTrue(false)
@@ -95,7 +115,11 @@ class MovieProviderCatalogPlaybackLiveTest {
             .distinctBy { it.url }
             .take(case.sampleSize)
 
-        assertTrue(catalog.isNotEmpty(), "${case.provider.name} returned an empty current catalog")
+        assertTrue(
+            catalog.size == case.sampleSize,
+            "${case.provider.name} returned only ${catalog.size}/${case.sampleSize} requested " +
+                "current catalog samples"
+        )
 
         val outcomes = catalog.map { item ->
             val links = mutableListOf<ExtractorLink>()

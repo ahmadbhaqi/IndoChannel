@@ -83,6 +83,32 @@ class IdlixProviderTest {
     }
 
     @Test
+    fun `player targets tokenized variants instead of the unauthorized parent master`() {
+        val masterUrl = "https://e2e.majorplay.net/v/z5/video-id/config-615304.json" +
+            "?t=signed-token&pm=browser"
+        val manifest = IdlixParser.masterManifest(
+            """
+            #EXTM3U
+            #EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720
+            /v/z5/video-id/p/key/video-720.json
+            """.trimIndent(),
+            masterUrl,
+            maxHeight = 1080
+        )!!
+
+        val playerStreams = IdlixParser.playerStreams(manifest)
+
+        assertEquals(1, playerStreams.size)
+        assertEquals(720, playerStreams.single().height)
+        assertEquals(
+            "https://e2e.majorplay.net/v/z5/video-id/p/key/video-720.json" +
+                "?t=signed-token&pm=browser",
+            playerStreams.single().url
+        )
+        assertFalse(playerStreams.any { it.url == masterUrl })
+    }
+
+    @Test
     fun `master parser rejects HTML and foreign playback hosts`() {
         assertNull(
             IdlixParser.masterManifest(
