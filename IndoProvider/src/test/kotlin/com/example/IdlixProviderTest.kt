@@ -2,6 +2,7 @@ package com.example
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -328,9 +329,9 @@ class IdlixProviderTest {
 
     @Test
     fun `gate wait normalizes seconds and milliseconds without mixing units`() {
-        assertEquals(15_900L, IdlixParser.gateWaitMs(1_789_000_000L, 1_789_000_015L))
+        assertEquals(15_000L, IdlixParser.gateWaitMs(1_789_000_000L, 1_789_000_015L))
         assertEquals(
-            15_900L,
+            15_000L,
             IdlixParser.gateWaitMs(1_789_000_000_000L, 1_789_000_015_000L)
         )
         assertNull(IdlixParser.gateWaitMs(1_789_000_000L, 1_789_000_015_000L))
@@ -352,7 +353,7 @@ class IdlixProviderTest {
         var index = 0
 
         val result = IdlixParser.pollGateClaim(
-            initialWaitMs = 15_900L,
+            initialWaitMs = 15_000L,
             pendingBudgetMs = 20_000L,
             sleep = { wait ->
                 sleeps += wait
@@ -369,7 +370,7 @@ class IdlixProviderTest {
         )
 
         assertEquals("pentos", result?.kind)
-        assertEquals(listOf(15_900L, 12_400L), sleeps)
+        assertEquals(listOf(15_000L, 12_400L), sleeps)
         assertEquals(listOf(null, "pending"), previousKinds)
         assertEquals(listOf(20_000L, 7_600L), requestBudgets)
     }
@@ -520,30 +521,122 @@ class IdlixProviderTest {
     }
 
     @Test
-    fun `player keeps the signed parent master so native HLS can select audio`() = runBlocking {
+    fun `player exposes signed variants as named resolution links with shared audio`() = runBlocking {
         val masterUrl = "https://e2e.majorplay.net/v/z5/video-id/config-615304.json" +
             "?t=signed-token&pm=browser"
         val manifest = IdlixParser.masterManifest(
             """
             #EXTM3U
-            #EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720
+            #EXT-X-MEDIA:TYPE=AUDIO,URI="/v/z5/video-id/p/key/audio.json",GROUP-ID="audio"
+            #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="audio"
+            /v/z5/video-id/p/key/video-1080.json
+            #EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,AUDIO="audio"
             /v/z5/video-id/p/key/video-720.json
             """.trimIndent(),
             masterUrl,
             maxHeight = 1080
         )!!
 
-        val link = newIdlixMasterLink(
+        val links = newIdlixVariantLinks(
             source = "IDLIX",
             masterUrl = masterUrl,
             pageUrl = "https://z2.idlixku.com/movie/example",
-            quality = manifest.streams.maxOf { it.height },
+            manifest = manifest,
             headers = mapOf("User-Agent" to "fixture")
         )
 
-        assertEquals(masterUrl, link.url)
-        assertEquals(ExtractorLinkType.M3U8, link.type)
-        assertTrue(link.audioTracksCompat().isEmpty())
+        assertEquals(listOf("IDLIX 1080p", "IDLIX 720p"), links.map { it.name })
+        assertEquals(listOf(1080, 720), links.map { it.quality })
+        assertEquals(manifest.streams.map { it.url }, links.map { it.url })
+        assertTrue(links.all { it.type == ExtractorLinkType.M3U8 })
+        assertTrue(links.all { it.extractorData == masterUrl })
+        assertTrue(links.all { it.audioTracksCompat().single().url == manifest.audioUrls.single() })
+    }
+
+    @Test
+    fun `playback cookie cache reuses only fresh page cookies`() {
+        var nowMs = 1_000L
+        val cache = IdlixPlaybackCookieCache(ttlMs = 5_000L, nowMs = { nowMs })
+        val pageUrl = "https://z2.idlixku.com/movie/example"
+
+        cache.put(pageUrl, mapOf("cf_clearance" to "fresh"))
+        assertEquals(mapOf("cf_clearance" to "fresh"), cache.get(pageUrl))
+        assertNull(cache.get("https://z2.idlixku.com/movie/other"))
+
+        nowMs = 6_001L
+        assertNull(cache.get(pageUrl))
+    }
+
+    @Test
+    fun `legacy runtime falls back to the signed master when variants need external audio`() {
+        val masterUrl = "https://e2e.majorplay.net/v/z5/video-id/config-615304.json" +
+            "?t=signed-token&pm=browser"
+        val manifest = IdlixParser.MasterManifest(
+            streams = listOf(
+                IdlixParser.Stream(
+                    "https://e2e.majorplay.net/v/z5/video-id/p/key/video-720.json" +
+                        "?t=signed-token&pm=browser",
+                    720
+                )
+            ),
+            audioUrls = listOf(
+                "https://e2e.majorplay.net/v/z5/video-id/p/key/audio.json" +
+                    "?t=signed-token&pm=browser"
+            ),
+            subtitles = emptyList()
+        )
+
+        assertEquals(
+            listOf(IdlixParser.Stream(masterUrl, Qualities.Unknown.value)),
+            IdlixParser.playbackStreams(manifest, masterUrl, externalAudioSupported = false)
+        )
+    }
+
+    @Test
+    fun `rejected cached playback retries once with fresh cookies`() = runBlocking {
+        val attempts = mutableListOf<String>()
+        var refreshes = 0
+
+        val result = resolveWithFreshCookies(
+            cachedCookies = "stale",
+            attempt = { cookies ->
+                attempts += cookies
+                "resolved".takeIf { cookies == "fresh" }
+            },
+            invalidate = {},
+            refresh = {
+                refreshes++
+                "fresh"
+            }
+        )
+
+        assertEquals("resolved", result)
+        assertEquals(listOf("stale", "fresh"), attempts)
+        assertEquals(1, refreshes)
+    }
+
+    @Test
+    fun `rejected playback evicts stale cookies and retains a fresh preflight`() = runBlocking {
+        val pageUrl = "https://z2.idlixku.com/series/example"
+        val cache = IdlixPlaybackCookieCache()
+        val attempts = mutableListOf<String>()
+        cache.put(pageUrl, mapOf("session" to "stale"))
+
+        val result = resolveWithFreshCookies(
+            cachedCookies = cache.get(pageUrl),
+            attempt = { cookies ->
+                attempts += cookies.getValue("session")
+                null
+            },
+            invalidate = { cache.remove(pageUrl) },
+            refresh = {
+                mapOf("session" to "fresh").also { cache.put(pageUrl, it) }
+            }
+        )
+
+        assertNull(result)
+        assertEquals(listOf("stale", "fresh"), attempts)
+        assertEquals(mapOf("session" to "fresh"), cache.get(pageUrl))
     }
 
     @Test

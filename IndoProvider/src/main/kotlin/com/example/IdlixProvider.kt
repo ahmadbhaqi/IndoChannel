@@ -16,6 +16,7 @@ import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.getQualityFromString
 import com.lagradost.cloudstream3.mainPageOf
+import com.lagradost.cloudstream3.newAudioFile
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
@@ -40,7 +41,6 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Interceptor
-import okhttp3.Request
 import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
 
@@ -59,6 +59,57 @@ private const val IDLIX_PLAYBACK_PATH = "/__idlix_playback__/"
 private const val IDLIX_USER_AGENT =
     "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+
+internal class IdlixPlaybackCookieCache(
+    private val ttlMs: Long = 5 * 60_000L,
+    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000L }
+) {
+    private data class Entry(val cookies: Map<String, String>, val storedAtMs: Long)
+
+    private val entries = LinkedHashMap<String, Entry>()
+
+    init {
+        require(ttlMs > 0L)
+    }
+
+    @Synchronized
+    fun put(pageUrl: String, cookies: Map<String, String>) {
+        if (cookies.isEmpty()) return
+        entries[pageUrl] = Entry(cookies.toMap(), nowMs())
+        while (entries.size > 16) {
+            entries.remove(entries.keys.first())
+        }
+    }
+
+    @Synchronized
+    fun get(pageUrl: String): Map<String, String>? {
+        val entry = entries[pageUrl] ?: return null
+        if ((nowMs() - entry.storedAtMs).coerceAtLeast(0L) > ttlMs) {
+            entries.remove(pageUrl)
+            return null
+        }
+        return entry.cookies.toMap()
+    }
+
+    @Synchronized
+    fun remove(pageUrl: String) {
+        entries.remove(pageUrl)
+    }
+}
+
+internal suspend fun <C, R> resolveWithFreshCookies(
+    cachedCookies: C?,
+    attempt: suspend (C) -> R?,
+    invalidate: suspend () -> Unit,
+    refresh: suspend () -> C?
+): R? {
+    if (cachedCookies != null) {
+        attempt(cachedCookies)?.let { return it }
+        invalidate()
+    }
+    val freshCookies = refresh() ?: return null
+    return attempt(freshCookies)
+}
 
 internal object IdlixSearchPager {
     data class Page<T>(
@@ -127,10 +178,15 @@ class IdlixProvider : MainAPI() {
 
     private val mapper = jacksonObjectMapper()
     private val cloudflareKiller by lazy { CloudflareKiller() }
+    private val playbackCookieCache = IdlixPlaybackCookieCache()
     private val apiUrl: String get() = "$mainUrl/api"
 
-    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor =
-        IdlixPlaybackInterceptor(extractorLink.url, cloudflareKiller)
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
+        val authorizationUrl = extractorLink.extractorData
+            ?.takeIf(IdlixParser::isTrustedMasterUrl)
+            ?: extractorLink.url
+        return IdlixPlaybackInterceptor(authorizationUrl)
+    }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val type = request.data.takeIf { it == "movie" || it == "series" } ?: "movie"
@@ -179,6 +235,7 @@ class IdlixProvider : MainAPI() {
         val page = IdlixParser.contentPage(url, mainUrl) ?: return null
         val endpoint = if (page.type == "movie") "movies" else "series"
         val detail = apiGetJson("/$endpoint/${page.slug}", page.url) ?: return null
+        playbackCookieCache.put(page.url, detail.cookies)
         val root = detail.node
         val title = root.textOrNull("title") ?: return null
         val contentId = root.textOrNull("id")?.takeIf(IdlixParser::isUuid) ?: return null
@@ -274,25 +331,19 @@ class IdlixProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val request = IdlixParser.decodePlayback(data, mainUrl) ?: return false
-        val preflightCookies = preflightPage(request.pageUrl) ?: return false
-        val playInfo = apiGetJson(
-            "/watch/play-info/${request.contentType}/${request.contentId}",
-            request.pageUrl,
-            preflightCookies,
-            retryWithPreflight = false
+        val ticket = resolveWithFreshCookies(
+            cachedCookies = playbackCookieCache.get(request.pageUrl),
+            attempt = { cookies -> resolvePlayback(request, cookies) },
+            invalidate = { playbackCookieCache.remove(request.pageUrl) },
+            refresh = {
+                preflightPage(request.pageUrl)?.also { freshCookies ->
+                    playbackCookieCache.remove(request.pageUrl)
+                    playbackCookieCache.put(request.pageUrl, freshCookies)
+                }
+            }
         ) ?: return false
-        val direct = IdlixParser.directPlayback(playInfo.node)
-        val session = if (direct == null) {
-            claimPlayback(playInfo, request.pageUrl) ?: return false
-        } else {
-            null
-        }
-        val redeemed = direct
-            ?: redeemPlayback(session ?: return false, request.pageUrl)
-            ?: return false
-        val maxHeight = (session?.node ?: playInfo.node)
-            .path("maxHeight")
-            .asInt(Qualities.Unknown.value)
+        val redeemed = ticket.redeemed
+        val maxHeight = ticket.maxHeight
         val masterUrl = redeemed.textOrNull("url")
             ?.takeIf(IdlixParser::isTrustedMasterUrl)
             ?: return false
@@ -342,16 +393,41 @@ class IdlixProvider : MainAPI() {
             .forEach { track ->
                 subtitleCallback(newIdlixSubtitleFile(track, mediaHeaders))
             }
-        resolver.emitResolved(
-            newIdlixMasterLink(
-                source = name,
-                masterUrl = verifiedMasterUrl,
-                pageUrl = request.pageUrl,
-                quality = manifest.streams.maxOfOrNull { it.height } ?: maxHeight,
-                headers = mediaHeaders
-            )
-        )
+        newIdlixVariantLinks(
+            source = name,
+            masterUrl = verifiedMasterUrl,
+            pageUrl = request.pageUrl,
+            manifest = manifest,
+            headers = mediaHeaders
+        ).forEach { link -> resolver.emitResolved(link) }
         return resolver.loaded
+    }
+
+    private suspend fun resolvePlayback(
+        request: IdlixParser.PlaybackRequest,
+        cookies: Map<String, String>
+    ): PlaybackTicket? {
+        val playInfo = apiGetJson(
+            "/watch/play-info/${request.contentType}/${request.contentId}",
+            request.pageUrl,
+            cookies,
+            retryWithPreflight = false
+        ) ?: return null
+        val direct = IdlixParser.directPlayback(playInfo.node)
+        val session = if (direct == null) {
+            claimPlayback(playInfo, request.pageUrl) ?: return null
+        } else {
+            null
+        }
+        val redeemed = direct
+            ?: redeemPlayback(session ?: return null, request.pageUrl)
+            ?: return null
+        return PlaybackTicket(
+            redeemed = redeemed,
+            maxHeight = (session?.node ?: playInfo.node)
+                .path("maxHeight")
+                .asInt(Qualities.Unknown.value)
+        )
     }
 
     private suspend fun claimPlayback(
@@ -555,18 +631,62 @@ class IdlixProvider : MainAPI() {
         val node: JsonNode,
         val cookies: Map<String, String>
     )
+
+    private data class PlaybackTicket(
+        val redeemed: JsonNode,
+        val maxHeight: Int
+    )
 }
 
-internal suspend fun newIdlixMasterLink(
+internal suspend fun newIdlixVariantLinks(
     source: String,
     masterUrl: String,
     pageUrl: String,
-    quality: Int,
+    manifest: IdlixParser.MasterManifest,
     headers: Map<String, String>
-): ExtractorLink = newExtractorLink(source, "$source Auto", masterUrl, ExtractorLinkType.M3U8) {
-    referer = pageUrl
-    this.quality = quality
-    this.headers = headers
+): List<ExtractorLink> {
+    suspend fun basicLinks(streams: List<IdlixParser.Stream>): List<ExtractorLink> = streams.map { stream ->
+        val linkName = stream.height.takeIf { it > 0 }
+            ?.let { "$source ${it}p" }
+            ?: "$source Auto"
+        newExtractorLink(source, linkName, stream.url, ExtractorLinkType.M3U8) {
+            referer = pageUrl
+            quality = stream.height
+            this.headers = headers
+            extractorData = masterUrl
+        }
+    }
+
+    val streams = IdlixParser.playerStreams(manifest)
+    if (manifest.audioUrls.isEmpty()) return basicLinks(streams)
+
+    return try {
+        val audioTracks = manifest.audioUrls.map { audioUrl ->
+            newAudioFile(audioUrl) {
+                this.headers = headers
+            }
+        }
+        streams.map { stream ->
+            val linkName = stream.height.takeIf { it > 0 }
+                ?.let { "$source ${it}p" }
+                ?: "$source Auto"
+            newExtractorLink(source, linkName, stream.url, ExtractorLinkType.M3U8) {
+                referer = pageUrl
+                quality = stream.height
+                this.headers = headers
+                extractorData = masterUrl
+                this.audioTracks = audioTracks
+            }
+        }
+    } catch (_: LinkageError) {
+        basicLinks(
+            IdlixParser.playbackStreams(
+                manifest,
+                masterUrl,
+                externalAudioSupported = false
+            )
+        )
+    }
 }
 
 internal suspend fun newIdlixSubtitleFile(
@@ -577,12 +697,11 @@ internal suspend fun newIdlixSubtitleFile(
 }
 
 /**
- * Keeps IDLIX's parent master intact so Media3 can select its external audio
- * group, while carrying the short-lived master token to trusted child requests.
+ * Carries the short-lived master token to trusted child requests without
+ * wrapping every HLS segment in CloudflareKiller's blocking WebView fallback.
  */
 internal class IdlixPlaybackInterceptor(
-    private val masterUrl: String,
-    private val cloudflareKiller: Interceptor
+    private val masterUrl: String
 ) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
         val original = chain.request()
@@ -592,14 +711,7 @@ internal class IdlixPlaybackInterceptor(
         } else {
             original.newBuilder().url(rewrittenUrl).build()
         }
-        val forwardingChain = if (rewritten === original) {
-            chain
-        } else {
-            object : Interceptor.Chain by chain {
-                override fun request(): Request = rewritten
-            }
-        }
-        return cloudflareKiller.intercept(forwardingChain)
+        return chain.proceed(rewritten)
     }
 }
 
@@ -636,6 +748,16 @@ internal object IdlixParser {
         .distinctBy(Stream::url)
         .take(IDLIX_MAX_STREAMS)
 
+    fun playbackStreams(
+        manifest: MasterManifest,
+        masterUrl: String,
+        externalAudioSupported: Boolean
+    ): List<Stream> = if (!externalAudioSupported && manifest.audioUrls.isNotEmpty()) {
+        listOf(Stream(masterUrl, Qualities.Unknown.value))
+    } else {
+        playerStreams(manifest)
+    }
+
     fun directPlayback(node: JsonNode): JsonNode? = node.takeIf { candidate ->
         candidate.textOrNull("kind")?.lowercase() !in setOf("gate", "pending", "pentos") &&
             candidate.textOrNull("url")?.let(::isTrustedMasterUrl) == true
@@ -644,7 +766,7 @@ internal object IdlixParser {
     fun gateWaitMs(
         serverNow: Long,
         unlockAt: Long,
-        graceMs: Long = 900L,
+        graceMs: Long = 0L,
         capMs: Long = IDLIX_MAX_GATE_WAIT_MS
     ): Long? {
         if (serverNow <= 0L || unlockAt <= 0L || graceMs < 0L || capMs < 0L) return null

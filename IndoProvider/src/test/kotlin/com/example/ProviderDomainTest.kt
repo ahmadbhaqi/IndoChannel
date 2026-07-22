@@ -241,11 +241,18 @@ class ProviderDomainTest {
         assertTrue(provider.contains("/watch/session/claim"))
         assertTrue(provider.contains("val verifiedMasterUrl"))
         assertTrue(provider.contains("IdlixParser.masterManifest("))
-        assertTrue(provider.contains("newIdlixMasterLink("))
+        assertTrue(provider.contains("newIdlixVariantLinks("))
+        assertTrue(provider.contains("IdlixPlaybackCookieCache("))
+        assertTrue(provider.contains("newAudioFile("))
+        assertTrue(provider.contains("extractorData = masterUrl"))
+        assertFalse(provider.contains("ticket.cookies"))
         assertTrue(provider.contains("override fun getVideoInterceptor"))
         assertTrue(provider.contains("IdlixPlaybackInterceptor("))
         assertTrue(provider.contains("interceptor = cloudflareKiller"))
-        assertFalse(provider.contains("newAudioFile"))
+        val videoInterceptor = provider.substringAfter("internal class IdlixPlaybackInterceptor(")
+            .substringBefore("internal object IdlixParser")
+        assertFalse(videoInterceptor.contains("cloudflareKiller"))
+        assertTrue(videoInterceptor.contains("chain.proceed(rewritten)"))
         assertTrue(provider.contains("LinkResolutionSession("))
         assertTrue(source("IndoPlugin.kt").contains("registerMainAPI(IdlixProvider())"))
     }
@@ -297,7 +304,7 @@ class ProviderDomainTest {
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
         assertTrue(
-            Regex("""(?m)^version\s*=\s*13\s*$""").containsMatchIn(moduleBuild.readText()),
+            Regex("""(?m)^version\s*=\s*14\s*$""").containsMatchIn(moduleBuild.readText()),
             "Cloudstream must see these provider fixes as a new plugin release"
         )
     }
