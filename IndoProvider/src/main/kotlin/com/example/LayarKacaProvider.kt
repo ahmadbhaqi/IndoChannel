@@ -143,33 +143,33 @@ class LayarKacaProvider : MainAPI() {
             callback,
             inlineSourceParser = LayarKacaPlayerParser::mediaUrls
         )
-        val serverPages = LayarKacaPlayerParser.serverPageUrls(document, canonicalUrl)
-        for (mediaUrl in LayarKacaPlayerParser.pageMediaUrls(document, canonicalUrl)) {
-            if (!resolver.canContinue || resolver.loaded) break
-            resolvePlayer(mediaUrl, canonicalUrl, resolver)
-        }
-        for (playerUrl in serverPages.asReversed()) {
+        for (candidate in LayarKacaPlayerParser.orderedPlayerCandidates(document, canonicalUrl)) {
             if (resolver.loaded || !resolver.canContinue) break
-            try {
-                val playerDocument = app.get(
-                    playerUrl,
-                    referer = canonicalUrl,
-                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-                ).let { response ->
-                    val responseUrl = providerUrl(response.url) ?: return@let null
-                    response.document to responseUrl
-                } ?: continue
-                for (mediaUrl in LayarKacaPlayerParser.pageMediaUrls(
-                    playerDocument.first,
-                    playerDocument.second
-                )) {
-                    if (resolver.loaded) break
-                    resolvePlayer(mediaUrl, playerDocument.second, resolver)
+            when (candidate) {
+                is LayarKacaPlaybackCandidate.InlinePlayer ->
+                    resolvePlayer(candidate.url, canonicalUrl, resolver)
+
+                is LayarKacaPlaybackCandidate.ServerPage -> try {
+                    val playerDocument = app.get(
+                        candidate.url,
+                        referer = canonicalUrl,
+                        timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+                    ).let { response ->
+                        val responseUrl = providerUrl(response.url) ?: return@let null
+                        response.document to responseUrl
+                    } ?: continue
+                    for (mediaUrl in LayarKacaPlayerParser.pageMediaUrls(
+                        playerDocument.first,
+                        playerDocument.second
+                    )) {
+                        if (resolver.loaded) break
+                        resolvePlayer(mediaUrl, playerDocument.second, resolver)
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    // One dead server must not hide the remaining mirrors.
                 }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                // One dead server must not hide the remaining mirrors.
             }
         }
 
@@ -223,6 +223,11 @@ class LayarKacaProvider : MainAPI() {
         ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, LAYARKACA_LEGACY_HOSTS)
 }
 
+internal sealed interface LayarKacaPlaybackCandidate {
+    data class ServerPage(val url: String) : LayarKacaPlaybackCandidate
+    data class InlinePlayer(val url: String) : LayarKacaPlaybackCandidate
+}
+
 internal object LayarKacaPlayerParser {
     fun ajaxRequests(document: Document): List<MuviproAjaxRequest> =
         ProviderHtmlParser.muviproAjaxRequests(document)
@@ -245,6 +250,26 @@ internal object LayarKacaPlayerParser {
         }
         return (playerTabs + providerMenu).distinct()
     }
+
+    fun orderedPlayerCandidates(
+        document: Document,
+        detailUrl: String
+    ): List<LayarKacaPlaybackCandidate> {
+        val (defaultServerPages, alternateServerPages) =
+            serverPageUrls(document, detailUrl).partition(::isDefaultServerPage)
+        return (
+            alternateServerPages.map(LayarKacaPlaybackCandidate::ServerPage) +
+                pageMediaUrls(document, detailUrl).map(LayarKacaPlaybackCandidate::InlinePlayer) +
+                defaultServerPages.map(LayarKacaPlaybackCandidate::ServerPage)
+            ).distinct()
+    }
+
+    private fun isDefaultServerPage(url: String): Boolean = runCatching {
+        URI(url).rawQuery.orEmpty().split('&').any { parameter ->
+            parameter.substringBefore('=').equals("player", ignoreCase = true) &&
+                parameter.substringAfter('=', "") == "1"
+        }
+    }.getOrDefault(false)
 
     private fun normalizeServerPageUrl(raw: String?, detailUrl: String): String? {
         val value = raw?.trim()?.takeIf { it.isNotBlank() } ?: return null

@@ -80,6 +80,33 @@ class LayarKacaPlayerParserTest {
     }
 
     @Test
+    fun `alternate server pages run before the slow default embed`() {
+        val detailUrl = "https://tv.nontonfilm.red/scary-movie-2026/"
+        val defaultEmbed = "https://justplay.one/e/default"
+        val document = Jsoup.parse(
+            """
+            <iframe src="$defaultEmbed"></iframe>
+            <ul class="gmr-player-nav">
+              <li><a href="?player=1">Default</a></li>
+              <li><a href="?player=2">Vidmoly</a></li>
+              <li><a href="?player=3">Firestream</a></li>
+            </ul>
+            """.trimIndent(),
+            detailUrl
+        )
+
+        assertEquals(
+            listOf(
+                LayarKacaPlaybackCandidate.ServerPage("$detailUrl?player=2"),
+                LayarKacaPlaybackCandidate.ServerPage("$detailUrl?player=3"),
+                LayarKacaPlaybackCandidate.InlinePlayer(defaultEmbed),
+                LayarKacaPlaybackCandidate.ServerPage("$detailUrl?player=1")
+            ),
+            LayarKacaPlayerParser.orderedPlayerCandidates(document, detailUrl)
+        )
+    }
+
+    @Test
     fun `legacy loadProviders menu accepts only same origin server pages`() {
         val detailUrl = "https://tv.nontonfilm.red/legacy-movie/"
         val document = Jsoup.parse(

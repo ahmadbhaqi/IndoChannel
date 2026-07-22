@@ -77,6 +77,7 @@ private const val MAX_PLAYLIST_PROBE_ITEMS = 16
 private const val MAX_CONCURRENT_PLAYLIST_PROBES = 4
 private const val MAX_AUDIO_TRACK_PROBE_ITEMS = 8
 private const val JSON_MEDIA_TYPE = "application/json;charset=UTF-8"
+private const val JUICY_CODES_ACCEPT_LANGUAGE = "*"
 
 private data class CandidateKey(
     val url: String,
@@ -95,7 +96,12 @@ internal class LinkResolutionSession(
     private val subtitleCallback: (SubtitleFile) -> Unit,
     private val callback: (ExtractorLink) -> Unit,
     private val pageFetcher: PlayerPageFetcher = { url, referer ->
-        app.get(url, referer = referer, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS).text
+        app.get(
+            url,
+            referer = referer,
+            headers = juicyCodesPlayerPageHeaders(url),
+            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+        ).text
     },
     private val playerApiFetcher: PlayerApiFetcher = { url, referer, headers ->
         val response = app.get(
@@ -441,21 +447,32 @@ internal class LinkResolutionSession(
             }
 
             if (host.matches(Regex("""\d{1,3}(?:\.\d{1,3}){3}"""))) {
-                var playerPageUrl = url
-                val html = try {
-                    pageFetcher(url, referer)
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (httpsError: Exception) {
-                    val httpFallback = publicIpHttpFallback(url)
-                        ?: throw httpsError
-                    playerPageUrl = httpFallback
-                    pageFetcher(httpFallback, referer)
+                // These IP-backed JuicyCodes mirrors currently publish their
+                // player over plain HTTP while their HTTPS certificates are
+                // not trusted by older Android runtimes. Try HTTP first so a
+                // slow TLS handshake cannot consume the candidate budget;
+                // retain HTTPS as a fallback when HTTP is unavailable.
+                var playerPageUrl: String? = null
+                var html: String? = null
+                val playerCandidates = listOfNotNull(publicIpHttpFallback(url), url).distinct()
+                for (candidate in playerCandidates) {
+                    val candidateHtml = try {
+                        pageFetcher(candidate, referer)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        continue
+                    }
+                    if (ProviderHtmlParser.isNonContentPage(candidateHtml)) continue
+                    playerPageUrl = candidate
+                    html = candidateHtml
+                    break
                 }
-                cachedHtml = html
-                if (ProviderHtmlParser.isNonContentPage(html)) return
+                val resolvedPlayerPageUrl = playerPageUrl ?: return
+                val resolvedHtml = html ?: return
+                cachedHtml = resolvedHtml
                 val beforeAdapter = emittedLinks.size
-                JuicyCodesPlayerParser.playback(html)?.let { playback ->
+                JuicyCodesPlayerParser.playback(resolvedHtml)?.let { playback ->
                     playback.tracks.forEach { track ->
                         subtitleCallback(newSubtitleFile(track.label, track.url))
                     }
@@ -465,10 +482,13 @@ internal class LinkResolutionSession(
                                 api.name,
                                 "${api.name} JuicyCodes ${media.label}",
                                 media.url,
-                                playerPageUrl,
+                                resolvedPlayerPageUrl,
                                 media.quality,
                                 if (media.isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                                linkedMapOf("Referer" to playerPageUrl).apply {
+                                linkedMapOf(
+                                    "Referer" to resolvedPlayerPageUrl,
+                                    "Accept-Language" to JUICY_CODES_ACCEPT_LANGUAGE
+                                ).apply {
                                     media.userAgent?.let { put("User-Agent", it) }
                                 }
                             )
@@ -476,7 +496,7 @@ internal class LinkResolutionSession(
                     }
                 }
                 if (emittedLinks.size > beforeAdapter) return
-                if (JuicyCodesPlayerParser.recognizes(html)) return
+                if (JuicyCodesPlayerParser.recognizes(resolvedHtml)) return
             }
 
             if (JustPlayPlayerParser.supports(host)) {
@@ -510,7 +530,6 @@ internal class LinkResolutionSession(
                 false
             }
             if (byseApiUrl != null && (looksLikeByseHost || looksLikeBysePage)) {
-                val beforeAdapter = emittedLinks.size
                 val apiJson = byseApiUrl.let { endpoint ->
                     try {
                         byseApiFetcher(endpoint, url)
@@ -521,7 +540,12 @@ internal class LinkResolutionSession(
                     }
                 }
                 apiJson?.let(BysePlayerParser::playback)?.let { emitBysePlayback(it, url) }
-                if (emittedLinks.size > beforeAdapter) return
+                // Byse is an encrypted API shell. Once its API source is dead
+                // or its signed media fails verification, generic extraction
+                // and refetching the frontend cannot recover another stream;
+                // returning here preserves the session budget for sibling
+                // mirrors such as Filmapik's healthy Abyss fallback.
+                return
             }
 
             if (host == "playsobat.xyz" || host.endsWith(".playsobat.xyz")) {
@@ -1328,6 +1352,18 @@ internal fun publicIpHttpFallback(url: String): String? {
         !isPublicIpv4(host)
     ) return null
     return "http:${url.substringAfter(':')}".takeIf(::isSafeRemoteHttpUrl)
+}
+
+internal fun juicyCodesPlayerPageHeaders(url: String): Map<String, String> {
+    val uri = runCatching { URI(url) }.getOrNull() ?: return emptyMap()
+    val scheme = uri.scheme.orEmpty().lowercase()
+    val host = uri.host.orEmpty()
+    if (
+        scheme !in setOf("http", "https") ||
+        !host.matches(Regex("""\d{1,3}(?:\.\d{1,3}){3}""")) ||
+        !isPublicIpv4(host)
+    ) return emptyMap()
+    return mapOf("Accept-Language" to JUICY_CODES_ACCEPT_LANGUAGE)
 }
 
 internal fun orderPlaySobatMirrorUrls(urls: List<String>): List<String> {

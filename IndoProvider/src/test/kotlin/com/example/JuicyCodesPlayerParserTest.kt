@@ -56,7 +56,7 @@ class JuicyCodesPlayerParserTest {
     }
 
     @Test
-    fun `Juicy IP player retries HTTP without disabling TLS verification`() = runBlocking {
+    fun `Juicy IP player prefers HTTP before certificate-bound HTTPS`() = runBlocking {
         val mediaUrl = "https://daisy.groovy.monster/stream/master.m3u8"
         val config = """
             var config = {"sources":{"type":"application/x-mpegURL","file":"$mediaUrl"}};jwplayer.key = 'key';
@@ -84,14 +84,51 @@ class JuicyCodesPlayerParserTest {
             )
         )
         assertEquals(
-            listOf(
-                "https://178.211.139.171/embed/current",
-                "http://178.211.139.171/embed/current"
-            ),
+            listOf("http://178.211.139.171/embed/current"),
             requests
         )
         assertEquals(mediaUrl, links.single().url)
         assertEquals("http://178.211.139.171/embed/current", links.single().referer)
+        assertEquals("*", links.single().headers["Accept-Language"])
+    }
+
+    @Test
+    fun `Juicy IP player keeps HTTPS as a fallback when HTTP is unavailable`() = runBlocking {
+        val mediaUrl = "https://daisy.groovy.monster/stream/master.m3u8"
+        val config = """
+            var config = {"sources":{"type":"application/x-mpegURL","file":"$mediaUrl"}};jwplayer.key = 'key';
+        """.trimIndent()
+        val html = """<script>_juicycodes("${encode(config)}");</script>"""
+        val requests = mutableListOf<String>()
+        val links = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                requests += url
+                if (url.startsWith("http://")) throw IOException("HTTP mirror unavailable")
+                html
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { it }
+        )
+
+        assertTrue(
+            session.resolve(
+                "https://178.211.139.171/embed/current",
+                "https://rebahinxxi3.lol/item/"
+            )
+        )
+        assertEquals(
+            listOf(
+                "http://178.211.139.171/embed/current",
+                "https://178.211.139.171/embed/current"
+            ),
+            requests
+        )
+        assertEquals("https://178.211.139.171/embed/current", links.single().referer)
+        assertEquals("*", links.single().headers["Accept-Language"])
     }
 
     @Test
@@ -103,6 +140,20 @@ class JuicyCodesPlayerParserTest {
             )
         )
         assertNull(publicIpHttpFallback("https://192.168.1.3/embed/current"))
+    }
+
+    @Test
+    fun `Juicy fingerprint header is scoped to public IP player pages`() {
+        assertEquals(
+            mapOf("Accept-Language" to "*"),
+            juicyCodesPlayerPageHeaders("http://178.211.139.171/embed/current")
+        )
+        assertEquals(
+            mapOf("Accept-Language" to "*"),
+            juicyCodesPlayerPageHeaders("https://199.87.210.226/embed/current")
+        )
+        assertTrue(juicyCodesPlayerPageHeaders("https://vidmoly.biz/embed-current.html").isEmpty())
+        assertTrue(juicyCodesPlayerPageHeaders("http://192.168.1.3/embed/current").isEmpty())
     }
 
     private fun encode(decoded: String, salt: Int = 681): String {

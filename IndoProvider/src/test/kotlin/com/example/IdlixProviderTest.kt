@@ -1,11 +1,13 @@
 package com.example
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
 
 class IdlixProviderTest {
     private val mapper = jacksonObjectMapper()
@@ -83,7 +85,7 @@ class IdlixProviderTest {
     }
 
     @Test
-    fun `player targets tokenized variants instead of the unauthorized parent master`() {
+    fun `player keeps the signed parent master so native HLS can select audio`() = runBlocking {
         val masterUrl = "https://e2e.majorplay.net/v/z5/video-id/config-615304.json" +
             "?t=signed-token&pm=browser"
         val manifest = IdlixParser.masterManifest(
@@ -96,16 +98,46 @@ class IdlixProviderTest {
             maxHeight = 1080
         )!!
 
-        val playerStreams = IdlixParser.playerStreams(manifest)
-
-        assertEquals(1, playerStreams.size)
-        assertEquals(720, playerStreams.single().height)
-        assertEquals(
-            "https://e2e.majorplay.net/v/z5/video-id/p/key/video-720.json" +
-                "?t=signed-token&pm=browser",
-            playerStreams.single().url
+        val link = newIdlixMasterLink(
+            source = "IDLIX",
+            masterUrl = masterUrl,
+            pageUrl = "https://z2.idlixku.com/movie/example",
+            quality = manifest.streams.maxOf { it.height },
+            headers = mapOf("User-Agent" to "fixture")
         )
-        assertFalse(playerStreams.any { it.url == masterUrl })
+
+        assertEquals(masterUrl, link.url)
+        assertEquals(ExtractorLinkType.M3U8, link.type)
+        assertTrue(link.audioTracksCompat().isEmpty())
+    }
+
+    @Test
+    fun `playback request inherits master tokens only inside the trusted video path`() {
+        val masterUrl = "https://e2e.majorplay.net/v/z5/video-id/config-615304.json" +
+            "?t=signed-token&pm=browser"
+
+        assertEquals(
+            "https://g2.akademivo.website/v/z5/video-id/p/key/audio.json" +
+                "?t=signed-token&pm=browser",
+            IdlixParser.playbackRequestUrl(
+                masterUrl,
+                "https://g2.akademivo.website/v/z5/video-id/p/key/audio.json"
+            )
+        )
+        assertEquals(
+            "https://g2.akademivo.website/v/z5/other-id/p/key/audio.json",
+            IdlixParser.playbackRequestUrl(
+                masterUrl,
+                "https://g2.akademivo.website/v/z5/other-id/p/key/audio.json"
+            )
+        )
+        assertEquals(
+            "https://evil.example/v/z5/video-id/p/key/audio.json",
+            IdlixParser.playbackRequestUrl(
+                masterUrl,
+                "https://evil.example/v/z5/video-id/p/key/audio.json"
+            )
+        )
     }
 
     @Test

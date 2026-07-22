@@ -92,9 +92,13 @@ class ProviderLiveDiagnosticTest {
         println(
             "KitaNonton series episodes=${episodes.size} first=${episodes.first().name} " +
                 "mirrors=${playerUrls.map { it.safeHost() }} loaded=$loaded " +
-                "links=${links.map { it.url }}"
+                "links=${links.map { "${it.url.safeHost()} headers=${it.headers.keys}" }}"
         )
-        assertTrue(!loaded || links.isNotEmpty(), "KitaNonton reported success without a link")
+        assertTrue(
+            loaded && links.isNotEmpty(),
+            "KitaNonton selected episode emitted no playable link from mirrors: " +
+                playerUrls.map { it.safeHost() }
+        )
     }
 
     @Test

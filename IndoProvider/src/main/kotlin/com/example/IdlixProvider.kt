@@ -16,7 +16,6 @@ import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.getQualityFromString
 import com.lagradost.cloudstream3.mainPageOf
-import com.lagradost.cloudstream3.newAudioFile
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
@@ -28,6 +27,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import java.net.URI
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
@@ -38,6 +38,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Interceptor
+import okhttp3.Request
+import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
 
 private const val IDLIX_API_TIMEOUT_SECONDS = 25L
@@ -67,7 +70,11 @@ class IdlixProvider : MainAPI() {
     )
 
     private val mapper = jacksonObjectMapper()
+    private val cloudflareKiller by lazy { CloudflareKiller() }
     private val apiUrl: String get() = "$mainUrl/api"
+
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor =
+        IdlixPlaybackInterceptor(extractorLink.url, cloudflareKiller)
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val type = request.data.takeIf { it == "movie" || it == "series" } ?: "movie"
@@ -200,7 +207,8 @@ class IdlixProvider : MainAPI() {
                 masterUrl,
                 referer = request.pageUrl,
                 headers = browserHeaders(request.pageUrl),
-                timeout = IDLIX_API_TIMEOUT_SECONDS
+                timeout = IDLIX_API_TIMEOUT_SECONDS,
+                interceptor = cloudflareKiller
             )
         } catch (error: CancellationException) {
             throw error
@@ -237,61 +245,25 @@ class IdlixProvider : MainAPI() {
             subtitleCallback,
             callback,
             candidateTimeoutMs = 25_000L,
-            sessionTimeoutMs = 75_000L
+            sessionTimeoutMs = 75_000L,
+            // The same master was just fetched, bounded and parsed above. Do not
+            // spend another signed request before handing it to the player.
+            mediaLinkProbe = { it }
         )
         val mediaHeaders = mapOf(
             "User-Agent" to IDLIX_USER_AGENT,
             "Referer" to request.pageUrl,
             "Origin" to mainUrl
         )
-        val audioTracks = try {
-            manifest.audioUrls.map { audioUrl ->
-                newAudioFile(audioUrl) {
-                    headers = mediaHeaders
-                }
-            }
-        } catch (_: LinkageError) {
-            // Very old CloudStream builds do not expose AudioFile yet. They
-            // still receive the authenticated video variant below instead of
-            // the unusable parent master.
-            emptyList()
-        }
-        for (stream in IdlixParser.playerStreams(manifest)) {
-            val link = if (audioTracks.isEmpty()) {
-                newExtractorLink(
-                    name,
-                    "$name ${stream.height.takeIf { it > 0 }?.let { "${it}p" }.orEmpty()}".trim(),
-                    stream.url,
-                    ExtractorLinkType.M3U8
-                ) {
-                    referer = request.pageUrl
-                    quality = stream.height
-                    headers = mediaHeaders
-                }
-            } else {
-                try {
-                    @Suppress("DEPRECATION", "DEPRECATION_ERROR")
-                    ExtractorLink(
-                        source = name,
-                        name = "$name ${stream.height.takeIf { it > 0 }?.let { "${it}p" }.orEmpty()}".trim(),
-                        url = stream.url,
-                        referer = request.pageUrl,
-                        quality = stream.height,
-                        headers = mediaHeaders,
-                        extractorData = null,
-                        type = ExtractorLinkType.M3U8,
-                        audioTracks = audioTracks
-                    )
-                } catch (_: LinkageError) {
-                    newExtractorLink(name, "$name Auto", stream.url, ExtractorLinkType.M3U8) {
-                        referer = request.pageUrl
-                        quality = stream.height
-                        headers = mediaHeaders
-                    }
-                }
-            }
-            resolver.emitResolved(link)
-        }
+        resolver.emitResolved(
+            newIdlixMasterLink(
+                source = name,
+                masterUrl = verifiedMasterUrl,
+                pageUrl = request.pageUrl,
+                quality = manifest.streams.maxOfOrNull { it.height } ?: maxHeight,
+                headers = mediaHeaders
+            )
+        )
         return resolver.loaded
     }
 
@@ -348,7 +320,8 @@ class IdlixProvider : MainAPI() {
                 referer = referer,
                 headers = browserHeaders(referer) +
                     mapOf("Content-Type" to IDLIX_JSON_MEDIA_TYPE),
-                timeout = IDLIX_API_TIMEOUT_SECONDS
+                timeout = IDLIX_API_TIMEOUT_SECONDS,
+                interceptor = cloudflareKiller
             )
         } catch (error: CancellationException) {
             throw error
@@ -381,7 +354,8 @@ class IdlixProvider : MainAPI() {
                     "$apiUrl$path",
                     referer = referer,
                     headers = browserHeaders(referer) + cookieHeaders(requestCookies),
-                    timeout = IDLIX_API_TIMEOUT_SECONDS
+                    timeout = IDLIX_API_TIMEOUT_SECONDS,
+                    interceptor = cloudflareKiller
                 )
             } catch (error: CancellationException) {
                 throw error
@@ -418,7 +392,8 @@ class IdlixProvider : MainAPI() {
                 headers = browserHeaders(referer) +
                     cookieHeaders(cookies) +
                     mapOf("Content-Type" to IDLIX_JSON_MEDIA_TYPE),
-                timeout = IDLIX_API_TIMEOUT_SECONDS
+                timeout = IDLIX_API_TIMEOUT_SECONDS,
+                interceptor = cloudflareKiller
             )
         } catch (error: CancellationException) {
             throw error
@@ -447,7 +422,8 @@ class IdlixProvider : MainAPI() {
                     "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Accept-Language" to "id-ID,id;q=0.9,en;q=0.8"
                 ),
-                timeout = IDLIX_API_TIMEOUT_SECONDS
+                timeout = IDLIX_API_TIMEOUT_SECONDS,
+                interceptor = cloudflareKiller
             )
         } catch (error: CancellationException) {
             throw error
@@ -486,6 +462,45 @@ class IdlixProvider : MainAPI() {
         val node: JsonNode,
         val cookies: Map<String, String>
     )
+}
+
+internal suspend fun newIdlixMasterLink(
+    source: String,
+    masterUrl: String,
+    pageUrl: String,
+    quality: Int,
+    headers: Map<String, String>
+): ExtractorLink = newExtractorLink(source, "$source Auto", masterUrl, ExtractorLinkType.M3U8) {
+    referer = pageUrl
+    this.quality = quality
+    this.headers = headers
+}
+
+/**
+ * Keeps IDLIX's parent master intact so Media3 can select its external audio
+ * group, while carrying the short-lived master token to trusted child requests.
+ */
+internal class IdlixPlaybackInterceptor(
+    private val masterUrl: String,
+    private val cloudflareKiller: Interceptor
+) : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val original = chain.request()
+        val rewrittenUrl = IdlixParser.playbackRequestUrl(masterUrl, original.url.toString())
+        val rewritten = if (rewrittenUrl == original.url.toString()) {
+            original
+        } else {
+            original.newBuilder().url(rewrittenUrl).build()
+        }
+        val forwardingChain = if (rewritten === original) {
+            chain
+        } else {
+            object : Interceptor.Chain by chain {
+                override fun request(): Request = rewritten
+            }
+        }
+        return cloudflareKiller.intercept(forwardingChain)
+    }
 }
 
 internal object IdlixParser {
@@ -725,6 +740,44 @@ internal object IdlixParser {
     fun isTrustedPlaybackAsset(raw: String): Boolean = trustedUri(raw) { uri ->
         isTrustedPlaybackHost(uri.host.orEmpty()) && uri.path.orEmpty().startsWith("/v/")
     }
+
+    fun playbackRequestUrl(masterUrl: String, requestUrl: String): String = runCatching {
+        if (!isTrustedMasterUrl(masterUrl) || !isTrustedPlaybackAsset(requestUrl)) {
+            return@runCatching requestUrl
+        }
+        val master = URI(masterUrl)
+        val request = URI(requestUrl)
+        val masterParts = master.rawPath.orEmpty().trim('/').split('/')
+        if (masterParts.size < 4 || masterParts.firstOrNull() != "v") {
+            return@runCatching requestUrl
+        }
+        val videoPathPrefix = "/${masterParts.take(3).joinToString("/")}/"
+        if (!request.rawPath.orEmpty().startsWith(videoPathPrefix)) {
+            return@runCatching requestUrl
+        }
+
+        val masterParameters = master.rawQuery.orEmpty().split('&').mapNotNull { parameter ->
+            val key = parameter.substringBefore('=', "")
+            val value = parameter.substringAfter('=', "")
+            if (key in setOf("t", "pm") && value.isNotBlank()) key to value else null
+        }
+        val existingKeys = request.rawQuery.orEmpty().split('&')
+            .map { it.substringBefore('=') }
+            .toSet()
+        val additions = masterParameters.filterNot { it.first in existingKeys }
+        if (additions.isEmpty()) return@runCatching requestUrl
+        val query = (
+            listOfNotNull(request.rawQuery?.takeIf(String::isNotBlank)) +
+                additions.map { (key, value) -> "$key=$value" }
+            ).joinToString("&")
+        URI(
+            request.scheme,
+            request.rawAuthority,
+            request.rawPath,
+            query,
+            request.rawFragment
+        ).toASCIIString()
+    }.getOrDefault(requestUrl)
 
     private fun trustedUri(raw: String, predicate: (URI) -> Boolean): Boolean = runCatching {
         if (raw.length !in 8..8192 || !isSafeRemoteHttpUrl(raw)) return@runCatching false

@@ -2,9 +2,51 @@ package com.example
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
 
 class FilmapikPlayerParserTest {
+    @Test
+    fun `failed Byse shell is terminal so a later fallback keeps its budget`() = runBlocking {
+        val byseUrl = "https://byseqekaho.com/e/dead"
+        val links = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        var genericAttempts = 0
+        var bysePageFetches = 0
+        val session = LinkResolutionSession(
+            api = FilmapikProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                if (url == byseUrl) bysePageFetches++
+                error("Byse shell HTML must not be fetched")
+            },
+            byseApiFetcher = { _, _ -> "{}" },
+            extractorLoader = { _, _, _, _ ->
+                genericAttempts++
+                false
+            },
+            mediaLinkProbe = { it },
+            candidateTimeoutMs = 500L,
+            sessionTimeoutMs = 3_000L
+        )
+
+        assertFalse(session.resolve(byseUrl, "https://filmapik.college/example/play"))
+        assertEquals(0, genericAttempts)
+        assertEquals(0, bysePageFetches)
+
+        // The same session must still have room to accept a healthy later
+        // candidate after the dead Byse shell is classified as terminal.
+        assertTrue(
+            session.resolve(
+                "https://cdn.example/video.mp4",
+                "https://filmapik.college/example/play"
+            )
+        )
+        assertEquals(1, links.size)
+    }
+
     @Test
     fun `slow Efek player is deferred until regular and download fallbacks`() {
         assertEquals(

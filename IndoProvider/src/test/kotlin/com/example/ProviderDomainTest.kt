@@ -241,8 +241,11 @@ class ProviderDomainTest {
         assertTrue(provider.contains("/watch/session/claim"))
         assertTrue(provider.contains("val verifiedMasterUrl"))
         assertTrue(provider.contains("IdlixParser.masterManifest("))
-        assertTrue(provider.contains("IdlixParser.playerStreams(manifest)"))
-        assertFalse(provider.contains("\"\$name Auto\", verifiedMasterUrl"))
+        assertTrue(provider.contains("newIdlixMasterLink("))
+        assertTrue(provider.contains("override fun getVideoInterceptor"))
+        assertTrue(provider.contains("IdlixPlaybackInterceptor("))
+        assertTrue(provider.contains("interceptor = cloudflareKiller"))
+        assertFalse(provider.contains("newAudioFile"))
         assertTrue(provider.contains("LinkResolutionSession("))
         assertTrue(source("IndoPlugin.kt").contains("registerMainAPI(IdlixProvider())"))
     }
@@ -294,7 +297,7 @@ class ProviderDomainTest {
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
         assertTrue(
-            Regex("""(?m)^version\s*=\s*12\s*$""").containsMatchIn(moduleBuild.readText()),
+            Regex("""(?m)^version\s*=\s*13\s*$""").containsMatchIn(moduleBuild.readText()),
             "Cloudstream must see these provider fixes as a new plugin release"
         )
     }

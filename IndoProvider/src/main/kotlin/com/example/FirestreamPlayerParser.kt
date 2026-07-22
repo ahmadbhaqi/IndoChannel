@@ -3,7 +3,6 @@ package com.example
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import java.net.URI
-import java.util.Base64
 import org.jsoup.Jsoup
 
 internal data class FirestreamResolveRequest(
@@ -58,7 +57,8 @@ internal object FirestreamPlayerParser {
                     tokenPattern.matches(value)
             }
             ?: return@runCatching null
-        val decodedSize = Base64.getDecoder().decode(token).size
+        val decodedSize = decodeBase64Compat(token)?.size
+            ?: return@runCatching null
         if (decodedSize !in 16..MAX_TOKEN_BYTES) return@runCatching null
 
         val origin = URI(scheme, null, host, -1, null, null, null)
