@@ -1,6 +1,6 @@
 IndoChannel
 
-IndoChannel adalah repositori ekstensi komunitas untuk "CloudStream" (https://github.com/recloudstream/cloudstream) yang menghadirkan katalog film, serial, dan anime dari berbagai provider berbahasa Indonesia melalui satu ekstensi, "IndoProvider". Ekstensi ini tidak menyimpan atau meng-host video, tetapi memproses katalog dan tautan yang disediakan oleh situs sumber pihak ketiga.
+IndoChannel adalah repositori ekstensi komunitas untuk CloudStream menghadirkan katalog film, serial, dan anime dari berbagai provider berbahasa Indonesia melalui satu ekstensi, "IndoProvider". Ekstensi ini tidak menyimpan atau meng-host video, tetapi memproses katalog dan tautan yang disediakan oleh situs sumber pihak ketiga.
 
 Provider
 
@@ -18,7 +18,7 @@ Provider
 
 Instalasi
 
-""Pasang IndoChannel di CloudStream" (https://img.shields.io/badge/Pasang%20di%20CloudStream-IndoChannel-5c6bc0?style=for-the-badge&logo=android&logoColor=white)" (https://self-similarity.github.io/http-protocol-redirector?r=cloudstreamrepo://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/repo.json)
+""Install Repository in CloudStream" (https://img.shields.io/badge/Install%20Repository-CloudStream-5c6bc0?style=for-the-badge&logo=android&logoColor=white)" (https://self-similarity.github.io/http-protocol-redirector?r=cloudstreamrepo://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/repo.json)
 
 Atau tambahkan repositori melalui Settings → Extensions → Add Repository, kemudian masukkan URL berikut:
 
