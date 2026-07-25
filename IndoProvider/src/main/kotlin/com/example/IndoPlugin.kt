@@ -10,6 +10,12 @@ class IndoPlugin: Plugin() {
         // Mendaftarkan provider ke dalam Cloudstream
         
         // Movie & TV Series
+        // Provider tambahan diurutkan dari trafik publik tertinggi.
+        registerMainAPI(MovieboxProvider())
+        registerMainAPI(PencurimovieProvider())
+        registerMainAPI(SarangfilmProvider())
+        registerMainAPI(NomatProvider())
+        registerMainAPI(KawanfilmProvider())
         registerMainAPI(LayarKacaProvider())
         registerMainAPI(NgefilmProvider())
         registerMainAPI(DutamovieProvider())
@@ -21,6 +27,9 @@ class IndoPlugin: Plugin() {
         registerMainAPI(KeBioskopProvider())
         
         // Anime
+        // Provider tambahan diurutkan dari trafik publik tertinggi.
+        registerMainAPI(KuramanimeProvider())
+        registerMainAPI(AnimasuProvider())
         registerMainAPI(OtakudesuProvider())
         registerMainAPI(SamehadakuProvider())
         registerMainAPI(AnoboyProvider())

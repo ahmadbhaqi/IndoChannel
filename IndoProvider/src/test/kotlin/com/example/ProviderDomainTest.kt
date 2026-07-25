@@ -297,15 +297,15 @@ class ProviderDomainTest {
     }
 
     @Test
-    fun `plugin version is bumped for provider fixes`() {
+    fun `plugin version is bumped for provider expansion`() {
         val moduleBuild = listOf(
             File("build.gradle.kts"),
             File("IndoProvider/build.gradle.kts")
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
         assertTrue(
-            Regex("""(?m)^version\s*=\s*14\s*$""").containsMatchIn(moduleBuild.readText()),
-            "Cloudstream must see these provider fixes as a new plugin release"
+            Regex("""(?m)^version\s*=\s*15\s*$""").containsMatchIn(moduleBuild.readText()),
+            "Cloudstream must see the provider expansion as a new plugin release"
         )
     }
 

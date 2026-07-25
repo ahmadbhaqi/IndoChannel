@@ -30,8 +30,25 @@ internal object InlineDataParser {
             .replace("\\r", "")
     }
 
-    fun inlinePlayerSources(html: String): List<InlinePlayerSource> {
-        val data = decodeEscapedInlineData(html)
+    fun inlinePlayerSources(html: String): List<InlinePlayerSource> =
+        parseInlinePlayerSources(html, Int.MAX_VALUE, Int.MAX_VALUE)
+
+    fun boundedInlinePlayerUrls(
+        html: String,
+        maxSources: Int,
+        maxInputChars: Int
+    ): List<String> {
+        if (maxSources <= 0 || maxInputChars <= 0) return emptyList()
+        return parseInlinePlayerSources(html, maxSources, maxInputChars).map { it.url }
+    }
+
+    private fun parseInlinePlayerSources(
+        html: String,
+        maxSources: Int,
+        maxInputChars: Int
+    ): List<InlinePlayerSource> {
+        val boundedHtml = if (html.length > maxInputChars) html.take(maxInputChars) else html
+        val data = decodeEscapedInlineData(boundedHtml)
         val sourceRegex = Regex(
             """(?i)(?:[\"']?file[\"']?|[\"']?src[\"']?)\s*:\s*[\"']([^\"']+)[\"']"""
         )
@@ -58,6 +75,7 @@ internal object InlineDataParser {
                 )
             }
             .distinctBy { it.url }
+            .take(maxSources)
             .toList()
     }
 

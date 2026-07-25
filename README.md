@@ -6,15 +6,22 @@ IndoChannel adalah repositori ekstensi komunitas untuk CloudStream yang menghadi
 
 | Film & Serial    | Anime      |
 | ---------------- | ---------- |
-| LayarKaca (LK21) | Otakudesu  |
-| Ngefilm          | Samehadaku |
-| Dutamovie        | Anoboy     |
-| KitaNonton       | Kuronime   |
-| IndoXXI          | Animeindo  |
-| Filmapik         | Oploverz   |
-| IDLIX            | Zoronime   |
+| Moviebox         | Kuramanime |
+| Pencurimovie     | Animasu    |
+| Sarangfilm       | Otakudesu  |
+| Nomat            | Samehadaku |
+| Kawanfilm        | Anoboy     |
+| LayarKaca (LK21) | Kuronime   |
+| Ngefilm          | Animeindo  |
+| Dutamovie        | Oploverz   |
+| KitaNonton       | Zoronime   |
+| IndoXXI          |            |
+| Filmapik         |            |
+| IDLIX            |            |
 | Pusatfilm        |            |
 | keBioskop21      |            |
+
+Provider tambahan ditempatkan di awal masing-masing kelompok dan diurutkan dari estimasi trafik publik tertinggi yang tersedia pada 2026.
 
 ## Instalasi
 
