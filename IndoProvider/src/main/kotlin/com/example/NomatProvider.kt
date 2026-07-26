@@ -5,26 +5,31 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.nicehttp.NiceResponse
 import java.net.URI
 import java.net.URLEncoder
+import java.text.Normalizer
+import kotlin.coroutines.cancellation.CancellationException
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class NomatProvider : MainAPI() {
-    override var mainUrl = "https://nomat.site"
+    override var mainUrl = "https://nomat.shop"
     override var name = "Nomat"
     override var lang = "id"
     override val hasMainPage = true
     override val supportedTypes =
         setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AsianDrama)
+    private val safeHttp by lazy {
+        ProviderHttpSafetyClient(NiceHttpProviderFetcher(app))
+    }
 
     override val mainPage = mainPageOf(
         "slug/film-terbaru/%d/" to "Film Terbaru",
-        "slug/film-box-office/%d/" to "Box Office",
+        "slug/film-box-office-terkini/%d/" to "Box Office",
         "slug/film-serial-baru-terpopuler/%d/" to "Serial TV",
         "category/genre/action/%d/" to "Action",
-        "slug/film-movie-anime/%d/" to "Animasi",
+        "category/genre/animasi/%d/" to "Animasi",
         "category/genre/horror/%d/" to "Horor",
         "category/genre/romance/%d/" to "Romansa",
         "category/country/indonesia/%d/" to "Indonesia"
@@ -32,7 +37,13 @@ class NomatProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val path = request.data.format(page.coerceAtLeast(1))
-        val document = app.get("$mainUrl/$path", timeout = PROVIDER_HTTP_TIMEOUT_SECONDS).document
+        val fetch = getProviderPage("$mainUrl/$path")
+            ?: return newHomePageResponse(request.name, emptyList())
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return newHomePageResponse(request.name, emptyList())
+        val document = Jsoup.parse(fetch.body, fetch.url)
         return newHomePageResponse(
             request.name,
             document.select("a:has(.item-content)").mapNotNull { it.toSearchResult() }
@@ -41,10 +52,14 @@ class NomatProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = NomatParser.searchPathSegment(query)
-        return app.get(
-            "$mainUrl/search/$encoded/",
-            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-        ).document.select("a:has(.item-content)").mapNotNull { it.toSearchResult() }
+        val fetch = getProviderPage("$mainUrl/search/$encoded/") ?: return emptyList()
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return emptyList()
+        return Jsoup.parse(fetch.body, fetch.url)
+            .select("a:has(.item-content)")
+            .mapNotNull { it.toSearchResult() }
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
@@ -74,9 +89,13 @@ class NomatProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val requestUrl = providerUrl(url) ?: return null
-        val fetch = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
-        val canonicalUrl = providerUrl(fetch.url) ?: return null
-        val document = fetch.document
+        val fetch = getProviderPage(requestUrl) ?: return null
+        val canonicalUrl = fetch.url
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return null
+        val document = Jsoup.parse(fetch.body, canonicalUrl)
         val heading = document.selectFirst("div.video-title h1, h1.entry-title")?.text()
         val title = MovieMetadataParser.title(heading) ?: return null
         val poster = fixUrlNull(NomatParser.poster(document))
@@ -116,10 +135,7 @@ class NomatProvider : MainAPI() {
                 addScore(rating)
             }
         } else {
-            val playUrl = document.selectFirst(
-                "div.video-wrapper a[href*='nontonhemat.link'], div.video-wrapper a[href*='/play/']"
-            )?.attr("href")?.let { ProviderHtmlParser.absoluteUrl(it, canonicalUrl) }
-            newMovieLoadResponse(title, canonicalUrl, TvType.Movie, playUrl ?: canonicalUrl) {
+            newMovieLoadResponse(title, canonicalUrl, TvType.Movie, canonicalUrl) {
                 posterUrl = poster
                 this.year = year
                 plot = description
@@ -141,54 +157,158 @@ class NomatProvider : MainAPI() {
         val pageUrl = NomatParser.playbackPageUrl(data, mainUrl) ?: return false
         val response = fetchPlaybackPage(pageUrl) ?: return false
         val responseUrl = NomatParser.playbackPageUrl(response.url, mainUrl) ?: return false
-        val document = response.document
+        if (
+            response.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(response.body)
+        ) return false
+        val document = Jsoup.parse(response.body, responseUrl)
+        val fallbackRequest = providerUrl(responseUrl)?.let {
+            NomatParser.fallbackRequest(document)
+        }
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
         val candidates = (
             NomatParser.serverUrls(document) +
+                NomatParser.playerUrls(document, responseUrl) +
                 ProviderHtmlParser.mediaSources(document) +
                 ProviderHtmlParser.downloadCandidateUrls(document, responseUrl)
             ).mapNotNull { ProviderHtmlParser.absoluteUrl(it, responseUrl) }.distinct().take(48)
 
-        candidates.forEach { candidate ->
-            if (resolver.canContinue) resolver.resolve(candidate, responseUrl)
+        for (candidate in candidates) {
+            if (resolver.loaded || !resolver.canContinue) break
+            resolver.resolve(candidate, responseUrl)
         }
-        return resolver.loaded
+        if (resolver.loaded || fallbackRequest == null) return resolver.loaded
+        return loadFallback(
+            request = fallbackRequest,
+            isCasting = isCasting,
+            subtitleCallback = subtitleCallback,
+            callback = callback
+        )
     }
 
-    private suspend fun fetchPlaybackPage(initialUrl: String): NiceResponse? {
-        var currentUrl = initialUrl
-        var redirectsRemaining = 5
-        while (true) {
-            val response = app.get(
-                currentUrl,
-                referer = mainUrl,
-                allowRedirects = false,
-                timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-            )
-            val responseUrl = NomatParser.playbackPageUrl(response.url, mainUrl) ?: return null
-            if (response.code !in 300..399) return response
-            if (redirectsRemaining-- <= 0) return null
-            currentUrl = NomatParser.redirectTarget(
-                response.headers["Location"],
-                responseUrl,
-                mainUrl
-            ) ?: return null
+    private suspend fun loadFallback(
+        request: NomatFallbackRequest,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val providers = listOf(
+            FilmapikProvider(),
+            KitanontonProvider(),
+            LayarKacaProvider()
+        )
+        for (provider in providers) {
+            try {
+                val exactResults = provider.search(request.title).orEmpty()
+                    .asSequence()
+                    .filter { NomatParser.isExactFallbackTitle(request.title, it.name) }
+                    .distinctBy { it.url }
+                    .take(3)
+                    .toList()
+                for (result in exactResults) {
+                    val detail = provider.load(result.url) ?: continue
+                    if (!NomatParser.isExactFallbackMatch(request, detail.name, detail.year)) {
+                        continue
+                    }
+                    val playbackData = when (detail) {
+                        is MovieLoadResponse ->
+                            detail.dataUrl.takeIf { request.episode == null }
+
+                        is TvSeriesLoadResponse -> {
+                            val matchingEpisodes = detail.episodes.filter { episode ->
+                                episode.episode == request.episode &&
+                                    (request.season == null || episode.season == request.season)
+                            }
+                            matchingEpisodes.singleOrNull()?.data
+                        }
+
+                        else -> null
+                    } ?: continue
+                    if (
+                        provider.loadLinks(
+                            playbackData,
+                            isCasting,
+                            subtitleCallback,
+                            callback
+                        )
+                    ) return true
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // A fallback failure must not prevent the next exact-match provider.
+            }
         }
+        return false
     }
 
-    private fun providerUrl(raw: String?): String? =
-        ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl)
+    private suspend fun fetchPlaybackPage(initialUrl: String): ProviderHttpResult? = try {
+        safeHttp.get(
+            url = initialUrl,
+            normalizer = ProviderUrlNormalizer {
+                NomatParser.networkPlaybackPageUrl(it, mainUrl)
+            },
+            referer = mainUrl,
+            timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
+        )
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        null
+    }
+
+    private suspend fun getProviderPage(url: String): ProviderHttpResult? = try {
+        safeHttp.get(
+            url = url,
+            normalizer = ProviderUrlNormalizer {
+                NomatParser.networkProviderPageUrl(it, mainUrl)
+            },
+            timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
+        )
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun providerUrl(raw: String?): String? = NomatParser.providerPageUrl(raw, mainUrl)
 }
+
+internal data class NomatFallbackRequest(
+    val title: String,
+    val year: Int?,
+    val season: Int? = null,
+    val episode: Int? = null
+)
 
 internal object NomatParser {
     private const val MAX_SERVER_VALUE_SIZE = 16_384
+    private val providerHosts = setOf("nomat.site", "nomat.store", "nomat.asia")
     private val playbackHosts = setOf("nontonhemat.link")
+    private val yearRegex = Regex("""\b(?:19|20)\d{2}\b""")
+    private val seasonRegex = Regex("""(?i)\bseason\s*[-:]?\s*(\d+)\b""")
+    private val episodeRegex = Regex("""(?i)\b(?:episode|eps?\.?)\s*[-:]?\s*(\d+)\b""")
 
     fun searchPathSegment(query: String): String =
         URLEncoder.encode(query, Charsets.UTF_8.name()).replace("+", "%20")
 
+    fun providerPageUrl(raw: String?, mainUrl: String): String? =
+        ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, providerHosts)
+
+    fun networkProviderPageUrl(raw: String?, mainUrl: String): String? =
+        ProviderHtmlParser.preserveProviderPageUrl(raw, mainUrl, providerHosts)
+
     fun playbackPageUrl(raw: String?, mainUrl: String): String? {
-        ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl)?.let { return it }
+        providerPageUrl(raw, mainUrl)?.let { return it }
+        return externalPlaybackPageUrl(raw)
+    }
+
+    fun networkPlaybackPageUrl(raw: String?, mainUrl: String): String? {
+        networkProviderPageUrl(raw, mainUrl)?.let { return it }
+        return externalPlaybackPageUrl(raw)
+    }
+
+    private fun externalPlaybackPageUrl(raw: String?): String? {
         val value = raw?.trim()?.takeIf(::isSafeRemoteHttpUrl) ?: return null
         return runCatching {
             val host = URI(value).host.orEmpty().lowercase().removePrefix("www.")
@@ -214,10 +334,77 @@ internal object NomatParser {
         }.distinct()
     }
 
+    fun playerUrls(document: Document, pageUrl: String): List<String> =
+        document.select(
+            "div.video-wrapper a[href], div.video-wrapper iframe[src], " +
+                "div.video-wrapper iframe[data-src]"
+        ).flatMap { element ->
+            listOf(element.attr("href"), element.attr("data-src"), element.attr("src"))
+        }.mapNotNull { ProviderHtmlParser.absoluteUrl(it, pageUrl) }
+            .filter(::isSafeRemoteHttpUrl)
+            .distinct()
+
+    fun fallbackRequest(document: Document): NomatFallbackRequest? {
+        val rawTitle = document.selectFirst("div.video-title h1, h1.entry-title")
+            ?.text()
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        val parsedTitle = MovieMetadataParser.title(rawTitle) ?: return null
+        val year = document.select("a[href*='/category/year/']")
+            .firstNotNullOfOrNull { yearRegex.find(it.text())?.value?.toIntOrNull() }
+            ?: yearRegex.find(parsedTitle)?.value?.toIntOrNull()
+        val season = seasonRegex.find(parsedTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val episode = episodeRegex.find(parsedTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val title = fallbackTitle(parsedTitle)
+
+        return title?.let {
+            NomatFallbackRequest(
+                title = it,
+                year = year,
+                season = season,
+                episode = episode
+            )
+        }
+    }
+
+    fun isExactFallbackTitle(expected: String, candidate: String): Boolean {
+        val expectedKey = titleKey(expected)
+        return expectedKey.isNotEmpty() && expectedKey == titleKey(candidate)
+    }
+
+    fun isExactFallbackMatch(
+        request: NomatFallbackRequest,
+        candidateTitle: String,
+        candidateYear: Int?
+    ): Boolean {
+        if (!isExactFallbackTitle(request.title, candidateTitle)) return false
+        return request.year == null || candidateYear == request.year
+    }
+
     fun poster(document: Document): String? {
         val style = document.selectFirst("div.video-poster")?.attr("style").orEmpty()
         return Regex("""(?i)url\((?:['"])?([^'")]+)""")
             .find(style)?.groupValues?.getOrNull(1)
             ?: ProviderHtmlParser.firstImageSource(document, "div.video-poster img")
+    }
+
+    private fun fallbackTitle(raw: String): String? = raw
+        .replace(Regex("""(?i)^nonton(?:\s+film)?\s+"""), "")
+        .replace(seasonRegex, " ")
+        .replace(episodeRegex, " ")
+        .replace(yearRegex, " ")
+        .replace(Regex("""(?i)\b(?:subtitle\s+indonesia|sub\s*indo)\b.*$"""), "")
+        .replace(Regex("""[()\[\]]"""), " ")
+        .replace(Regex("""\s+"""), " ")
+        .trim(' ', '-', ':', '|')
+        .takeIf { it.isNotBlank() }
+
+    private fun titleKey(raw: String): String {
+        val normalized = fallbackTitle(MovieMetadataParser.title(raw) ?: raw).orEmpty()
+        return Normalizer.normalize(normalized, Normalizer.Form.NFD)
+            .replace(Regex("""\p{M}+"""), "")
+            .lowercase()
+            .replace(Regex("""[^a-z0-9]+"""), "")
     }
 }

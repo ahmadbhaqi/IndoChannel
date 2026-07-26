@@ -78,6 +78,12 @@ private const val MAX_CONCURRENT_PLAYLIST_PROBES = 4
 private const val MAX_AUDIO_TRACK_PROBE_ITEMS = 8
 private const val JSON_MEDIA_TYPE = "application/json;charset=UTF-8"
 private const val JUICY_CODES_ACCEPT_LANGUAGE = "*"
+private val mediaProbeHttp by lazy {
+    ProviderHttpSafetyClient(NiceHttpProviderFetcher(app))
+}
+private val publicMediaUrlNormalizer = ProviderUrlNormalizer { candidate ->
+    candidate.takeIf(::isSafeRemoteHttpUrl)
+}
 
 private data class CandidateKey(
     val url: String,
@@ -922,28 +928,28 @@ private suspend fun probeExtractorLink(
         }
     }
     return try {
-        val response = app.get(
-            link.url,
+        val response = mediaProbeHttp.getPrefix(
+            url = link.url,
+            normalizer = publicMediaUrlNormalizer,
             referer = explicitReferer ?: link.referer.takeIf { it.isNotBlank() },
             headers = requestHeaders,
-            timeout = timeoutSeconds.coerceIn(1L, 60L)
+            maxBodyBytes = MAX_MEDIA_PROBE_BYTES,
+            timeoutSeconds = timeoutSeconds.coerceIn(1L, 60L)
         )
         if (response.code !in 200..299 || !isSafeRemoteHttpUrl(response.url)) {
-            response.body.close()
             return null
         }
         if (
             expectedSoraRangeIsValid(
                 link.url,
                 response.code,
-                response.headers["Content-Range"]
+                response.header("Content-Range")
             ) == false
         ) {
-            response.body.close()
             return null
         }
-        val contentType = response.body.contentType()?.toString()
-        val prefix = readBoundedPrefix(response.body, MAX_MEDIA_PROBE_BYTES)
+        val contentType = response.header("Content-Type")
+        val prefix = response.bodyBytes
         val detectedType = sniffMediaType(prefix, contentType) ?: return null
 
         // Keep the original URL and concrete subtype. The player can follow the

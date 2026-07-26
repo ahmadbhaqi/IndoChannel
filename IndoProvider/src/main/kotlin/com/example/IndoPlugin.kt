@@ -15,6 +15,7 @@ class IndoPlugin: Plugin() {
         registerMainAPI(PencurimovieProvider())
         registerMainAPI(SarangfilmProvider())
         registerMainAPI(NomatProvider())
+        registerMainAPI(IndomaxProvider())
         registerMainAPI(KawanfilmProvider())
         registerMainAPI(LayarKacaProvider())
         registerMainAPI(NgefilmProvider())

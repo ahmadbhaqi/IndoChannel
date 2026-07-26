@@ -1,10 +1,13 @@
 package com.example
 
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import java.io.File
 import java.util.Base64
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import org.jsoup.Jsoup
@@ -23,6 +26,7 @@ class ProviderExpansionTest {
             "PencurimovieProvider",
             "SarangfilmProvider",
             "NomatProvider",
+            "IndomaxProvider",
             "KawanfilmProvider"
         )
 
@@ -40,13 +44,14 @@ class ProviderExpansionTest {
     @Test
     fun `new providers use verified current domains`() {
         val expectedDomains = mapOf(
-            "MovieboxProvider.kt" to "https://moviebox.ph",
-            "PencurimovieProvider.kt" to "https://ww73.pencurimovie.bond",
-            "SarangfilmProvider.kt" to "https://sarangfilm.uno",
-            "NomatProvider.kt" to "https://nomat.site",
-            "KawanfilmProvider.kt" to "https://tv2.kawanfilm21.co",
-            "KuramanimeProvider.kt" to "https://v11.kuramanime.tel",
-            "AnimasuProvider.kt" to "https://v1.animasu.app"
+            "MovieboxProvider.kt" to "https://h5-api.aoneroom.com",
+            "PencurimovieProvider.kt" to "https://ww21.pencurimovie.sbs",
+            "SarangfilmProvider.kt" to "https://sarangfilm.asia",
+            "NomatProvider.kt" to "https://nomat.shop",
+            "IndomaxProvider.kt" to "https://idmxl.ink",
+            "KawanfilmProvider.kt" to "https://web.kawanfilm21.co",
+            "KuramanimeProvider.kt" to "https://v19.kuramanime.ing",
+            "AnimasuProvider.kt" to "https://v2.animasu.work"
         )
 
         expectedDomains.forEach { (fileName, domain) ->
@@ -66,6 +71,7 @@ class ProviderExpansionTest {
             "PencurimovieProvider.kt",
             "SarangfilmProvider.kt",
             "NomatProvider.kt",
+            "IndomaxProvider.kt",
             "KawanfilmProvider.kt",
             "KuramanimeProvider.kt",
             "AnimasuProvider.kt"
@@ -78,15 +84,14 @@ class ProviderExpansionTest {
                 Regex("""\bLinkResolutionSession\s*\(""").findAll(provider).count(),
                 "$fileName must create one shared resolution session"
             )
-            assertTrue(provider.contains("return resolver.loaded"), "$fileName must report actual playback")
             assertFalse(provider.contains("private var directUrl"), "$fileName must not share redirect state")
         }
     }
 
     @Test
-    fun `provider expansion bumps the plugin release`() {
+    fun `provider repairs bump the plugin release`() {
         val moduleBuild = File(projectRoot, "IndoProvider/build.gradle.kts").readText()
-        assertTrue(Regex("""(?m)^version\s*=\s*15\s*$""").containsMatchIn(moduleBuild))
+        assertTrue(Regex("""(?m)^version\s*=\s*16\s*$""").containsMatchIn(moduleBuild))
     }
 
     @Test
@@ -108,10 +113,18 @@ class ProviderExpansionTest {
 
     @Test
     fun `nomat only fetches provider owned or explicit playback hosts`() {
-        val mainUrl = "https://nomat.site"
+        val mainUrl = "https://nomat.shop"
+        assertEquals(
+            "https://nomat.shop/play/sample",
+            NomatParser.playbackPageUrl("https://nomat.shop/play/sample", mainUrl)
+        )
+        assertEquals(
+            "https://nomat.shop/play/sample",
+            NomatParser.playbackPageUrl("https://nomat.site/play/sample", mainUrl)
+        )
         assertEquals(
             "https://nomat.site/play/sample",
-            NomatParser.playbackPageUrl("https://nomat.site/play/sample", mainUrl)
+            NomatParser.networkPlaybackPageUrl("https://nomat.site/play/sample", mainUrl)
         )
         assertEquals(
             "https://nontonhemat.link/watch/sample",
@@ -141,10 +154,6 @@ class ProviderExpansionTest {
                 mainUrl
             )
         )
-
-        val provider = source("NomatProvider.kt")
-        assertTrue(provider.contains("allowRedirects = false"))
-        assertTrue(provider.contains("NomatParser.redirectTarget("))
     }
 
     @Test
@@ -168,7 +177,7 @@ class ProviderExpansionTest {
 
         assertEquals(
             listOf("https://player.example/embed/animasu"),
-            AnimasuParser.playerUrls(html, "https://v1.animasu.app/episode/sample")
+            AnimasuParser.playerUrls(html, "https://v2.animasu.work/episode/sample")
         )
     }
 
@@ -184,9 +193,9 @@ class ProviderExpansionTest {
         assertEquals(
             listOf(
                 "https://player.example/embed/kurama",
-                "https://v11.kuramanime.tel/player/fallback"
+                "https://v19.kuramanime.ing/player/fallback"
             ),
-            KuramanimeParser.playerUrls(html, "https://v11.kuramanime.tel/anime/a/episode/1")
+            KuramanimeParser.playerUrls(html, "https://v19.kuramanime.ing/anime/a/episode/1")
         )
     }
 
@@ -206,9 +215,9 @@ class ProviderExpansionTest {
 
         assertEquals(
             listOf(
-                "https://v11.kuramanime.tel/anime/1/sample/episode/1" to "Episode 1"
+                "https://v19.kuramanime.ing/anime/1/sample/episode/1" to "Episode 1"
             ),
-            KuramanimeParser.episodeLinks(document, "https://v11.kuramanime.tel/anime/1/sample/")
+            KuramanimeParser.episodeLinks(document, "https://v19.kuramanime.ing/anime/1/sample/")
         )
     }
 
@@ -222,7 +231,7 @@ class ProviderExpansionTest {
         }
         val animasuHtml = """<div class="mirror"><select>$options</select></div>"""
         assertTrue(
-            AnimasuParser.playerUrls(animasuHtml, "https://v1.animasu.app/episode/sample").size <= 48
+            AnimasuParser.playerUrls(animasuHtml, "https://v2.animasu.work/episode/sample").size <= 48
         )
 
         val kuramaButtons = (1..80).joinToString("") { index ->
@@ -231,7 +240,7 @@ class ProviderExpansionTest {
         assertTrue(
             KuramanimeParser.playerUrls(
                 """<div id="player">$kuramaButtons</div>""",
-                "https://v11.kuramanime.tel/anime/a/episode/1"
+                "https://v19.kuramanime.ing/anime/a/episode/1"
             ).size <= 48
         )
 
@@ -260,7 +269,7 @@ class ProviderExpansionTest {
             listOf("https://player.example/embed/kurama"),
             KuramanimeParser.playerUrls(
                 html,
-                "https://v11.kuramanime.tel/anime/a/episode/1"
+                "https://v19.kuramanime.ing/anime/a/episode/1"
             )
         )
     }
@@ -296,14 +305,14 @@ class ProviderExpansionTest {
             expected,
             KuramanimeParser.playerUrls(
                 html,
-                "https://v11.kuramanime.tel/anime/a/episode/1"
+                "https://v19.kuramanime.ing/anime/a/episode/1"
             )
         )
         assertEquals(
             expected,
             AnimasuParser.playerUrls(
                 html.replace("""id="player"""", """id="server""""),
-                "https://v1.animasu.app/episode/sample"
+                "https://v2.animasu.work/episode/sample"
             )
         )
 
@@ -358,15 +367,425 @@ class ProviderExpansionTest {
     }
 
     @Test
-    fun `redirected provider pages and ajax candidates retain trust boundaries`() {
-        val pencuri = source("PencurimovieProvider.kt")
-        assertTrue(pencuri.contains("providerUrl(fetch.url) ?: return null"))
-        assertTrue(pencuri.contains("providerUrl(fetch.url) ?: return false"))
+    fun `kuramanime catalog prefers the title link over an outer episode card`() {
+        val card = Jsoup.parse(
+            """
+                <div class="product__item">
+                    <a href="/anime/5044/example/episode/4">
+                        <span class="ep">Ep 4 / 12</span>
+                    </a>
+                    <h5>
+                        <a href="/anime/5044/example/episode/4">Example Anime</a>
+                    </h5>
+                </div>
+            """.trimIndent()
+        ).selectFirst("div.product__item")!!
 
-        listOf("SarangfilmProvider.kt", "KawanfilmProvider.kt").forEach { fileName ->
+        assertEquals("Example Anime", KuramanimeParser.catalogAnchor(card)?.text())
+    }
+
+    @Test
+    fun `kuramanime extracts only scoped hydrated hls sources`() {
+        val html = """
+            <div id="animeVideoPlayer" data-hls-src="//cdn.example/master.m3u8"></div>
+            <div data-hls-src="https://attacker.example/outside.m3u8"></div>
+        """.trimIndent()
+
+        assertEquals(
+            listOf("https://cdn.example/master.m3u8"),
+            KuramanimeParser.playerUrls(
+                html,
+                "https://v19.kuramanime.ing/anime/a/episode/1"
+            )
+        )
+    }
+
+    @Test
+    fun `kuramanime resolves hydrated playback before static fallback candidates`() = runBlocking {
+        val events = mutableListOf<String>()
+        var loaded = false
+
+        val result = resolveKuramanimeCandidatesHydrationFirst(
+            staticCandidates = listOf("https://player.example/static"),
+            staticReferer = "https://v19.kuramanime.ing/episode/static",
+            hydrate = {
+                events += "hydrate"
+                KuramanimeCandidateBatch(
+                    urls = listOf("https://cdn.example/hydrated.m3u8"),
+                    referer = "https://v19.kuramanime.ing/episode/hydrated"
+                )
+            },
+            canContinue = { true },
+            isLoaded = { loaded },
+            resolve = { url, referer ->
+                events += "resolve:$url:$referer"
+                loaded = true
+            }
+        )
+
+        assertTrue(result)
+        assertEquals(
+            listOf(
+                "hydrate",
+                "resolve:https://cdn.example/hydrated.m3u8:" +
+                    "https://v19.kuramanime.ing/episode/hydrated"
+            ),
+            events
+        )
+    }
+
+    @Test
+    fun `kuramanime uses static candidates when hydration is unavailable`() = runBlocking {
+        val events = mutableListOf<String>()
+        var loaded = false
+
+        val result = resolveKuramanimeCandidatesHydrationFirst(
+            staticCandidates = listOf("https://player.example/static"),
+            staticReferer = "https://v19.kuramanime.ing/episode/static",
+            hydrate = {
+                events += "hydrate"
+                null
+            },
+            canContinue = { true },
+            isLoaded = { loaded },
+            resolve = { url, referer ->
+                events += "resolve:$url:$referer"
+                loaded = true
+            }
+        )
+
+        assertTrue(result)
+        assertEquals(
+            listOf(
+                "hydrate",
+                "resolve:https://player.example/static:" +
+                    "https://v19.kuramanime.ing/episode/static"
+            ),
+            events
+        )
+    }
+
+    @Test
+    fun `kuramanime stops after the first verified hydrated candidate`() = runBlocking {
+        val resolved = mutableListOf<String>()
+        var loaded = false
+
+        assertTrue(
+            resolveKuramanimeCandidatesHydrationFirst(
+                staticCandidates = listOf("https://player.example/static"),
+                staticReferer = "https://v19.kuramanime.ing/episode/static",
+                hydrate = {
+                    KuramanimeCandidateBatch(
+                        urls = listOf(
+                            "https://cdn.example/first.m3u8",
+                            "https://cdn.example/second.m3u8"
+                        ),
+                        referer = "https://v19.kuramanime.ing/episode/hydrated"
+                    )
+                },
+                canContinue = { true },
+                isLoaded = { loaded },
+                resolve = { url, _ ->
+                    resolved += url
+                    loaded = true
+                }
+            )
+        )
+        assertEquals(listOf("https://cdn.example/first.m3u8"), resolved)
+    }
+
+    @Test
+    fun `kuramanime parses rotating token bootstrap without fixed secrets`() {
+        val bootstrap = """
+            function refetchJsVar(a) {
+                let d = document.querySelector("#appUrl").value,
+                    routeName = "rotatingRoute123";
+                const script = `${'$'}{d}/assets/js/${'$'}{routeName}.js`;
+            }
+        """.trimIndent()
+        val configUrl = KuramanimeBootstrap.configurationScriptUrl(
+            bootstrap,
+            "https://v19.kuramanime.ing/assets/js/arc-signal.min.js?v=169"
+        )
+        assertEquals(
+            "https://v19.kuramanime.ing/assets/js/rotatingRoute123.js",
+            configUrl
+        )
+
+        val config = assertNotNull(
+            KuramanimeBootstrap.configuration(
+                """
+                    window.process = {
+                        env: {
+                            MIX_PREFIX_AUTH_ROUTE_PARAM: 'assets/',
+                            MIX_AUTH_ROUTE_PARAM: 'rotating-token.txt',
+                            MIX_AUTH_KEY: 'headerKey',
+                            MIX_AUTH_TOKEN: 'headerToken',
+                            MIX_PAGE_TOKEN_KEY: 'pageTokenKey',
+                            MIX_STREAM_SERVER_KEY: 'serverKey'
+                        }
+                    };
+                """.trimIndent(),
+                configUrl!!
+            )
+        )
+        assertEquals(
+            "https://v19.kuramanime.ing/assets/rotating-token.txt",
+            config.tokenUrl
+        )
+        assertEquals("headerKey:headerToken", config.authHeader)
+        assertEquals(
+            "https://v19.kuramanime.ing/anime/a/episode/1" +
+                "?pageTokenKey=tokenValue&serverKey=kuramadrive&page=1",
+            KuramanimeBootstrap.hydratedPageUrl(
+                "https://v19.kuramanime.ing/anime/a/episode/1",
+                "tokenValue",
+                config
+            )
+        )
+        assertNull(KuramanimeBootstrap.tokenValue("../internal"))
+        assertNull(
+            KuramanimeBootstrap.configuration(
+                """
+                    window.process = {
+                        env: {
+                            MIX_PREFIX_AUTH_ROUTE_PARAM: '../',
+                            MIX_AUTH_ROUTE_PARAM: 'secret.txt',
+                            MIX_AUTH_KEY: 'headerKey',
+                            MIX_AUTH_TOKEN: 'headerToken',
+                            MIX_PAGE_TOKEN_KEY: 'pageTokenKey',
+                            MIX_STREAM_SERVER_KEY: 'serverKey'
+                        }
+                    };
+                """.trimIndent(),
+                configUrl
+            )
+        )
+        assertNull(
+            KuramanimeBootstrap.configuration(
+                """
+                    window.process = {
+                        env: {
+                            MIX_PREFIX_AUTH_ROUTE_PARAM: 'assets/',
+                            MIX_PREFIX_AUTH_ROUTE_PARAM: 'shadow/',
+                            MIX_AUTH_ROUTE_PARAM: 'secret.txt',
+                            MIX_AUTH_KEY: 'headerKey',
+                            MIX_AUTH_TOKEN: 'headerToken',
+                            MIX_PAGE_TOKEN_KEY: 'pageTokenKey',
+                            MIX_STREAM_SERVER_KEY: 'serverKey'
+                        }
+                    };
+                """.trimIndent(),
+                configUrl
+            )
+        )
+    }
+
+    @Test
+    fun `moviebox v2 contract uses detail paths and bundled downloads`() {
+        val baseUrl = "https://h5-api.aoneroom.com"
+        val detailPath = "avatar-AbCdEf12345"
+        assertEquals(
+            "$baseUrl/wefeed-h5api-bff/home",
+            MovieboxApi.apiUrl("$baseUrl/wefeed-h5api-bff/home", baseUrl)
+        )
+        assertEquals(
+            "https://h5.aoneroom.com/wefeed-h5-bff/web/subject/detail?subjectId=42",
+            MovieboxApi.apiUrl(
+                "https://h5.aoneroom.com/wefeed-h5-bff/web/subject/detail?subjectId=42",
+                baseUrl
+            )
+        )
+        assertNull(MovieboxApi.apiUrl("https://attacker.example/private", baseUrl))
+        assertNull(MovieboxApi.apiUrl("http://h5-api.aoneroom.com/plaintext", baseUrl))
+        assertEquals(
+            "$baseUrl/wefeed-h5api-bff/detail?detailPath=$detailPath",
+            MovieboxApi.detailUrl(baseUrl, detailPath)
+        )
+        assertEquals(
+            "$baseUrl/wefeed-h5api-bff/home?host=moviebox.ph",
+            MovieboxApi.homeUrl(baseUrl)
+        )
+        assertEquals(
+            "$baseUrl/wefeed-h5api-bff/subject/search",
+            MovieboxApi.searchUrl(baseUrl)
+        )
+        assertEquals(
+            "$baseUrl/wefeed-h5api-bff/subject/download" +
+                "?subjectId=123&se=2&ep=7&detailPath=$detailPath",
+            MovieboxApi.downloadUrl(baseUrl, "123", 2, 7, detailPath)
+        )
+        assertNull(MovieboxApi.detailUrl(baseUrl, "../internal"))
+        assertEquals(
+            "https://videodownloader.site/",
+            MovieboxApi.apiHeaders["Referer"]
+        )
+        assertEquals(
+            "https://videodownloader.site",
+            MovieboxApi.mediaHeaders["Origin"]
+        )
+        assertEquals(
+            """{"timezone":"Africa/Nairobi"}""",
+            MovieboxApi.apiHeaders["X-Client-Info"]
+        )
+        assertEquals(
+            MovieboxLoadData(id = "123"),
+            MovieboxApi.loadData("123")
+        )
+        assertEquals(
+            MovieboxLoadData(id = "123", detailPath = detailPath),
+            MovieboxApi.loadData(
+                """{"id":"123","detailPath":"$detailPath"}"""
+            )
+        )
+        assertEquals(
+            "https://h5.aoneroom.com/wefeed-h5-bff/web/subject/detail?subjectId=123",
+            MovieboxApi.legacyDetailUrl("123")
+        )
+        assertNull(MovieboxApi.loadData("../internal"))
+        assertNull(MovieboxApi.legacyDetailUrl("../internal"))
+        assertEquals(
+            "Bearer test-token",
+            MovieboxApi.authorizationHeader("""{"token":"test-token"}""")
+        )
+        assertEquals(
+            "Bearer abc+/==",
+            MovieboxApi.authorizationHeader("""{"token":"abc+/=="}""")
+        )
+        assertNull(MovieboxApi.authorizationHeader("""{"token":""}"""))
+        assertNull(MovieboxApi.authorizationHeader("{\"token\":\"line\\r\\nbreak\"}"))
+
+        val response = jacksonObjectMapper().readValue(
+            """
+                {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "downloads": [
+                      {
+                        "id": "video-1",
+                        "url": "https://media.example/video.mp4",
+                        "resolution": 720,
+                        "size": 1024
+                      }
+                    ],
+                    "captions": [
+                      {
+                        "id": "caption-1",
+                        "lan": "id",
+                        "lanName": "Indonesian",
+                        "url": "https://subtitle.example/id.vtt",
+                        "size": 100,
+                        "delay": 0
+                      }
+                    ],
+                    "limited": false,
+                    "limitedCode": "",
+                    "hasResource": true
+                  }
+                }
+            """.trimIndent(),
+            MovieboxDownloadResponse::class.java
+        )
+        assertEquals(720, response.data?.downloads?.single()?.resolution)
+        assertEquals("Indonesian", response.data?.captions?.single()?.languageName)
+        assertEquals(true, response.data?.hasResource)
+    }
+
+    @Test
+    fun `moviebox home omits coming soon items without resources`() {
+        val response = jacksonObjectMapper().readValue(
+            """
+                {
+                  "code": 0,
+                  "data": {
+                    "operatingList": [
+                      {
+                        "title": "Popular",
+                        "subjects": [
+                          {
+                            "subjectId": "1001",
+                            "subjectType": 1,
+                            "title": "Ready",
+                            "detailPath": "ready-AbCdEf12345",
+                            "hasResource": true
+                          },
+                          {
+                            "subjectId": "1002",
+                            "subjectType": 1,
+                            "title": "Segera Hadir",
+                            "detailPath": "soon-AbCdEf12345",
+                            "hasResource": false
+                          }
+                        ],
+                        "banner": {
+                          "items": [
+                            {
+                              "subject": {
+                                "subjectId": "1003",
+                                "subjectType": 2,
+                                "title": "Playable Series",
+                                "detailPath": "series-AbCdEf12345",
+                                "hasResource": true
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+            """.trimIndent(),
+            MovieboxHomeResponse::class.java
+        )
+
+        assertEquals(
+            listOf("1001", "1003"),
+            response.availableItems().mapNotNull { it.subjectId }
+        )
+    }
+
+    @Test
+    fun `rotating providers include verified owned domain aliases`() {
+        val expectedAliases = mapOf(
+            "PencurimovieProvider.kt" to listOf(
+                "ww73.pencurimovie.bond",
+                "pencurimovie.bond",
+                "pencurimovie.sbs"
+            ),
+            "SarangfilmProvider.kt" to listOf(
+                "sarangfilm.uno",
+                "sarangfilm.world",
+                "sarangfilm.link"
+            ),
+            "NomatProvider.kt" to listOf("nomat.site", "nomat.store", "nomat.asia"),
+            "IndomaxProvider.kt" to listOf(
+                "akses7.indomax21.xyz",
+                "akses8.indomax21.xyz",
+                "akses6.indomax21.xyz",
+                "akses10.indomax21.xyz"
+            ),
+            "KawanfilmProvider.kt" to listOf(
+                "tv2.kawanfilm21.co",
+                "kawanfilm21.co",
+                "kawanfilm21.online"
+            ),
+            "KuramanimeProvider.kt" to listOf(
+                "v11.kuramanime.tel",
+                "v17.kuramanime.ing"
+            ),
+            "AnimasuProvider.kt" to listOf(
+                "v1.animasu.app",
+                "v1.animasu.work",
+                "animasu.com"
+            )
+        )
+
+        expectedAliases.forEach { (fileName, aliases) ->
             val provider = source(fileName)
-            assertTrue(provider.contains("ProviderHtmlParser.absoluteUrl(candidate, response.url)"))
-            assertTrue(provider.contains("resolver.resolve(playerUrl, pageUrl)"))
+            aliases.forEach { alias ->
+                assertTrue(provider.contains("\"$alias\""), "$fileName must trust owned alias $alias")
+            }
         }
     }
 

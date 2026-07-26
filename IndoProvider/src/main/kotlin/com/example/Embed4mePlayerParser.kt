@@ -41,6 +41,7 @@ internal object Embed4mePlayerParser {
     private val supportedSuffixes = setOf(
         "embed4me.vip",
         "4meplayer.com",
+        "4meplayer.pro",
         "playerp2p.online",
         "p2pplay.pro",
         "upns.live",

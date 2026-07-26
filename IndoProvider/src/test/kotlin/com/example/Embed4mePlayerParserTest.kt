@@ -25,6 +25,13 @@ class Embed4mePlayerParserTest {
             request.videoApiUrl
         )
         assertEquals(Embed4mePlayerParser.USER_AGENT, request.headers["User-Agent"])
+        assertEquals(
+            "https://ichinime.4meplayer.pro",
+            Embed4mePlayerParser.apiRequest(
+                "https://ichinime.4meplayer.pro/#e8bn6",
+                "https://akses7.indomax21.xyz/masters-of-the-universe-2026/"
+            )?.origin
+        )
         assertNull(Embed4mePlayerParser.apiRequest("https://untrusted.example/#x8yws", providerUrl))
         assertNull(Embed4mePlayerParser.apiRequest("https://dm21.embed4me.vip/#../bad", providerUrl))
     }

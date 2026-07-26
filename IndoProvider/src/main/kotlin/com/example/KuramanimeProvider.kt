@@ -2,19 +2,32 @@ package com.example
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import java.net.URI
 import java.net.URLEncoder
+import kotlin.coroutines.cancellation.CancellationException
+import kotlin.random.Random
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class KuramanimeProvider : MainAPI() {
-    override var mainUrl = "https://v11.kuramanime.tel"
+    override var mainUrl = "https://v19.kuramanime.ing"
     override var name = "Kuramanime"
     override var lang = "id"
     override val hasMainPage = true
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
+    private val ownedHosts = setOf(
+        "v19.kuramanime.ing",
+        "v8.kuramanime.tel",
+        "v9.kuramanime.tel",
+        "v10.kuramanime.tel",
+        "v11.kuramanime.tel",
+        "v17.kuramanime.tel",
+        "v17.kuramanime.ing"
+    )
+    private val safeHttp by lazy {
+        ProviderHttpSafetyClient(NiceHttpProviderFetcher(app))
+    }
 
     override val mainPage = mainPageOf(
         "$mainUrl/anime/ongoing?order_by=updated&page=" to "Sedang Tayang",
@@ -24,10 +37,13 @@ class KuramanimeProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val document = app.get(
-            request.data + page.coerceAtLeast(1),
-            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-        ).document
+        val fetch = getProviderPage(request.data + page.coerceAtLeast(1))
+            ?: return newHomePageResponse(request.name, emptyList())
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return newHomePageResponse(request.name, emptyList())
+        val document = Jsoup.parse(fetch.body, fetch.url)
         return newHomePageResponse(
             request.name,
             document.select("div#animeList div.product__item, div.col-lg-4.col-md-6.col-sm-6")
@@ -38,15 +54,18 @@ class KuramanimeProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, Charsets.UTF_8.name())
-        return app.get(
-            "$mainUrl/anime?search=$encoded&order_by=latest",
-            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-        ).document.select("div#animeList div.product__item").mapNotNull { it.toSearchResult() }
+        val fetch = getProviderPage("$mainUrl/anime?search=$encoded&order_by=latest")
+            ?: return emptyList()
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return emptyList()
+        return Jsoup.parse(fetch.body, fetch.url).select("div#animeList div.product__item")
+            .mapNotNull { it.toSearchResult() }
     }
 
     private fun Element.toSearchResult(): AnimeSearchResponse? {
-        val anchor = selectFirst("h5 a[href], a[href*='/anime/'], a[href*='/episode/']")
-            ?: return null
+        val anchor = KuramanimeParser.catalogAnchor(this) ?: return null
         val href = animeUrl(anchor.attr("href")) ?: return null
         val title = anchor.text().trim().takeIf { it.isNotBlank() } ?: return null
         val poster = fixUrlNull(
@@ -64,7 +83,12 @@ class KuramanimeProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val requestUrl = animeUrl(url) ?: return null
-        val document = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS).document
+        val fetch = getProviderPage(requestUrl) ?: return null
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return null
+        val document = Jsoup.parse(fetch.body, fetch.url)
         val title = document.selectFirst(".anime__details__title h3, h1")?.text()
             ?.trim()?.takeIf { it.isNotBlank() } ?: return null
         val poster = fixUrlNull(
@@ -83,10 +107,17 @@ class KuramanimeProvider : MainAPI() {
         }
         val episodes = mutableListOf<Episode>()
         for (page in 1..10) {
-            val pageDocument = if (page == 1) document else app.get(
-                "${requestUrl.trimEnd('/')}?page=$page",
-                timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-            ).document
+            val pageDocument = if (page == 1) {
+                document
+            } else {
+                val pageFetch = getProviderPage("${requestUrl.trimEnd('/')}?page=$page")
+                    ?: break
+                if (
+                    pageFetch.code !in 200..299 ||
+                    ProviderHtmlParser.isNonContentPage(pageFetch.body)
+                ) break
+                Jsoup.parse(pageFetch.body, pageFetch.url)
+            }
             val pageEpisodes = KuramanimeParser.episodeLinks(pageDocument, requestUrl)
             if (pageEpisodes.isEmpty()) {
                 if (page > 1) break
@@ -141,28 +172,168 @@ class KuramanimeProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val pageUrl = episodeUrl(data) ?: return false
-        val response = app.get(pageUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
+        val response = getProviderPage(pageUrl) ?: return false
+        if (
+            response.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(response.body)
+        ) return false
+        val staticCandidates = KuramanimeParser.playerUrls(response.body, response.url)
+        val hydratedCandidates = fetchHydratedCandidates(response)
         val resolver = LinkResolutionSession(
             this,
             subtitleCallback,
             callback,
-            inlineSourceParser = KuramanimeParser::playerUrls
+            inlineSourceParser = KuramanimeParser::fragmentMediaUrls
         )
-        KuramanimeParser.playerUrls(response.text, response.url).forEach { candidate ->
-            if (resolver.canContinue) resolver.resolve(candidate, response.url)
+        return resolveKuramanimeCandidatesHydrationFirst(
+            staticCandidates = staticCandidates,
+            staticReferer = response.url,
+            hydrate = { hydratedCandidates },
+            canContinue = { resolver.canContinue },
+            isLoaded = { resolver.loaded },
+            resolve = { candidate, referer -> resolver.resolve(candidate, referer) }
+        )
+    }
+
+    private suspend fun fetchHydratedCandidates(
+        response: ProviderHttpResult
+    ): KuramanimeCandidateBatch? {
+        return try {
+            val document = Jsoup.parse(response.body, response.url)
+            val directConfigurationUrl = document
+                .select("script.js__var[src]")
+                .mapNotNull { providerAssetUrl(it.attr("src"), response.url) }
+                .firstOrNull { !it.contains("arc-signal", ignoreCase = true) }
+            val configurationUrl = directConfigurationUrl ?: run {
+                val bootstrapUrl = document
+                    .select("script[src*='arc-signal']")
+                    .mapNotNull { providerAssetUrl(it.attr("src"), response.url) }
+                    .firstOrNull()
+                    ?: return null
+                val bootstrapResponse = getProviderAsset(
+                    bootstrapUrl,
+                    response.url,
+                    response.url,
+                    KURAMANIME_SCRIPT_BODY_LIMIT_BYTES
+                ) ?: return null
+                if (
+                    bootstrapResponse.code !in 200..299 ||
+                    ProviderHtmlParser.isNonContentPage(bootstrapResponse.body)
+                ) return null
+                KuramanimeBootstrap.configurationScriptUrl(
+                    bootstrapResponse.body,
+                    bootstrapResponse.url
+                )?.let { providerAssetUrl(it, bootstrapResponse.url) }
+                    ?: return null
+            }
+            val configurationResponse = getProviderAsset(
+                configurationUrl,
+                response.url,
+                response.url,
+                KURAMANIME_SCRIPT_BODY_LIMIT_BYTES
+            ) ?: return null
+            if (
+                configurationResponse.code !in 200..299 ||
+                ProviderHtmlParser.isNonContentPage(configurationResponse.body)
+            ) return null
+            val configuration = KuramanimeBootstrap.configuration(
+                configurationResponse.body,
+                configurationResponse.url
+            ) ?: return null
+            val tokenUrl = providerAssetUrl(configuration.tokenUrl, configurationResponse.url)
+                ?: return null
+            val tokenResponse = getProviderAsset(
+                tokenUrl,
+                response.url,
+                configurationResponse.url,
+                KURAMANIME_TOKEN_BODY_LIMIT_BYTES,
+                mapOf(
+                    "X-Fuck-ID" to configuration.authHeader,
+                    "X-Request-ID" to KuramanimeBootstrap.requestId(),
+                    "X-Request-Index" to "0"
+                )
+            ) ?: return null
+            if (
+                tokenResponse.code !in 200..299 ||
+                ProviderHtmlParser.isNonContentPage(tokenResponse.body)
+            ) return null
+            val token = KuramanimeBootstrap.tokenValue(tokenResponse.body) ?: return null
+            val hydratedUrl = KuramanimeBootstrap.hydratedPageUrl(
+                response.url,
+                token,
+                configuration
+            )?.let(::networkProviderUrl)
+                ?: return null
+            val hydratedResponse = getProviderPage(
+                hydratedUrl,
+                referer = response.url,
+                timeoutSeconds = KURAMANIME_BOOTSTRAP_TIMEOUT_SECONDS
+            ) ?: return null
+            if (
+                hydratedResponse.code !in 200..299 ||
+                ProviderHtmlParser.isNonContentPage(hydratedResponse.body)
+            ) return null
+            KuramanimeCandidateBatch(
+                urls = KuramanimeParser.playerUrls(
+                    hydratedResponse.body,
+                    hydratedResponse.url
+                ),
+                referer = hydratedResponse.url
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            null
         }
-        return resolver.loaded
+    }
+
+    private suspend fun getProviderPage(
+        url: String,
+        referer: String? = null,
+        timeoutSeconds: Long = PROVIDER_HTTP_TIMEOUT_SECONDS
+    ): ProviderHttpResult? = try {
+        safeHttp.get(
+            url = url,
+            normalizer = ProviderUrlNormalizer(::networkProviderUrl),
+            referer = referer,
+            timeoutSeconds = timeoutSeconds
+        )
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        null
+    }
+
+    private suspend fun getProviderAsset(
+        url: String,
+        referer: String,
+        baseUrl: String,
+        maxBodyBytes: Int,
+        headers: Map<String, String> = emptyMap()
+    ): ProviderHttpResult? = try {
+        safeHttp.get(
+            url = url,
+            normalizer = ProviderUrlNormalizer { providerAssetUrl(it, baseUrl) },
+            headers = headers,
+            referer = referer,
+            maxBodyBytes = maxBodyBytes,
+            timeoutSeconds = KURAMANIME_BOOTSTRAP_TIMEOUT_SECONDS
+        )
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun providerAssetUrl(raw: String?, baseUrl: String): String? {
+        return ProviderHtmlParser.preserveProviderPageUrl(raw, baseUrl, ownedHosts)
     }
 
     private fun animeUrl(raw: String?): String? {
         val normalized = ProviderHtmlParser.normalizeProviderPageUrl(
             raw,
             mainUrl,
-            setOf(
-                "v8.kuramanime.tel",
-                "v9.kuramanime.tel",
-                "v10.kuramanime.tel"
-            )
+            ownedHosts
         ) ?: return null
         return if (normalized.contains("/episode/", ignoreCase = true)) {
             normalized.substringBefore("/episode/").trimEnd('/') + "/"
@@ -174,12 +345,43 @@ class KuramanimeProvider : MainAPI() {
     private fun episodeUrl(raw: String?): String? = ProviderHtmlParser.normalizeProviderPageUrl(
         raw,
         mainUrl,
-        setOf(
-            "v8.kuramanime.tel",
-            "v9.kuramanime.tel",
-            "v10.kuramanime.tel"
-        )
+        ownedHosts
     )
+
+    private fun networkProviderUrl(raw: String?): String? =
+        ProviderHtmlParser.preserveProviderPageUrl(raw, mainUrl, ownedHosts)
+
+    private companion object {
+        const val KURAMANIME_SCRIPT_BODY_LIMIT_BYTES = 262_144
+        const val KURAMANIME_TOKEN_BODY_LIMIT_BYTES = 4_096
+        const val KURAMANIME_BOOTSTRAP_TIMEOUT_SECONDS = 10L
+    }
+}
+
+internal data class KuramanimeCandidateBatch(
+    val urls: List<String>,
+    val referer: String
+)
+
+internal suspend fun resolveKuramanimeCandidatesHydrationFirst(
+    staticCandidates: List<String>,
+    staticReferer: String,
+    hydrate: suspend () -> KuramanimeCandidateBatch?,
+    canContinue: () -> Boolean,
+    isLoaded: () -> Boolean,
+    resolve: suspend (url: String, referer: String) -> Unit
+): Boolean {
+    val hydrated = hydrate()
+    for (candidate in hydrated?.urls.orEmpty().distinct().take(12)) {
+        if (isLoaded() || !canContinue()) break
+        resolve(candidate, hydrated?.referer ?: staticReferer)
+    }
+    if (isLoaded()) return true
+    for (candidate in staticCandidates.distinct()) {
+        if (isLoaded() || !canContinue()) break
+        resolve(candidate, staticReferer)
+    }
+    return isLoaded()
 }
 
 internal object KuramanimeParser {
@@ -202,8 +404,17 @@ internal object KuramanimeParser {
     private val legacyHosts = setOf(
         "v8.kuramanime.tel",
         "v9.kuramanime.tel",
-        "v10.kuramanime.tel"
+        "v10.kuramanime.tel",
+        "v11.kuramanime.tel",
+        "v17.kuramanime.tel",
+        "v17.kuramanime.ing"
     )
+
+    fun catalogAnchor(element: Element): Element? {
+        return element.selectFirst("h5 a[href]")?.takeIf { it.text().isNotBlank() }
+            ?: element.select("a[href*='/anime/'], a[href*='/episode/']")
+                .firstOrNull { it.text().trim().isNotBlank() }
+    }
 
     fun episodeLinks(document: Document, baseUrl: String): List<Pair<String, String>> {
         val encodedList = document.selectFirst("#episodeLists")?.attr("data-content")
@@ -227,6 +438,8 @@ internal object KuramanimeParser {
 
     fun playerUrls(html: String, playerUrl: String): List<String> {
         val document = Jsoup.parse(html, playerUrl)
+        val hydratedHls = document.select("#animeVideoPlayer[data-hls-src]")
+            .map { it.attr("data-hls-src") }
         val playerElements = PopularProviderLinkLimits.playerElements(
             document,
             "#player option[value], #player [data-video], #player [data-url], " +
@@ -253,7 +466,7 @@ internal object KuramanimeParser {
                 playerUrl
             )
         }
-        return (direct + decoded)
+        return (hydratedHls + direct + decoded)
             .mapNotNull { candidate ->
                 candidate.takeIf { value ->
                     value.startsWith("http://", true) ||
@@ -267,6 +480,11 @@ internal object KuramanimeParser {
             .take(MAX_PLAYER_CANDIDATES)
     }
 
+    fun fragmentMediaUrls(html: String, playerUrl: String): List<String> {
+        val document = Jsoup.parse(html, playerUrl)
+        return PopularProviderLinkLimits.scopedMediaUrls(document, FRAGMENT_MEDIA_SELECTOR)
+    }
+
     private fun decodedPlayerValue(raw: String?, playerUrl: String): List<String> {
         val value = raw?.trim()
             ?.takeIf { it.isNotBlank() && it.length <= MAX_ENCODED_PLAYER_SIZE }
@@ -277,5 +495,135 @@ internal object KuramanimeParser {
         if (isSafeRemoteHttpUrl(decoded.trim())) return listOf(decoded.trim())
         val document = Jsoup.parse(decoded, playerUrl)
         return PopularProviderLinkLimits.scopedMediaUrls(document, FRAGMENT_MEDIA_SELECTOR)
+    }
+}
+
+internal data class KuramanimeBootstrapConfig(
+    val tokenUrl: String,
+    val authHeader: String,
+    val pageTokenKey: String,
+    val streamServerKey: String
+)
+
+internal object KuramanimeBootstrap {
+    private const val MAX_SCRIPT_SIZE = 262_144
+    private val safeRouteValue = Regex("""^[A-Za-z0-9_./-]{1,256}$""")
+    private val safeIdentifier = Regex("""^[A-Za-z_][A-Za-z0-9_]{0,127}$""")
+    private val safeToken = Regex("""^[A-Za-z0-9_-]{1,256}$""")
+    private const val REQUEST_ID_ALPHABET =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+    fun configurationScriptUrl(script: String, bootstrapUrl: String): String? {
+        if (script.isBlank() || script.length > MAX_SCRIPT_SIZE) return null
+        val variable = Regex(
+            """/assets/js/\$\{([A-Za-z_$][A-Za-z0-9_$]*)\}\.js"""
+        ).find(script)?.groupValues?.getOrNull(1)
+        val basename = variable?.let { identifier ->
+            Regex(
+                """\b${Regex.escape(identifier)}\s*=\s*["']([A-Za-z0-9_-]{1,128})["']"""
+            ).find(script)?.groupValues?.getOrNull(1)
+        }
+        val rawUrl = basename?.let { "/assets/js/$it.js" }
+            ?: Regex(
+                """["']((?:https?://[^"']+)?/assets/js/[A-Za-z0-9_-]{1,128}\.js(?:\?[^"']*)?)["']"""
+            ).find(script)?.groupValues?.getOrNull(1)
+            ?: return null
+        return ProviderHtmlParser.absoluteUrl(rawUrl, bootstrapUrl)
+            ?.takeIf(::isSafeRemoteHttpUrl)
+    }
+
+    fun configuration(script: String, configurationUrl: String): KuramanimeBootstrapConfig? {
+        if (script.isBlank() || script.length > MAX_SCRIPT_SIZE) return null
+        val environment = environmentObject(script) ?: return null
+        val requiredKeys = setOf(
+            "MIX_PREFIX_AUTH_ROUTE_PARAM",
+            "MIX_AUTH_ROUTE_PARAM",
+            "MIX_AUTH_KEY",
+            "MIX_AUTH_TOKEN",
+            "MIX_PAGE_TOKEN_KEY",
+            "MIX_STREAM_SERVER_KEY"
+        )
+        val matches = Regex(
+            """\b(MIX_[A-Z0-9_]+)\s*:\s*["']([^"']{1,512})["']"""
+        ).findAll(environment)
+            .filter { it.groupValues[1] in requiredKeys }
+            .groupBy { it.groupValues[1] }
+        if (requiredKeys.any { matches[it]?.size != 1 }) return null
+        val values = matches.mapValues { (_, entries) -> entries.single().groupValues[2].trim() }
+        val prefix = values["MIX_PREFIX_AUTH_ROUTE_PARAM"] ?: return null
+        val route = values["MIX_AUTH_ROUTE_PARAM"] ?: return null
+        val authKey = values["MIX_AUTH_KEY"] ?: return null
+        val authToken = values["MIX_AUTH_TOKEN"] ?: return null
+        val pageTokenKey = values["MIX_PAGE_TOKEN_KEY"] ?: return null
+        val streamServerKey = values["MIX_STREAM_SERVER_KEY"] ?: return null
+        if (
+            listOf(prefix, route).any { !safeRouteValue.matches(it) || ".." in it } ||
+            !safeToken.matches(authKey) ||
+            !safeToken.matches(authToken) ||
+            !safeIdentifier.matches(pageTokenKey) ||
+            !safeIdentifier.matches(streamServerKey)
+        ) return null
+        val tokenPath = "/" + listOf(prefix.trim('/'), route.trim('/'))
+            .filter(String::isNotBlank)
+            .joinToString("/")
+        val tokenUrl = ProviderHtmlParser.absoluteUrl(tokenPath, configurationUrl)
+            ?.takeIf(::isSafeRemoteHttpUrl)
+            ?: return null
+        return KuramanimeBootstrapConfig(
+            tokenUrl = tokenUrl,
+            authHeader = "$authKey:$authToken",
+            pageTokenKey = pageTokenKey,
+            streamServerKey = streamServerKey
+        )
+    }
+
+    fun tokenValue(raw: String?): String? =
+        raw?.trim()?.takeIf(safeToken::matches)
+
+    fun hydratedPageUrl(
+        episodeUrl: String,
+        token: String,
+        configuration: KuramanimeBootstrapConfig
+    ): String? {
+        if (!isSafeRemoteHttpUrl(episodeUrl) || tokenValue(token) == null) return null
+        if (
+            !safeIdentifier.matches(configuration.pageTokenKey) ||
+            !safeIdentifier.matches(configuration.streamServerKey)
+        ) return null
+        val withoutFragment = episodeUrl.substringBefore('#')
+        val separator = if ('?' in withoutFragment) '&' else '?'
+        return buildString {
+            append(withoutFragment)
+            append(separator)
+            append(configuration.pageTokenKey)
+            append('=')
+            append(encode(token))
+            append('&')
+            append(configuration.streamServerKey)
+            append("=kuramadrive&page=1")
+        }
+    }
+
+    fun requestId(): String = buildString(6) {
+        repeat(6) {
+            append(REQUEST_ID_ALPHABET[Random.nextInt(REQUEST_ID_ALPHABET.length)])
+        }
+    }
+
+    private fun encode(value: String): String =
+        URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+
+    private fun environmentObject(script: String): String? {
+        val patterns = listOf(
+            Regex(
+                """(?s)\b(?:window\.)?process\s*=\s*\{\s*env\s*:\s*\{(.{1,$MAX_SCRIPT_SIZE}?)\}\s*\}\s*;?"""
+            ),
+            Regex(
+                """(?s)\b(?:window\.)?process\.env\s*=\s*\{(.{1,$MAX_SCRIPT_SIZE}?)\}\s*;?"""
+            )
+        )
+        return patterns.firstNotNullOfOrNull { pattern ->
+            pattern.find(script)?.groupValues?.getOrNull(1)
+        }
     }
 }

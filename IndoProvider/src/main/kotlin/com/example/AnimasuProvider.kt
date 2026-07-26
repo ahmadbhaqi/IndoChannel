@@ -4,17 +4,29 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import java.net.URLEncoder
+import kotlin.coroutines.cancellation.CancellationException
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class AnimasuProvider : MainAPI() {
-    override var mainUrl = "https://v1.animasu.app"
+    override var mainUrl = "https://v2.animasu.work"
     override var name = "Animasu"
     override var lang = "id"
     override val hasMainPage = true
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
+    private val ownedHosts = setOf(
+        "v1.animasu.app",
+        "v1.animasu.work",
+        "animasu.com",
+        "v1.animasu.top",
+        "animasu.top",
+        "animasu.cc"
+    )
+    private val safeHttp by lazy {
+        ProviderHttpSafetyClient(NiceHttpProviderFetcher(app))
+    }
 
     override val mainPage = mainPageOf(
         "urutan=update" to "Baru Diupdate",
@@ -25,10 +37,14 @@ class AnimasuProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val document = app.get(
-            "$mainUrl/pencarian/?${request.data}&halaman=${page.coerceAtLeast(1)}",
-            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-        ).document
+        val fetch = getProviderPage(
+            "$mainUrl/pencarian/?${request.data}&halaman=${page.coerceAtLeast(1)}"
+        ) ?: return newHomePageResponse(request.name, emptyList())
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return newHomePageResponse(request.name, emptyList())
+        val document = Jsoup.parse(fetch.body, fetch.url)
         return newHomePageResponse(
             request.name,
             document.select("div.listupd div.bs").mapNotNull { it.toSearchResult() }
@@ -37,10 +53,14 @@ class AnimasuProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, Charsets.UTF_8.name())
-        return app.get(
-            "$mainUrl/?s=$encoded",
-            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-        ).document.select("div.listupd div.bs").mapNotNull { it.toSearchResult() }
+        val fetch = getProviderPage("$mainUrl/?s=$encoded") ?: return emptyList()
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return emptyList()
+        return Jsoup.parse(fetch.body, fetch.url)
+            .select("div.listupd div.bs")
+            .mapNotNull { it.toSearchResult() }
     }
 
     private fun Element.toSearchResult(): AnimeSearchResponse? {
@@ -58,7 +78,12 @@ class AnimasuProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val requestUrl = animeUrl(url) ?: return null
-        val document = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS).document
+        val fetch = getProviderPage(requestUrl) ?: return null
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return null
+        val document = Jsoup.parse(fetch.body, fetch.url)
         val title = document.selectFirst("div.infox h1, h1.entry-title")?.text()
             ?.replace("Sub Indo", "", ignoreCase = true)
             ?.trim()?.takeIf(String::isNotBlank) ?: return null
@@ -113,17 +138,33 @@ class AnimasuProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val pageUrl = episodeUrl(data) ?: return false
-        val response = app.get(pageUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
+        val response = getProviderPage(pageUrl) ?: return false
+        if (
+            response.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(response.body)
+        ) return false
         val resolver = LinkResolutionSession(
             this,
             subtitleCallback,
             callback,
             inlineSourceParser = AnimasuParser::playerUrls
         )
-        AnimasuParser.playerUrls(response.text, response.url).forEach { candidate ->
+        AnimasuParser.playerUrls(response.body, response.url).forEach { candidate ->
             if (resolver.canContinue) resolver.resolve(candidate, response.url)
         }
         return resolver.loaded
+    }
+
+    private suspend fun getProviderPage(url: String): ProviderHttpResult? = try {
+        safeHttp.get(
+            url = url,
+            normalizer = ProviderUrlNormalizer(::networkProviderUrl),
+            timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
+        )
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        null
     }
 
     private fun animeUrl(raw: String?): String? {
@@ -139,8 +180,11 @@ class AnimasuProvider : MainAPI() {
     private fun episodeUrl(raw: String?): String? = ProviderHtmlParser.normalizeProviderPageUrl(
         raw,
         mainUrl,
-        setOf("v1.animasu.top", "animasu.top", "animasu.cc")
+        ownedHosts
     )
+
+    private fun networkProviderUrl(raw: String?): String? =
+        ProviderHtmlParser.preserveProviderPageUrl(raw, mainUrl, ownedHosts)
 }
 
 internal object AnimasuParser {

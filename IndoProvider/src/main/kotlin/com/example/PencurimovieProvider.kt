@@ -5,15 +5,26 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import java.net.URI
 import java.net.URLEncoder
+import kotlin.coroutines.cancellation.CancellationException
+import org.jsoup.Jsoup
 
 class PencurimovieProvider : MainAPI() {
-    override var mainUrl = "https://ww73.pencurimovie.bond"
+    override var mainUrl = "https://ww21.pencurimovie.sbs"
     override var name = "Pencurimovie"
     override var lang = "id"
     override val hasMainPage = true
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.Cartoon)
+    private val ownedHosts = setOf(
+        "ww73.pencurimovie.bond",
+        "pencurimovie.bond",
+        "pencurimovie.sbs"
+    )
+    private val safeHttp by lazy {
+        ProviderHttpSafetyClient(NiceHttpProviderFetcher(app))
+    }
 
     override val mainPage = mainPageOf(
         "movies" to "Film Terbaru",
@@ -27,12 +38,14 @@ class PencurimovieProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val fetch = app.get(
-            "$mainUrl/${request.data}/page/${page.coerceAtLeast(1)}",
-            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-        )
-        if (providerUrl(fetch.url) == null) return newHomePageResponse(request.name, emptyList())
-        val document = fetch.document
+        val fetch = getProviderPage(
+            "$mainUrl/${request.data}/page/${page.coerceAtLeast(1)}"
+        ) ?: return newHomePageResponse(request.name, emptyList())
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return newHomePageResponse(request.name, emptyList())
+        val document = Jsoup.parse(fetch.body, fetch.url)
         return newHomePageResponse(request.name, document.select("div.ml-item").mapNotNull {
             it.toSearchResult()
         })
@@ -40,12 +53,14 @@ class PencurimovieProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, Charsets.UTF_8.name())
-        val fetch = app.get(
-            "$mainUrl/?s=$encoded",
-            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-        )
-        if (providerUrl(fetch.url) == null) return emptyList()
-        return fetch.document.select("div.ml-item").mapNotNull { it.toSearchResult() }
+        val fetch = getProviderPage("$mainUrl/?s=$encoded") ?: return emptyList()
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return emptyList()
+        return Jsoup.parse(fetch.body, fetch.url)
+            .select("div.ml-item")
+            .mapNotNull { it.toSearchResult() }
     }
 
     private fun org.jsoup.nodes.Element.toSearchResult(): SearchResponse? {
@@ -74,9 +89,13 @@ class PencurimovieProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val requestUrl = providerUrl(url) ?: return null
-        val fetch = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
-        val document = fetch.document
-        val canonicalUrl = providerUrl(fetch.url) ?: return null
+        val fetch = getProviderPage(requestUrl) ?: return null
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return null
+        val document = Jsoup.parse(fetch.body, fetch.url)
+        val canonicalUrl = fetch.url
         val title = MovieMetadataParser.title(
             document.selectFirst("div.mvic-desc h3, h1.entry-title")?.text()
         ) ?: return null
@@ -147,27 +166,115 @@ class PencurimovieProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val requestUrl = providerUrl(data) ?: return false
-        val fetch = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
-        val pageUrl = providerUrl(fetch.url) ?: return false
-        val document = fetch.document
-        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
-        val candidates = (
+        val fetch = getProviderPage(requestUrl) ?: return false
+        val pageUrl = fetch.url
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return false
+        val document = Jsoup.parse(fetch.body, pageUrl)
+        val resolver = LinkResolutionSession(
+            this,
+            subtitleCallback,
+            callback,
+            candidateTimeoutMs = 30_000L,
+            genericExtractorTimeoutMs = 25_000L,
+            sessionTimeoutMs = 100_000L
+        )
+        val candidates = PencurimovieParser.orderedPlayerCandidates((
             document.select("div.movieplay iframe").flatMap { frame ->
                 listOf(frame.attr("data-src"), frame.attr("src"))
             } +
                 ProviderHtmlParser.mediaSources(document) +
                 ProviderHtmlParser.downloadCandidateUrls(document, pageUrl)
-            ).mapNotNull { ProviderHtmlParser.absoluteUrl(it, pageUrl) }.distinct().take(48)
+            ).mapNotNull { ProviderHtmlParser.absoluteUrl(it, pageUrl) }
+                .distinct()
+                .take(48)
+        )
 
-        candidates.forEach { candidate ->
-            if (resolver.canContinue) resolver.resolve(candidate, pageUrl)
+        for (candidate in candidates) {
+            if (resolver.loaded || !resolver.canContinue) break
+            resolver.resolve(candidate, pageUrl)
         }
         return resolver.loaded
+    }
+
+    private suspend fun getProviderPage(url: String): ProviderHttpResult? = try {
+        safeHttp.get(
+            url = url,
+            normalizer = ProviderUrlNormalizer(::networkProviderUrl),
+            timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
+        )
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        null
     }
 
     private fun providerUrl(raw: String?): String? = ProviderHtmlParser.normalizeProviderPageUrl(
         raw,
         mainUrl,
-        setOf("pencurimovie.bond", "pencurimovie.sbs")
+        ownedHosts
     )
+
+    private fun networkProviderUrl(raw: String?): String? =
+        ProviderHtmlParser.preserveProviderPageUrl(raw, mainUrl, ownedHosts)
+}
+
+internal object PencurimovieParser {
+    fun extractorCompatibleUrl(raw: String?): String? {
+        val value = raw?.trim()?.takeIf(::isSafeRemoteHttpUrl) ?: return null
+        val uri = runCatching { URI(value) }.getOrNull() ?: return null
+        val host = uri.host.orEmpty().lowercase().removePrefix("www.")
+        if (host != "dsvplay.com") return value
+
+        return buildString {
+            append("https://playmogo.com")
+            append(uri.rawPath.orEmpty().ifBlank { "/" })
+            uri.rawQuery?.let { append('?').append(it) }
+            uri.rawFragment?.let { append('#').append(it) }
+        }.takeIf(::isSafeRemoteHttpUrl)
+    }
+
+    fun orderedPlayerCandidates(rawCandidates: List<String>): List<String> {
+        val groups = rawCandidates
+            .mapNotNull(::extractorCompatibleUrl)
+            .distinct()
+            .groupBy(::mirrorFamily)
+            .entries
+            .sortedWith(compareBy({ mirrorRank(it.key) }, { it.key }))
+            .map { it.value }
+
+        return buildList {
+            var mirrorIndex = 0
+            while (groups.any { mirrorIndex < it.size }) {
+                groups.forEach { mirrors ->
+                    mirrors.getOrNull(mirrorIndex)?.let(::add)
+                }
+                mirrorIndex++
+            }
+        }
+    }
+
+    private fun mirrorFamily(url: String): String {
+        val host = runCatching { URI(url).host.orEmpty().lowercase().removePrefix("www.") }
+            .getOrDefault("")
+        return when {
+            host == "voe.sx" || host.endsWith(".voe.sx") -> "voe"
+            host == "playmogo.com" || host.endsWith(".playmogo.com") -> "playmogo"
+            host == "hgcloud.to" || host.endsWith(".hgcloud.to") -> "hgcloud"
+            host == "streamtape.com" || host.endsWith(".streamtape.com") -> "streamtape"
+            directMediaType(url) != null -> "direct"
+            else -> "other:$host"
+        }
+    }
+
+    private fun mirrorRank(family: String): Int = when (family) {
+        "direct" -> 0
+        "voe" -> 1
+        "playmogo" -> 2
+        "hgcloud" -> 3
+        "streamtape" -> 5
+        else -> 4
+    }
 }

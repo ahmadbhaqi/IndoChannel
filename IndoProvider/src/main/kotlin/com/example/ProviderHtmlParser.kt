@@ -176,6 +176,56 @@ internal object ProviderHtmlParser {
         }.getOrNull()
     }
 
+    /**
+     * Validates a provider-owned network destination while retaining the host
+     * selected by a redirect. Unlike [normalizeProviderPageUrl], this is for
+     * live request hops rather than rehoming cached bookmarks.
+     */
+    fun preserveProviderPageUrl(
+        raw: String?,
+        currentBaseUrl: String,
+        ownedHosts: Set<String> = emptySet()
+    ): String? {
+        val value = raw?.trim()?.takeIf { it.isPlayableCandidate() } ?: return null
+        return runCatching {
+            val current = URI(currentBaseUrl)
+            val currentScheme = current.scheme?.lowercase()
+                ?.takeIf { it == "http" || it == "https" }
+                ?: return@runCatching null
+            val currentHost = current.host
+                ?.lowercase()
+                ?.trimEnd('.')
+                ?.removePrefix("www.")
+                ?: return@runCatching null
+            val parsed = URI(value)
+            val resolved = if (parsed.isAbsolute) {
+                parsed
+            } else {
+                current.resolve(parsed)
+            }
+            if (
+                resolved.scheme?.lowercase() != currentScheme ||
+                resolved.userInfo != null ||
+                resolved.rawFragment != null
+            ) return@runCatching null
+            val resolvedHost = resolved.host
+                ?.lowercase()
+                ?.trimEnd('.')
+                ?.removePrefix("www.")
+                ?: return@runCatching null
+            val allowedHosts = (ownedHosts + currentHost)
+                .map { it.lowercase().trimEnd('.').removePrefix("www.") }
+                .toSet()
+            if (resolvedHost !in allowedHosts) return@runCatching null
+
+            val defaultPort = if (currentScheme == "https") 443 else 80
+            val expectedPort = current.port.takeIf { it >= 0 } ?: defaultPort
+            val resolvedPort = resolved.port.takeIf { it >= 0 } ?: defaultPort
+            if (resolvedPort != expectedPort) return@runCatching null
+            resolved.toASCIIString()
+        }.getOrNull()
+    }
+
     fun mediaSources(document: Document, iframeSelector: String = "iframe"): List<String> {
         val iframeSources = iframeSources(document, iframeSelector)
         val encodedServerSources = decodedDataIframeSources(document)

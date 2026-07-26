@@ -218,6 +218,54 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `preserveProviderPageUrl keeps an owned redirect host without allowing lookalikes`() {
+        val current = "https://current.example"
+        val owned = setOf("old.example", "older.example")
+
+        assertEquals(
+            "https://old.example/movie/current?server=2",
+            ProviderHtmlParser.preserveProviderPageUrl(
+                "https://old.example/movie/current?server=2",
+                current,
+                owned
+            )
+        )
+        assertEquals(
+            "https://current.example/movie/relative",
+            ProviderHtmlParser.preserveProviderPageUrl("/movie/relative", current, owned)
+        )
+        assertEquals(
+            "https://current.example/assets/next.js",
+            ProviderHtmlParser.preserveProviderPageUrl(
+                "next.js",
+                "https://current.example/assets/config.js",
+                owned
+            )
+        )
+        assertNull(
+            ProviderHtmlParser.preserveProviderPageUrl(
+                "https://old.example.attacker.example/movie/current",
+                current,
+                owned
+            )
+        )
+        assertNull(
+            ProviderHtmlParser.preserveProviderPageUrl(
+                "http://old.example/movie/current",
+                current,
+                owned
+            )
+        )
+        assertNull(
+            ProviderHtmlParser.preserveProviderPageUrl(
+                "https://old.example:8443/movie/current",
+                current,
+                owned
+            )
+        )
+    }
+
+    @Test
     fun `cached movie URLs survive known provider domain rotations`() {
         val cases = listOf(
             Triple("https://comblank.com/movie/", "https://filmbioskop21.lk21.in.net", setOf("comblank.com")),

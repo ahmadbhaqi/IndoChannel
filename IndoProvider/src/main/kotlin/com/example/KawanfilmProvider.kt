@@ -8,15 +8,21 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import java.net.URI
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
 class KawanfilmProvider : MainAPI() {
-    override var mainUrl = "https://tv2.kawanfilm21.co"
+    override var mainUrl = "https://web.kawanfilm21.co"
     override var name = "Kawanfilm"
     override var lang = "id"
     override val hasMainPage = true
     override val supportedTypes =
         setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AsianDrama)
+    private val ownedHosts =
+        setOf("tv2.kawanfilm21.co", "kawanfilm21.co", "kawanfilm21.online")
+    private val safeHttp by lazy {
+        ProviderHttpSafetyClient(NiceHttpProviderFetcher(app))
+    }
 
     override val mainPage = mainPageOf(
         "page/%d/?s&search=advanced&post_type=movie" to "Update Terbaru",
@@ -32,7 +38,13 @@ class KawanfilmProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val path = request.data.format(page.coerceAtLeast(1))
-        val document = app.get("$mainUrl/$path", timeout = PROVIDER_HTTP_TIMEOUT_SECONDS).document
+        val fetch = getProviderPage("$mainUrl/$path")
+            ?: return newHomePageResponse(request.name, emptyList())
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return newHomePageResponse(request.name, emptyList())
+        val document = Jsoup.parse(fetch.body, fetch.url)
         return newHomePageResponse(
             request.name,
             document.select("article.item").mapNotNull { it.toSearchResult() }
@@ -41,10 +53,15 @@ class KawanfilmProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, Charsets.UTF_8.name())
-        return app.get(
-            "$mainUrl/?s=$encoded&post_type[]=post&post_type[]=tv",
-            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-        ).document.select("article.item").mapNotNull { it.toSearchResult() }
+        val fetch = getProviderPage("$mainUrl/?s=$encoded&post_type[]=post&post_type[]=tv")
+            ?: return emptyList()
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return emptyList()
+        return Jsoup.parse(fetch.body, fetch.url)
+            .select("article.item")
+            .mapNotNull { it.toSearchResult() }
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
@@ -70,9 +87,13 @@ class KawanfilmProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val requestUrl = providerUrl(url) ?: return null
-        val fetch = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
-        val canonicalUrl = providerUrl(fetch.url) ?: return null
-        val document = fetch.document
+        val fetch = getProviderPage(requestUrl) ?: return null
+        val canonicalUrl = fetch.url
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return null
+        val document = Jsoup.parse(fetch.body, canonicalUrl)
         val title = MovieMetadataParser.title(document.selectFirst("h1.entry-title")?.text())
             ?: return null
         val poster = fixUrlNull(
@@ -137,9 +158,13 @@ class KawanfilmProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val requestUrl = providerUrl(data) ?: return false
-        val fetch = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
-        val pageUrl = providerUrl(fetch.url) ?: return false
-        val document = fetch.document
+        val fetch = getProviderPage(requestUrl) ?: return false
+        val pageUrl = fetch.url
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return false
+        val document = Jsoup.parse(fetch.body, pageUrl)
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
         val candidates = buildList {
             addAll(ProviderHtmlParser.mediaSources(document))
@@ -154,14 +179,20 @@ class KawanfilmProvider : MainAPI() {
         for (request in PopularProviderLinkLimits.muviproAjaxRequests(document)) {
             if (!resolver.canContinue) break
             try {
-                val response = app.post(
-                    "$baseUrl/wp-admin/admin-ajax.php",
-                    data = request.toPostData(),
+                val response = safeHttp.postForm(
+                    url = "$baseUrl/wp-admin/admin-ajax.php",
+                    form = request.toPostData(),
+                    normalizer = ProviderUrlNormalizer(::networkProviderUrl),
                     referer = pageUrl,
                     headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
-                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+                    timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
                 )
-                ProviderHtmlParser.mediaSources(response.document).take(48).forEach { candidate ->
+                if (
+                    response.code !in 200..299 ||
+                    ProviderHtmlParser.isNonContentPage(response.body)
+                ) continue
+                val responseDocument = Jsoup.parse(response.body, response.url)
+                ProviderHtmlParser.mediaSources(responseDocument).take(48).forEach { candidate ->
                     val playerUrl = ProviderHtmlParser.absoluteUrl(candidate, response.url)
                         ?: return@forEach
                     if (resolver.canContinue) resolver.resolve(playerUrl, pageUrl)
@@ -175,9 +206,24 @@ class KawanfilmProvider : MainAPI() {
         return resolver.loaded
     }
 
+    private suspend fun getProviderPage(url: String): ProviderHttpResult? = try {
+        safeHttp.get(
+            url = url,
+            normalizer = ProviderUrlNormalizer(::networkProviderUrl),
+            timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
+        )
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        null
+    }
+
     private fun providerUrl(raw: String?): String? = ProviderHtmlParser.normalizeProviderPageUrl(
         raw,
         mainUrl,
-        setOf("kawanfilm21.co", "kawanfilm21.online")
+        ownedHosts
     )
+
+    private fun networkProviderUrl(raw: String?): String? =
+        ProviderHtmlParser.preserveProviderPageUrl(raw, mainUrl, ownedHosts)
 }

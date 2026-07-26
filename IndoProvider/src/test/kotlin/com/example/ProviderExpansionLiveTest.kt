@@ -13,7 +13,7 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 
-/** Opt-in current-catalog checks dedicated to the version 15 provider expansion. */
+/** Opt-in current-catalog checks for the current provider release. */
 class ProviderExpansionLiveTest {
     @Test
     fun `moviebox current catalog resolves playback`() = live(MovieboxProvider())
@@ -26,6 +26,9 @@ class ProviderExpansionLiveTest {
 
     @Test
     fun `nomat current catalog resolves playback`() = live(NomatProvider())
+
+    @Test
+    fun `indomax current catalog resolves playback`() = live(IndomaxProvider())
 
     @Test
     fun `kawanfilm current catalog resolves playback`() = live(KawanfilmProvider())
