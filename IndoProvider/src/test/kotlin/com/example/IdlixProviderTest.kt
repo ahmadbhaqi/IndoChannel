@@ -464,6 +464,91 @@ class IdlixProviderTest {
     }
 
     @Test
+    fun `master parser uses English only when Indonesian is unavailable`() = runBlocking {
+        val masterUrl = "https://e2e.majorplay.net/v/z2/video-id/config-615304.json" +
+            "?t=signed-token&pm=browser"
+        val manifest = IdlixParser.masterManifest(
+            """
+            #EXTM3U
+            #EXT-X-MEDIA:TYPE=SUBTITLES,URI="/v/z2/video-id/sub/en.vtt",GROUP-ID="subs",LANGUAGE="en",NAME="English"
+            #EXT-X-MEDIA:TYPE=SUBTITLES,URI="/v/z2/video-id/sub/es.vtt",GROUP-ID="subs",LANGUAGE="es",NAME="Spanish"
+            #EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,SUBTITLES="subs"
+            /v/z2/video-id/p/key/video-720.json
+            """.trimIndent(),
+            masterUrl,
+            maxHeight = 720
+        )
+
+        val track = requireNotNull(manifest).subtitles.single()
+        assertEquals("English", track.label)
+        assertEquals(
+            "https://e2e.majorplay.net/v/z2/video-id/sub/en.vtt" +
+                "?t=signed-token&pm=browser",
+            track.url
+        )
+        assertEquals(
+            "en",
+            newIdlixSubtitleFile(track, emptyMap()).lang
+        )
+    }
+
+    @Test
+    fun `subtitle preference is reapplied after manifest and redeemed tracks are merged`() {
+        val english = IdlixParser.SubtitleTrack(
+            label = "English",
+            url = "https://e2e.majorplay.net/v/z2/video-id/sub/en.vtt",
+            language = "en"
+        )
+        val indonesian = IdlixParser.SubtitleTrack(
+            label = "Bahasa Indonesia",
+            url = "https://e2e.majorplay.net/v/z2/video-id/sub/id.vtt",
+            language = "id"
+        )
+        val delayedIndonesian = indonesian.copy(url = english.url)
+
+        assertEquals(
+            listOf(delayedIndonesian),
+            IdlixParser.preferredSubtitles(
+                List(65) { index ->
+                    english.copy(url = "https://e2e.majorplay.net/sub/en-$index.vtt")
+                } + delayedIndonesian
+            )
+        )
+        assertEquals(
+            listOf(english),
+            IdlixParser.preferredSubtitles(listOf(english))
+        )
+    }
+
+    @Test
+    fun `master parser finds Indonesian after more than thirty two English declarations`() {
+        val masterUrl = "https://e2e.majorplay.net/v/z2/video-id/config-615304.json" +
+            "?t=signed-token&pm=browser"
+        val englishDeclarations = (1..40).joinToString("\n") { index ->
+            "#EXT-X-MEDIA:TYPE=SUBTITLES," +
+                "URI=\"/v/z2/video-id/sub/en-$index.vtt\"," +
+                "GROUP-ID=\"subs\",LANGUAGE=\"en\",NAME=\"English $index\""
+        }
+        val manifest = IdlixParser.masterManifest(
+            """
+            #EXTM3U
+            $englishDeclarations
+            #EXT-X-MEDIA:TYPE=SUBTITLES,URI="/v/z2/video-id/sub/id.vtt",GROUP-ID="subs",LANGUAGE="id",NAME="Bahasa Indonesia"
+            #EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,SUBTITLES="subs"
+            /v/z2/video-id/p/key/video-720.json
+            """.trimIndent(),
+            masterUrl,
+            maxHeight = 720
+        )
+
+        assertEquals(
+            listOf("id"),
+            requireNotNull(manifest).subtitles.map(IdlixParser.SubtitleTrack::language)
+        )
+        assertTrue(requireNotNull(manifest).subtitles.single().url.contains("/sub/id.vtt"))
+    }
+
+    @Test
     fun `relative playback siblings inherit the signed master token`() {
         val masterUrl = "https://e2e.majorplay.net/v/z2/video-id/config-615304.json" +
             "?t=signed-token&pm=browser"
@@ -661,6 +746,54 @@ class IdlixProviderTest {
         val subtitle = newIdlixSubtitleFile(tracks.first(), headers)
         assertEquals("id", subtitle.lang)
         assertEquals(headers, subtitle.headers)
+    }
+
+    @Test
+    fun `redeemed subtitles use English only when Indonesian is unavailable`() = runBlocking {
+        val masterUrl = "https://e2e.majorplay.net/v/z2/video-id/config-615304.json" +
+            "?t=signed-token&pm=browser"
+        val redeemed = mapper.readTree(
+            """
+            {
+              "subtitles": [
+                {"label":"English","lang":"en","path":"/v/z2/video-id/sub/en.vtt"},
+                {"label":"Español","lang":"es","path":"/v/z2/video-id/sub/es.vtt"}
+              ]
+            }
+            """.trimIndent()
+        )
+
+        val track = IdlixParser.redeemedSubtitles(redeemed, masterUrl).single()
+        assertEquals("English", track.label)
+        assertEquals(
+            "en",
+            newIdlixSubtitleFile(track, emptyMap()).lang
+        )
+    }
+
+    @Test
+    fun `redeemed subtitles find Indonesian after more than thirty two English entries`() {
+        val masterUrl = "https://e2e.majorplay.net/v/z2/video-id/config-615304.json" +
+            "?t=signed-token&pm=browser"
+        val englishEntries = (1..40).joinToString(",") { index ->
+            """{"label":"English $index","lang":"en","path":"/v/z2/video-id/sub/en-$index.vtt"}"""
+        }
+        val redeemed = mapper.readTree(
+            """
+            {
+              "subtitles": [
+                $englishEntries,
+                {"label":"Bahasa Indonesia","lang":"id","path":"/v/z2/video-id/sub/id.vtt"}
+              ]
+            }
+            """.trimIndent()
+        )
+
+        assertEquals(
+            listOf("id"),
+            IdlixParser.redeemedSubtitles(redeemed, masterUrl)
+                .map(IdlixParser.SubtitleTrack::language)
+        )
     }
 
     @Test

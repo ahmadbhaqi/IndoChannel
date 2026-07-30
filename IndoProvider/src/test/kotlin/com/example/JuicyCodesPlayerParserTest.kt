@@ -5,10 +5,56 @@ import java.io.IOException
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class JuicyCodesPlayerParserTest {
+    @Test
+    fun `player initializer linkage failure stays inside resolution session`() = runBlocking {
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = {},
+            pageFetcher = { _, _ -> "<html><body>Player shell</body></html>" },
+            juicyCodesPlaybackParser = {
+                throw ExceptionInInitializerError("optional player parser failed")
+            },
+            juicyCodesRecognizer = { false },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { it }
+        )
+
+        assertFalse(
+            session.resolve(
+                "https://player.example/embed/current",
+                "https://provider.example/movie/current"
+            )
+        )
+    }
+
+    @Test
+    fun `core page fetcher linkage failure is not hidden as an empty candidate`() {
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = {},
+            pageFetcher = { _, _ -> throw NoSuchMethodError("core HTTP ABI mismatch") },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { it }
+        )
+
+        assertFailsWith<NoSuchMethodError> {
+            runBlocking {
+                session.resolve(
+                    "https://player.example/embed/current",
+                    "https://provider.example/movie/current"
+                )
+            }
+        }
+    }
+
     @Test
     fun `decodes current concatenated player configuration`() {
         val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/116.0.0.0"

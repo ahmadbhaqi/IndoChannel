@@ -65,6 +65,7 @@ class NomatProvider : MainAPI() {
     private fun Element.toSearchResult(): SearchResponse? {
         val href = providerUrl(attr("href")) ?: return null
         val title = MovieMetadataParser.title(selectFirst(".title")?.text()) ?: return null
+        if (SensitiveContentPolicy.isBlockedCatalogCard(this, title, href)) return null
         val posterStyle = selectFirst(".poster")?.attr("style").orEmpty()
         val poster = fixUrlNull(
             Regex("""(?i)url\((?:['"])?([^'")]+)""")

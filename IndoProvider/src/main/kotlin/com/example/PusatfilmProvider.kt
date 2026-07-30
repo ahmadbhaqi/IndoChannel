@@ -69,6 +69,7 @@ class PusatfilmProvider : MainAPI() {
             selectFirst("h2.entry-title > a")?.text()
         ) ?: return null
         val href = normalizePageUrl(this.selectFirst("a")?.attr("href")) ?: return null
+        if (SensitiveContentPolicy.isBlockedCatalogCard(this, title, href)) return null
         val posterUrl = fixUrlNull(this.selectFirst("a > img")?.getImageAttr()).fixImageQuality()
         val quality = this.select("div.gmr-qual, div.gmr-quality-item > a").text().trim().replace("-", "")
 

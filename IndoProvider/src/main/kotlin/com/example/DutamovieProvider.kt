@@ -58,6 +58,7 @@ class DutamovieProvider : MainAPI() {
             selectFirst("h2.entry-title > a")?.text()
         ) ?: return null
         val href = normalizePageUrl(selectFirst("a")?.attr("href")) ?: return null
+        if (SensitiveContentPolicy.isBlockedCatalogCard(this, title, href)) return null
         val poster = fixUrlNull(selectFirst("a > img")?.getImageAttr())?.fixImageQuality()
         val quality = select("div.gmr-qual, div.gmr-quality-item > a").text().trim().replace("-", "")
         return if (quality.isEmpty()) {

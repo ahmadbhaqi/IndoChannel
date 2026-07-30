@@ -503,9 +503,9 @@ class IdlixProvider : MainAPI() {
             "Referer" to request.pageUrl,
             "Origin" to mainUrl
         )
-        (manifest.subtitles + IdlixParser.redeemedSubtitles(redeemed, verifiedMasterUrl))
-            .distinctBy(IdlixParser.SubtitleTrack::url)
-            .take(32)
+        IdlixParser.preferredSubtitles(
+            manifest.subtitles + IdlixParser.redeemedSubtitles(redeemed, verifiedMasterUrl)
+        )
             .forEach { track ->
                 subtitleCallback(newIdlixSubtitleFile(track, mediaHeaders))
             }
@@ -822,7 +822,7 @@ internal suspend fun newIdlixVariantLinks(
 internal suspend fun newIdlixSubtitleFile(
     track: IdlixParser.SubtitleTrack,
     headers: Map<String, String>
-): SubtitleFile = newSubtitleFile("id", track.url) {
+): SubtitleFile = newSubtitleFile(track.language, track.url) {
     this.headers = headers
 }
 
@@ -849,7 +849,11 @@ internal object IdlixParser {
     data class ContentPage(val type: String, val slug: String, val url: String)
     data class PlaybackRequest(val contentType: String, val contentId: String, val pageUrl: String)
     data class Stream(val url: String, val height: Int)
-    data class SubtitleTrack(val label: String, val url: String)
+    data class SubtitleTrack(
+        val label: String,
+        val url: String,
+        val language: String = "id"
+    )
     data class MasterManifest(
         val streams: List<Stream>,
         val audioUrls: List<String>,
@@ -1052,6 +1056,20 @@ internal object IdlixParser {
         // unplayable at this level.
         if (!isSeries && !node.path("hasVideo").asBoolean(true)) return null
         val url = "https://z2.idlixku.com/${if (isSeries) "series" else "movie"}/$slug"
+        val categories = sequenceOf("genres", "tags")
+            .flatMap { field ->
+                node.path(field)
+                    .takeIf(JsonNode::isArray)
+                    ?.asSequence()
+                    .orEmpty()
+            }
+            .mapNotNull { category ->
+                category.textOrNull("name")
+                    ?: category.takeIf(JsonNode::isTextual)?.asText()?.trim()
+            }
+            .filter(String::isNotBlank)
+            .toList()
+        if (SensitiveContentPolicy.isBlocked(title, url, categories)) return null
         val poster = tmdbImage(node.textOrNull("posterPath"), "w500")
         val quality = getQualityFromString(node.textOrNull("quality"))
         return if (isSeries) {
@@ -1123,17 +1141,22 @@ internal object IdlixParser {
                 !line.contains("TYPE=AUDIO", ignoreCase = true)) return@mapNotNull null
             attribute(line, "URI")?.let { tokenizedAsset(it, masterUrl) }
         }.distinct().take(8)
-        val subtitles = lines.mapNotNull { line ->
+        val subtitleCandidates = lines.mapNotNull { line ->
             if (!line.startsWith("#EXT-X-MEDIA:", ignoreCase = true) ||
                 !line.contains("TYPE=SUBTITLES", ignoreCase = true)) return@mapNotNull null
             val language = attribute(line, "LANGUAGE")
             val label = attribute(line, "NAME") ?: language
-            if (!isIndonesianSubtitle(language, label)) return@mapNotNull null
+            val languageCode = subtitleLanguage(language, label) ?: return@mapNotNull null
             val url = attribute(line, "URI")
                 ?.let { tokenizedAsset(it, masterUrl) }
                 ?: return@mapNotNull null
-            SubtitleTrack(label ?: "Bahasa Indonesia", url)
-        }.distinctBy(SubtitleTrack::url).take(32)
+            SubtitleTrack(
+                label = label ?: if (languageCode == "id") "Bahasa Indonesia" else "English",
+                url = url,
+                language = languageCode
+            )
+        }
+        val subtitles = preferredSubtitles(subtitleCandidates)
 
         val hasVariantDeclarations = lines.any {
             it.startsWith("#EXT-X-STREAM-INF:", ignoreCase = true)
@@ -1228,10 +1251,9 @@ internal object IdlixParser {
         ).toASCIIString()
     }.getOrNull()
 
-    fun redeemedSubtitles(redeemed: JsonNode, masterUrl: String): List<SubtitleTrack> =
-        redeemed.path("subtitles")
+    fun redeemedSubtitles(redeemed: JsonNode, masterUrl: String): List<SubtitleTrack> {
+        val candidates = redeemed.path("subtitles")
             .takeIf(JsonNode::isArray)
-            ?.take(32)
             ?.mapNotNull { subtitle ->
                 val raw = subtitle.textOrNull("path")
                     ?: subtitle.textOrNull("url")
@@ -1242,13 +1264,34 @@ internal object IdlixParser {
                 val language = subtitle.textOrNull("lang")
                     ?: subtitle.textOrNull("language")
                 val label = subtitle.textOrNull("label") ?: language
-                if (!isIndonesianSubtitle(language, label)) return@mapNotNull null
-                SubtitleTrack(label ?: "Bahasa Indonesia", url)
+                val languageCode = subtitleLanguage(language, label) ?: return@mapNotNull null
+                SubtitleTrack(
+                    label = label ?: if (languageCode == "id") "Bahasa Indonesia" else "English",
+                    url = url,
+                    language = languageCode
+                )
             }
-            ?.distinctBy(SubtitleTrack::url)
             .orEmpty()
+        return preferredSubtitles(candidates)
+    }
 
-    private fun isIndonesianSubtitle(language: String?, label: String?): Boolean {
+    fun preferredSubtitles(tracks: Iterable<SubtitleTrack>): List<SubtitleTrack> {
+        val indonesian = linkedMapOf<String, SubtitleTrack>()
+        val english = linkedMapOf<String, SubtitleTrack>()
+        tracks.forEach { track ->
+            val selected = when (track.language) {
+                "id" -> indonesian
+                "en" -> english
+                else -> return@forEach
+            }
+            if (selected.size < 32 && track.url !in selected) {
+                selected[track.url] = track
+            }
+        }
+        return (if (indonesian.isNotEmpty()) indonesian else english).values.toList()
+    }
+
+    private fun subtitleLanguage(language: String?, label: String?): String? {
         fun normalized(raw: String?): String? = raw
             ?.trim()
             ?.lowercase()
@@ -1256,18 +1299,27 @@ internal object IdlixParser {
             ?.replace(Regex("\\s+"), " ")
             ?.takeIf(String::isNotBlank)
 
-        fun matches(value: String): Boolean =
+        fun classify(value: String): String? = when {
             value == "id" ||
                 value.startsWith("id-") ||
                 value in setOf("in", "ind", "indonesian", "indonesia", "bahasa indonesia") ||
                 value.contains("bahasa indonesia") ||
-                Regex("(?:^|[^a-z])indonesian(?:[^a-z]|$)").containsMatchIn(value)
+                Regex("(?:^|[^a-z])indonesian(?:[^a-z]|$)").containsMatchIn(value) -> "id"
+
+            value == "en" ||
+                value.startsWith("en-") ||
+                value in setOf("eng", "english") ||
+                Regex("(?:^|[^a-z])english(?:[^a-z]|$)").containsMatchIn(value) -> "en"
+
+            else -> null
+        }
 
         val explicitLanguage = normalized(language)
-        return if (explicitLanguage != null) {
-            matches(explicitLanguage)
-        } else {
-            normalized(label)?.let(::matches) == true
+        return when {
+            explicitLanguage == null -> normalized(label)?.let(::classify)
+            explicitLanguage in setOf("und", "unknown", "auto", "default") ->
+                normalized(label)?.let(::classify)
+            else -> classify(explicitLanguage)
         }
     }
 

@@ -44,14 +44,16 @@ class KeBioskopProvider : MainAPI() {
         val fetch = app.get(requestUrl)
         return newHomePageResponse(
             request.name,
-            KeBioskopParser.catalogCards(fetch.text, fetch.url).map { card -> card.toSearchResponse() }
+            KeBioskopParser.catalogCards(fetch.text, fetch.url)
+                .mapNotNull { card -> card.toSearchResponse() }
         )
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, Charsets.UTF_8.name())
         val fetch = app.get("$mainUrl/?s=$encoded")
-        return KeBioskopParser.catalogCards(fetch.text, fetch.url).map { card -> card.toSearchResponse() }
+        return KeBioskopParser.catalogCards(fetch.text, fetch.url)
+            .mapNotNull { card -> card.toSearchResponse() }
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -125,13 +127,16 @@ class KeBioskopProvider : MainAPI() {
         return playback.resolve(detailFetch.text, canonicalUrl) && resolver.loaded
     }
 
-    private fun KeBioskopCatalogCard.toSearchResponse(): SearchResponse = newMovieSearchResponse(
-        title,
-        url,
-        TvType.Movie
-    ) {
-        posterUrl = this@toSearchResponse.posterUrl
-        year = this@toSearchResponse.year
+    private fun KeBioskopCatalogCard.toSearchResponse(): SearchResponse? {
+        if (SensitiveContentPolicy.isBlocked(title, url)) return null
+        return newMovieSearchResponse(
+            title,
+            url,
+            TvType.Movie
+        ) {
+            posterUrl = this@toSearchResponse.posterUrl
+            year = this@toSearchResponse.year
+        }
     }
 }
 
@@ -260,6 +265,7 @@ internal object KeBioskopParser {
         val url = ProviderHtmlParser.absoluteUrl(link.attr("href"), pageUrl)
             ?.let(::providerUrl)
             ?: return null
+        if (SensitiveContentPolicy.isBlockedCatalogCard(card, title, url)) return null
         val poster = ProviderHtmlParser.imageSource(card.selectFirst("img"))
             ?.let { ProviderHtmlParser.absoluteUrl(it, pageUrl) }
         return KeBioskopCatalogCard(title, url, poster, yearFrom(rawTitle))

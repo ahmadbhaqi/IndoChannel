@@ -43,6 +43,7 @@ class IndoxxiProvider : MainAPI() {
         val anchor = ProviderHtmlParser.firstTitledLink(this) ?: return null
         val title = MovieMetadataParser.title(anchor.text()) ?: return null
         val href = providerUrl(anchor.attr("href")) ?: return null
+        if (SensitiveContentPolicy.isBlockedCatalogCard(this, title, href)) return null
         val poster = fixUrlNull(ProviderHtmlParser.firstImageSource(this))
         val quality = selectFirst("div.gmr-quality-item, div.gmr-qual")?.text()?.trim()
         val isSeries = href.contains("/tv/", ignoreCase = true) ||

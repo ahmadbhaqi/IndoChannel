@@ -259,6 +259,16 @@ class MovieboxProvider : MainAPI() {
         val title = item.title?.trim()?.takeIf { it.isNotBlank() } ?: return null
         if (item.hasResource != true) return null
         val data = MovieboxLoadData(id = id, detailPath = detailPath).toJson()
+        if (
+            SensitiveContentPolicy.isBlocked(
+                title = title,
+                url = detailPath,
+                categories = item.genre.orEmpty()
+                    .split(',')
+                    .map(String::trim)
+                    .filter(String::isNotBlank)
+            )
+        ) return null
         return if (item.subjectType == 2) {
             newTvSeriesSearchResponse(title, data, TvType.TvSeries, false) {
                 posterUrl = item.cover?.url

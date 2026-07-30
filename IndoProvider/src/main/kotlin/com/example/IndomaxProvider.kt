@@ -372,6 +372,9 @@ internal object IndomaxParser {
             val title = anchor.text().trim().takeIf { it.isNotBlank() }
                 ?: return@mapNotNull null
             val url = providerPageUrl(anchor.attr("href"), pageUrl) ?: return@mapNotNull null
+            if (SensitiveContentPolicy.isBlockedCatalogCard(article, title, url)) {
+                return@mapNotNull null
+            }
             val poster = ProviderHtmlParser.firstImageSource(
                 article,
                 "img.wp-post-image, div.content-thumbnail img, img"

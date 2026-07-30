@@ -133,6 +133,43 @@ class SensitiveContentPolicyTest {
     }
 
     @Test
+    fun `blocks sexual catalog signals without treating age ratings as sexual`() {
+        assertTrue(
+            SensitiveContentPolicy.isBlocked(
+                title = "Sex in Public (2026)",
+                url = "https://provider.example/sex-in-public-2026/",
+                categories = listOf("Documentary", "Movie")
+            )
+        )
+        listOf(
+            "Vivamax",
+            "/category/vivamax/",
+            "Sexy",
+            "Sexual",
+            "Erotic"
+        ).forEach { category ->
+            assertTrue(
+                SensitiveContentPolicy.isBlocked(
+                    title = "Booking (2026)",
+                    url = "https://provider.example/booking-2026/",
+                    categories = listOf("Drama", category)
+                ),
+                category
+            )
+        }
+        listOf("18+", "NC-17", "Ecchi", "Ecchi 18+").forEach { category ->
+            assertFalse(
+                SensitiveContentPolicy.isBlocked(
+                    title = "Violent Night",
+                    url = "https://provider.example/violent-night/",
+                    categories = listOf("Action", category)
+                ),
+                category
+            )
+        }
+    }
+
+    @Test
     fun `does not block ambiguous words in normal titles`() {
         listOf(
             "Sex Education Season 4",
@@ -140,6 +177,9 @@ class SensitiveContentPolicyTest {
             "xXx: Return of Xander Cage",
             "Semi-Pro",
             "Adult Beginners",
+            "Asia M Championship",
+            "Kelas Bintang School",
+            "The Pink Film Camera",
             "Sanger Things",
             "Violent Night 18+"
         ).forEach { title ->
@@ -152,13 +192,6 @@ class SensitiveContentPolicyTest {
                 title
             )
         }
-        assertFalse(
-            SensitiveContentPolicy.isBlocked(
-                title = "Ordinary Drama",
-                url = "https://provider.example/ordinary-drama/",
-                categories = listOf("Drama", "Vivamax")
-            )
-        )
         assertFalse(
             SensitiveContentPolicy.isBlocked(
                 title = "Solo Leveling",

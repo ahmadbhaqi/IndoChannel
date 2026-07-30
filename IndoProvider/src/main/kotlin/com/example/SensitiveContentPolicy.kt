@@ -4,6 +4,7 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import java.text.Normalizer
 import java.util.Locale
+import org.jsoup.nodes.Element
 
 /**
  * Conservative, provider-independent explicit-content gate.
@@ -18,8 +19,13 @@ internal object SensitiveContentPolicy {
         Regex("""\bsemi\s+(?:filipina|jepang|korea|barat|thailand)\b"""),
         Regex("""\bjapanese\s+av\b""")
     )
+    private val categoryOnlyPhrases = listOf(
+        Regex("""\basia\s+m\b"""),
+        Regex("""\bkelas\s+bintang\b"""),
+        Regex("""\bpink\s+films?\b""")
+    )
     private val explicitCategoryToken = Regex(
-        """\b(?:nsfw|hentai|smut|erotic|erotica|erotis|bokep|porn|porno|pornografi|pornography|pornographic|sex|jav)\b"""
+        """\b(?:nsfw|hentai|smut|erotic|erotica|erotis|sexual|sexy|sexploitation|softcore|vivamax|bokep|porn|porno|pornografi|pornography|pornographic|sex|jav)\b"""
     )
     private val adultCategoryToken = Regex("""\badult\b""")
     private val allowedAdultCategoryPhrases = listOf(
@@ -33,6 +39,9 @@ internal object SensitiveContentPolicy {
     )
     private val explicitTitleOrSlug = Regex(
         """\b(?:nsfw|hentai|smut|erotic|erotica|erotis|jav|bokep|porn|pornografi|porno|sange|sangean|sangenya|tobrut|ngewe|ngentot)\b"""
+    )
+    private val explicitTitlePhrases = listOf(
+        Regex("""\bsex\s+in\s+public\b""")
     )
     private val allowedExplicitWordTitlePhrases = listOf(
         Regex("""\bthe\s+hentai\s+prince(?:\s+and\s+the\s+stony\s+cat)?\b"""),
@@ -48,7 +57,8 @@ internal object SensitiveContentPolicy {
                 val normalized = normalize(category)
                 explicitCategoryToken.containsMatchIn(normalized) ||
                     containsBlockedAdultCategory(normalized) ||
-                    explicitCategoryPhrases.any { it.containsMatchIn(normalized) }
+                    explicitCategoryPhrases.any { it.containsMatchIn(normalized) } ||
+                    categoryOnlyPhrases.any { it.containsMatchIn(normalized) }
             }
         ) {
             return true
@@ -59,9 +69,25 @@ internal object SensitiveContentPolicy {
             .map(::removeAllowedExplicitWordTitlePhrases)
             .any { normalized ->
                 explicitTitleOrSlug.containsMatchIn(normalized) ||
-                    explicitCategoryPhrases.any { it.containsMatchIn(normalized) }
+                    explicitCategoryPhrases.any { it.containsMatchIn(normalized) } ||
+                    explicitTitlePhrases.any { it.containsMatchIn(normalized) }
             }
     }
+
+    fun isBlockedCatalogCard(card: Element, title: String?, url: String?): Boolean =
+        isBlocked(
+            title = title,
+            url = url,
+            categories = card.select(CATALOG_TAXONOMY_SELECTOR)
+                .flatMap { element ->
+                    listOf(
+                        element.text().trim(),
+                        element.attr("content").trim(),
+                        element.attr("href").trim()
+                    )
+                }
+                .filter(String::isNotBlank)
+        )
 
     private fun containsBlockedAdultCategory(value: String): Boolean {
         val withoutAllowedPhrases = allowedAdultCategoryPhrases.fold(value) { filtered, allowedPhrase ->
@@ -85,6 +111,10 @@ internal object SensitiveContentPolicy {
         .lowercase(Locale.ROOT)
         .replace(Regex("""[^a-z0-9+]+"""), " ")
         .trim()
+
+    private const val CATALOG_TAXONOMY_SELECTOR =
+        "a[rel~=category], a[href*=/category/], a[href*=/genre/], a[href*=/tag/], " +
+            "[itemprop=genre], meta[property=article:tag], meta[property=article:section]"
 }
 
 internal data class AnimePlaybackData(

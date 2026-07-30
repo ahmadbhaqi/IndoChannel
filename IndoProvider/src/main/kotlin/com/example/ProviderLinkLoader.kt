@@ -45,6 +45,8 @@ internal typealias PlayerApiFetcher = suspend (
 ) -> String
 internal typealias HowNetworkApiFetcher = suspend (request: HowNetworkApiRequest) -> String
 internal typealias InlineSourceParser = (html: String, playerUrl: String) -> List<String>
+internal typealias JuicyCodesPlaybackParser = (html: String) -> JuicyCodesPlayback?
+internal typealias JuicyCodesRecognizer = (html: String) -> Boolean
 internal typealias CloudstreamExtractorLoader = suspend (
     url: String,
     referer: String?,
@@ -199,6 +201,12 @@ internal class LinkResolutionSession(
     private val howNetworkApiFetcher: HowNetworkApiFetcher = ::fetchBoundedHowNetworkApi,
     private val firestreamApiFetcher: FirestreamApiFetcher = ::fetchBoundedFirestreamApi,
     private val extractorLoader: CloudstreamExtractorLoader = ::loadExtractorWithResult,
+    private val juicyCodesPlaybackParser: JuicyCodesPlaybackParser = { html ->
+        JuicyCodesPlayerParser.playback(html)
+    },
+    private val juicyCodesRecognizer: JuicyCodesRecognizer = { html ->
+        JuicyCodesPlayerParser.recognizes(html)
+    },
     private val inlineSourceParser: InlineSourceParser? = null,
     private val preferInlineSourceParser: Boolean = false,
     private val maxDepth: Int = 2,
@@ -665,7 +673,7 @@ internal class LinkResolutionSession(
                 val resolvedHtml = html ?: return
                 cachedHtml = resolvedHtml
                 val beforeAdapter = emittedLinks.size
-                JuicyCodesPlayerParser.playback(resolvedHtml)?.let { playback ->
+                optionalJuicyCodesPlayback(resolvedHtml)?.let { playback ->
                     playback.tracks.forEach { track ->
                         emitSubtitle(newSubtitleFile(track.label, track.url))
                     }
@@ -689,7 +697,7 @@ internal class LinkResolutionSession(
                     }
                 }
                 if (emittedLinks.size > beforeAdapter) return
-                if (JuicyCodesPlayerParser.recognizes(resolvedHtml)) return
+                if (optionalJuicyCodesRecognizes(resolvedHtml)) return
             }
 
             if (JustPlayPlayerParser.supports(host)) {
@@ -824,7 +832,7 @@ internal class LinkResolutionSession(
             // call a same-origin /api endpoint instead of trusting host names.
             if (emitFreeonPlayback(html, url)) return
             val beforeJuicyCodes = emittedLinks.size
-            JuicyCodesPlayerParser.playback(html)?.let { playback ->
+            optionalJuicyCodesPlayback(html)?.let { playback ->
                 playback.tracks.forEach { track ->
                     emitSubtitle(newSubtitleFile(track.label, track.url))
                 }
@@ -845,7 +853,7 @@ internal class LinkResolutionSession(
                 }
             }
             if (emittedLinks.size > beforeJuicyCodes) return
-            if (JuicyCodesPlayerParser.recognizes(html)) return
+            if (optionalJuicyCodesRecognizes(html)) return
             (
                 InlineDataParser.playableInlineUrls(html, url) +
                     inlineSourceParser
@@ -887,6 +895,20 @@ internal class LinkResolutionSession(
         } catch (_: Exception) {
             // Continue with sibling and later candidates.
         }
+    }
+
+    private fun optionalJuicyCodesPlayback(html: String): JuicyCodesPlayback? = try {
+        juicyCodesPlaybackParser(html)
+    } catch (_: LinkageError) {
+        // This adapter is optional. Its static JSON/runtime dependencies may
+        // be absent or binary-incompatible on a particular Cloudstream build.
+        null
+    }
+
+    private fun optionalJuicyCodesRecognizes(html: String): Boolean = try {
+        juicyCodesRecognizer(html)
+    } catch (_: LinkageError) {
+        false
     }
 
     private suspend fun emitDirect(

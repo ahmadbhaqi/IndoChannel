@@ -59,6 +59,7 @@ class KitanontonProvider : MainAPI() {
             ?: selectFirst("img")?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
             ?: return null
         val title = MovieMetadataParser.title(rawTitle) ?: return null
+        if (SensitiveContentPolicy.isBlockedCatalogCard(this, title, href)) return null
         val poster = fixUrlNull(ProviderHtmlParser.imageSource(selectFirst("img")))
         val quality = selectFirst(".mli-quality")?.text()?.trim()
         val isSeries = href.contains("/series/", ignoreCase = true) ||

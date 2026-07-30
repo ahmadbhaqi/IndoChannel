@@ -140,6 +140,55 @@ class IndomaxProviderTest {
     }
 
     @Test
+    fun `catalog drops sexual cards while keeping nonsexual mature and ecchi titles`() {
+        val pageUrl = "https://akses8.indomax21.xyz/category/box-office/"
+        val document = Jsoup.parse(
+            """
+                <article class="item-infinite">
+                  <h2 class="entry-title">
+                    <a href="/sex-in-public-2026/">Sex in Public (2026)</a>
+                  </h2>
+                  <div class="gmr-movie-on">
+                    <a href="/category/documentary/" rel="category tag">Documentary</a>
+                  </div>
+                </article>
+                <article class="item-infinite">
+                  <h2 class="entry-title">
+                    <a href="/booking-2026/">Booking (2026)</a>
+                  </h2>
+                  <div class="gmr-movie-on">
+                    <a href="/category/drama/" rel="category tag">Drama</a>
+                    <a href="/category/vivamax/" rel="category tag">Vivamax</a>
+                  </div>
+                </article>
+                <article class="item-infinite">
+                  <h2 class="entry-title">
+                    <a href="/violent-night/">Violent Night 18+</a>
+                  </h2>
+                  <div class="gmr-movie-on">
+                    <a href="/category/action/" rel="category tag">Action</a>
+                  </div>
+                </article>
+                <article class="item-infinite">
+                  <h2 class="entry-title">
+                    <a href="/ecchi-comedy/">Ecchi Comedy</a>
+                  </h2>
+                  <div class="gmr-movie-on">
+                    <a href="/category/anime/" rel="category tag">Anime</a>
+                    <a href="/category/ecchi/" rel="category tag">Ecchi</a>
+                  </div>
+                </article>
+            """.trimIndent(),
+            pageUrl
+        )
+
+        assertEquals(
+            listOf("Violent Night 18+", "Ecchi Comedy"),
+            IndomaxParser.catalogItems(document, pageUrl).map { it.title }
+        )
+    }
+
+    @Test
     fun `owned page normalizer preserves exact live aliases and rejects lookalikes`() {
         assertEquals(
             "https://akses7.indomax21.xyz/movie/example/",

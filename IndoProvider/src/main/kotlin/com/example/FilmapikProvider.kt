@@ -74,6 +74,7 @@ class FilmapikProvider : MainAPI() {
             ?: selectFirst("h3")?.text()?.trim()?.takeIf { it.isNotBlank() }
             ?: return null
         val title = MovieMetadataParser.title(rawTitle) ?: return null
+        if (FilmapikCatalogParser.isBlockedCatalogCard(this, title, href)) return null
         val poster = fixUrlNull(ProviderHtmlParser.imageSource(image))
         val quality = selectFirst(".badge-quality")?.text()?.trim()
         val type = if (href.contains("/tvshows/", ignoreCase = true)) TvType.TvSeries else TvType.Movie
@@ -256,6 +257,7 @@ class FilmapikProvider : MainAPI() {
     private fun FilmapikSearchItem.toSearchResponse(): SearchResponse? {
         val safeTitle = MovieMetadataParser.title(title) ?: return null
         val safeUrl = providerUrl(url) ?: return null
+        if (SensitiveContentPolicy.isBlocked(safeTitle, safeUrl)) return null
         val type = if (safeUrl.contains("/tvshows/", ignoreCase = true)) TvType.TvSeries else TvType.Movie
         return newMovieSearchResponse(safeTitle, safeUrl, type) {
             posterUrl = img
@@ -274,6 +276,11 @@ internal data class FilmapikMediaSource(
 )
 
 internal object FilmapikCatalogParser {
+    fun isBlockedCatalogCard(titleLink: Element, title: String?, url: String?): Boolean {
+        val card = titleLink.parents().firstOrNull(::isCatalogContainer) ?: titleLink
+        return SensitiveContentPolicy.isBlockedCatalogCard(card, title, url)
+    }
+
     fun pageUrl(baseUrl: String, route: String, page: Int): String {
         val safePage = page.coerceAtLeast(1)
         val normalizedBaseUrl = baseUrl.trimEnd('/')
@@ -284,6 +291,13 @@ internal object FilmapikCatalogParser {
         }
         return "$normalizedBaseUrl$path"
     }
+
+    private fun isCatalogContainer(element: Element): Boolean =
+        element.tagName() in setOf("article", "li") ||
+            element.classNames().any { className ->
+                Regex("""(?:^|[-_])(?:card|film|item|movie|post|result)(?:$|[-_])""")
+                    .containsMatchIn(className.lowercase())
+            }
 }
 
 internal object FilmapikPlayerParser {

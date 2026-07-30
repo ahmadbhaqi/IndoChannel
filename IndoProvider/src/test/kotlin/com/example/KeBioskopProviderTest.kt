@@ -28,6 +28,25 @@ class KeBioskopProviderTest {
     }
 
     @Test
+    fun `catalog parser blocks sexual taxonomy outside the title link`() {
+        val cards = KeBioskopParser.catalogCards(
+            """
+            <div class="moviefilm">
+              <div class="movief"><a href="/nonton-film-booking-2026/">Booking (2026)</a></div>
+              <a href="/category/vivamax/" rel="category tag">Vivamax</a>
+            </div>
+            <div class="moviefilm">
+              <div class="movief"><a href="/nonton-film-violent-night/">Violent Night 18+</a></div>
+              <a href="/category/action/" rel="category tag">Action</a>
+            </div>
+            """.trimIndent(),
+            "https://kebioskop21.cfd/category/movie/"
+        )
+
+        assertEquals(listOf("Violent Night 18+"), cards.map(KeBioskopCatalogCard::title))
+    }
+
+    @Test
     fun `detail parser extracts clean movie metadata`() {
         val details = KeBioskopParser.detail(
             """

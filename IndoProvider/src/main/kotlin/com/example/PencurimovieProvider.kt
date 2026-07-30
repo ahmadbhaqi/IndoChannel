@@ -70,6 +70,7 @@ class PencurimovieProvider : MainAPI() {
             anchor.attr("title").ifBlank { selectFirst("h2, h3")?.text().orEmpty() }
         }
         val title = MovieMetadataParser.title(rawTitle) ?: return null
+        if (SensitiveContentPolicy.isBlockedCatalogCard(this, title, href)) return null
         val poster = fixUrlNull(ProviderHtmlParser.imageSource(anchor.selectFirst("img")))
         val quality = selectFirst("span.mli-quality, div.jtip-quality")?.text()?.trim()
         val episode = selectFirst("span.mli-eps i")?.text()?.trim()?.toIntOrNull()
