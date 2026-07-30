@@ -1,0 +1,76 @@
+name: Provider Health
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 20 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-health
+  cancel-in-progress: false
+
+jobs:
+  live-provider-checks:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      RUN_LIVE_PROVIDER_TESTS: 1
+      RUN_LIVE_MOVIE_PROVIDER_TESTS: 1
+
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - name: Expansion providers
+            slug: expansion
+            test_class: com.example.ProviderExpansionLiveTest
+          - name: Movie catalog and playback
+            slug: movie-catalog-playback
+            test_class: com.example.MovieProviderCatalogPlaybackLiveTest
+          - name: Idlix catalog, media, and subtitles
+            slug: idlix
+            test_class: com.example.IdlixProviderLiveTest
+          - name: Anime catalog and playback
+            slug: anime
+            test_class: com.example.AnimeProviderLiveTest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Run live provider suite
+        run: |
+          chmod +x gradlew
+          ./gradlew :IndoProvider:testDebugUnitTest \
+            --tests "${{ matrix.test_class }}" \
+            --project-prop=kotlin.compiler.execution.strategy=in-process \
+            --no-daemon \
+            --console=plain
+
+      - name: Upload health report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: provider-health-${{ matrix.slug }}-${{ github.run_attempt }}
+          path: |
+            IndoProvider/build/test-results/testDebugUnitTest
+            IndoProvider/build/reports/tests/testDebugUnitTest
+          if-no-files-found: warn
+          retention-days: 14

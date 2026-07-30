@@ -254,6 +254,112 @@ class ProviderExpansionTest {
     }
 
     @Test
+    fun `kuramanime rejects catalog cards marked as explicit`() {
+        val card = Jsoup.parseBodyFragment(
+            """
+            <div class="product__item">
+                <div class="pin">
+                    <i class="fa fa-fire"></i>
+                    <i class="fa-solid fa-droplet"></i>
+                </div>
+                <div class="product__item__text">
+                    <h5><a href="/anime/5087/explicit/episode/4">Explicit title</a></h5>
+                </div>
+            </div>
+            """.trimIndent()
+        ).selectFirst(".product__item")
+
+        assertNull(KuramanimeParser.catalogAnchor(assertNotNull(card)))
+    }
+
+    @Test
+    fun `kuramanime keeps ecchi catalog cards without the explicit marker`() {
+        val card = Jsoup.parseBodyFragment(
+            """
+            <div class="product__item">
+                <div class="pin"><i class="fa fa-fire"></i></div>
+                <div class="product__item__text">
+                    <h5><a href="/anime/1/high-school-dxd/episode/1">High School DxD</a></h5>
+                </div>
+            </div>
+            """.trimIndent()
+        ).selectFirst(".product__item")
+
+        assertEquals(
+            "High School DxD",
+            KuramanimeParser.catalogAnchor(assertNotNull(card))?.text()
+        )
+    }
+
+    @Test
+    fun `kuramanime rejects finished cards only in the ongoing catalog`() {
+        val card = Jsoup.parseBodyFragment(
+            """
+            <div class="product__item">
+                <div class="status"><span>SELESAI</span></div>
+                <h5>
+                    <a href="/anime/3/boruto-naruto-next-generations/episode/293">
+                        Boruto: Naruto Next Generations
+                    </a>
+                </h5>
+            </div>
+            """.trimIndent()
+        ).selectFirst(".product__item")
+
+        assertNull(
+            KuramanimeParser.catalogAnchor(
+                assertNotNull(card),
+                excludeFinished = true
+            )
+        )
+        assertEquals(
+            "Boruto: Naruto Next Generations",
+            KuramanimeParser.catalogAnchor(card, excludeFinished = false)?.text()
+        )
+    }
+
+    @Test
+    fun `kuramanime recognizes only ongoing catalog request paths`() {
+        assertTrue(
+            KuramanimeParser.isOngoingCatalog(
+                "https://v19.kuramanime.ing/anime/ongoing?order_by=updated&page="
+            )
+        )
+        assertTrue(
+            KuramanimeParser.isOngoingCatalog(
+                "https://v19.kuramanime.ing/quick/ongoing/"
+            )
+        )
+        assertFalse(
+            KuramanimeParser.isOngoingCatalog(
+                "https://v19.kuramanime.ing/anime/finished?next=/anime/ongoing"
+            )
+        )
+    }
+
+    @Test
+    fun `kuramanime ongoing filter ignores selesai in an anime title`() {
+        val card = Jsoup.parseBodyFragment(
+            """
+            <div class="product__item">
+                <div class="status"><span>SEDANG TAYANG</span></div>
+                <h5>
+                    <a href="/anime/42/sample/episode/4">Koi ga Selesai Made</a>
+                </h5>
+            </div>
+            """.trimIndent()
+        ).selectFirst(".product__item")
+
+        assertEquals(
+            "Koi ga Selesai Made",
+            KuramanimeParser.catalogAnchor(
+                assertNotNull(card),
+                excludeFinished = true
+            )?.text()
+        )
+    }
+
+    @Test
     fun `kuramanime ignores foreign episode links`() {
         val document = Jsoup.parse(
             """

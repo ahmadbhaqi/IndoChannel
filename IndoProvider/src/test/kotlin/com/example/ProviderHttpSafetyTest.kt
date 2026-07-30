@@ -7,6 +7,7 @@ import java.io.InputStream
 import java.net.InetAddress
 import java.net.Inet6Address
 import java.net.URI
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -15,6 +16,10 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -501,6 +506,242 @@ class ProviderHttpSafetyTest {
         )
         assertEquals("https://movie.example/", redirected.referer)
         assertTrue(redirected.cookies.isEmpty())
+    }
+
+    @Test
+    fun `response cookies are replayed on a later same origin request`() = runBlocking {
+        val fetcher = ScriptedFetcher(
+            listOf(
+                FakeRawResponse(
+                    code = 200,
+                    url = "https://movie.example/watch",
+                    headers = mapOf(
+                        "Set-Cookie" to listOf(
+                            "session=fresh; Path=/; Secure; HttpOnly",
+                            "XSRF-TOKEN=csrf-current; Path=/; Secure"
+                        )
+                    )
+                ),
+                FakeRawResponse(200, "https://movie.example/api/player")
+            )
+        )
+        val client = ProviderHttpSafetyClient(
+            fetcher,
+            ProviderDnsResolver { listOf(publicAddress()) }
+        )
+        val normalizer = allowHosts("movie.example")
+
+        client.get("https://movie.example/watch", normalizer)
+        client.postForm(
+            url = "https://movie.example/api/player",
+            form = mapOf("action" to "load"),
+            normalizer = normalizer
+        )
+
+        assertEquals(
+            mapOf(
+                "session" to "fresh",
+                "XSRF-TOKEN" to "csrf-current"
+            ),
+            fetcher.requests.last().cookies
+        )
+    }
+
+    @Test
+    fun `stored cookies honor secure path and origin boundaries`() = runBlocking {
+        val fetcher = ScriptedFetcher(
+            listOf(
+                FakeRawResponse(
+                    code = 200,
+                    url = "https://movie.example/anime/watch",
+                    headers = mapOf(
+                        "set-cookie" to listOf(
+                            "episode=allowed; Path=/anime; Secure"
+                        )
+                    )
+                ),
+                FakeRawResponse(200, "https://movie.example/anime/player"),
+                FakeRawResponse(200, "https://movie.example/assets/token"),
+                FakeRawResponse(200, "https://cdn.example/anime/player"),
+                FakeRawResponse(200, "http://movie.example/anime/player")
+            )
+        )
+        val client = ProviderHttpSafetyClient(
+            fetcher,
+            ProviderDnsResolver { listOf(publicAddress()) }
+        )
+        val normalizer = allowHosts("movie.example", "cdn.example")
+
+        client.get("https://movie.example/anime/watch", normalizer)
+        client.get("https://movie.example/anime/player", normalizer)
+        client.get("https://movie.example/assets/token", normalizer)
+        client.get("https://cdn.example/anime/player", normalizer)
+        client.get("http://movie.example/anime/player", normalizer)
+
+        assertEquals(mapOf("episode" to "allowed"), fetcher.requests[1].cookies)
+        assertTrue(fetcher.requests[2].cookies.isEmpty())
+        assertTrue(fetcher.requests[3].cookies.isEmpty())
+        assertTrue(fetcher.requests[4].cookies.isEmpty())
+    }
+
+    @Test
+    fun `redirect response cookies are replayed on the next eligible hop`() = runBlocking {
+        val fetcher = ScriptedFetcher(
+            listOf(
+                FakeRawResponse(
+                    code = 302,
+                    url = "https://movie.example/watch",
+                    headers = mapOf(
+                        "Location" to listOf("/player"),
+                        "Set-Cookie" to listOf(
+                            "session=redirect-current; Path=/; Secure; HttpOnly"
+                        )
+                    )
+                ),
+                FakeRawResponse(200, "https://movie.example/player")
+            )
+        )
+        val client = ProviderHttpSafetyClient(
+            fetcher,
+            ProviderDnsResolver { listOf(publicAddress()) }
+        )
+
+        client.get(
+            "https://movie.example/watch",
+            normalizer = allowHosts("movie.example")
+        )
+
+        assertEquals(
+            mapOf("session" to "redirect-current"),
+            fetcher.requests.last().cookies
+        )
+    }
+
+    @Test
+    fun `expired response cookie removes the stored session value`() = runBlocking {
+        val fetcher = ScriptedFetcher(
+            listOf(
+                FakeRawResponse(
+                    code = 200,
+                    url = "https://movie.example/login",
+                    headers = mapOf(
+                        "Set-Cookie" to listOf("session=active; Path=/; Secure")
+                    )
+                ),
+                FakeRawResponse(
+                    code = 200,
+                    url = "https://movie.example/logout",
+                    headers = mapOf(
+                        "Set-Cookie" to listOf(
+                            "session=deleted; Max-Age=0; Path=/; Secure"
+                        )
+                    )
+                ),
+                FakeRawResponse(200, "https://movie.example/after-logout")
+            )
+        )
+        val client = ProviderHttpSafetyClient(
+            fetcher,
+            ProviderDnsResolver { listOf(publicAddress()) }
+        )
+        val normalizer = allowHosts("movie.example")
+
+        client.get("https://movie.example/login", normalizer)
+        client.get("https://movie.example/logout", normalizer)
+        client.get("https://movie.example/after-logout", normalizer)
+
+        assertEquals(mapOf("session" to "active"), fetcher.requests[1].cookies)
+        assertTrue(fetcher.requests[2].cookies.isEmpty())
+    }
+
+    @Test
+    fun `explicit request cookies override stored values without dropping the session`() =
+        runBlocking {
+            val fetcher = ScriptedFetcher(
+                listOf(
+                    FakeRawResponse(
+                        code = 200,
+                        url = "https://movie.example/bootstrap",
+                        headers = mapOf(
+                            "Set-Cookie" to listOf(
+                                "session=stored; Path=/; Secure",
+                                "csrf=stored-token; Path=/; Secure"
+                            )
+                        )
+                    ),
+                    FakeRawResponse(200, "https://movie.example/player")
+                )
+            )
+            val client = ProviderHttpSafetyClient(
+                fetcher,
+                ProviderDnsResolver { listOf(publicAddress()) }
+            )
+            val normalizer = allowHosts("movie.example")
+
+            client.get("https://movie.example/bootstrap", normalizer)
+            client.get(
+                "https://movie.example/player",
+                normalizer,
+                cookies = mapOf("session" to "caller")
+            )
+
+            assertEquals(
+                mapOf(
+                    "session" to "caller",
+                    "csrf" to "stored-token"
+                ),
+                fetcher.requests.last().cookies
+            )
+        }
+
+    @Test
+    fun `cookie store remains bounded under concurrent response updates`() = runBlocking {
+        val finalRequest = AtomicReference<ProviderHttpRequest?>()
+        val fetcher = object : ProviderHttpFetcher {
+            override suspend fun fetch(
+                request: ProviderHttpRequest,
+                resolvedAddresses: List<InetAddress>
+            ): ProviderHttpRawResponse {
+                assertTrue(resolvedAddresses.isNotEmpty())
+                val seed = URI(request.url).path
+                    .substringAfter("/seed/", "")
+                    .takeIf(String::isNotBlank)
+                return if (seed != null) {
+                    FakeRawResponse(
+                        code = 200,
+                        url = request.url,
+                        headers = mapOf(
+                            "Set-Cookie" to listOf(
+                                "session_$seed=value_$seed; Path=/; Secure"
+                            )
+                        )
+                    )
+                } else {
+                    finalRequest.set(request)
+                    FakeRawResponse(200, request.url)
+                }
+            }
+        }
+        val client = ProviderHttpSafetyClient(
+            fetcher,
+            ProviderDnsResolver { listOf(publicAddress()) }
+        )
+        val normalizer = allowHosts("movie.example")
+
+        coroutineScope {
+            (0 until 160).map { index ->
+                async(Dispatchers.Default) {
+                    client.get("https://movie.example/seed/$index", normalizer)
+                }
+            }.awaitAll()
+        }
+        client.get("https://movie.example/final", normalizer)
+
+        assertEquals(
+            128,
+            finalRequest.get()?.cookies?.size,
+            "session cookie storage must stay within its configured bound"
+        )
     }
 
     @Test

@@ -41,6 +41,82 @@ class GithubActionsRuntimeTest {
         }
     }
 
+    @Test
+    fun `scheduled provider health covers every registered provider`() {
+        val repositoryRoot = findRepositoryRoot()
+        val workflowPath = repositoryRoot.resolve(".github/workflows/provider-health.yml")
+        assertTrue(Files.isRegularFile(workflowPath), "provider-health.yml is missing")
+        val workflow = String(Files.readAllBytes(workflowPath), Charsets.UTF_8)
+
+        assertTrue("workflow_dispatch:" in workflow)
+        assertTrue("schedule:" in workflow)
+        assertTrue("RUN_LIVE_PROVIDER_TESTS: 1" in workflow)
+        assertTrue("fail-fast: false" in workflow)
+        assertTrue("if: always()" in workflow)
+        assertTrue(
+            ("--tests \"" + "$" + "{{ matrix.test_class }}\"") in workflow,
+            "provider health must execute each matrix test class"
+        )
+        val timeoutMinutes = Regex("""timeout-minutes:\s*(\d+)""")
+            .find(workflow)
+            ?.groupValues
+            ?.get(1)
+            ?.toIntOrNull()
+        assertTrue(
+            timeoutMinutes != null && timeoutMinutes >= 120,
+            "provider health timeout must allow the sequential live suites to finish"
+        )
+
+        val scheduledClasses = Regex(
+            """test_class:\s*com\.example\.([A-Za-z0-9_]+)"""
+        ).findAll(workflow)
+            .map { it.groupValues[1] }
+            .toSet()
+        val requiredClasses = setOf(
+            "ProviderExpansionLiveTest",
+            "MovieProviderCatalogPlaybackLiveTest",
+            "IdlixProviderLiveTest",
+            "AnimeProviderLiveTest"
+        )
+        assertTrue(
+            scheduledClasses.containsAll(requiredClasses),
+            "provider health is missing live suites: ${requiredClasses - scheduledClasses}"
+        )
+
+        val testSources = Files.newDirectoryStream(
+            repositoryRoot.resolve("IndoProvider/src/test/kotlin/com/example"),
+            "*.kt"
+        ).use { paths ->
+            paths.asSequence()
+                .filter { Files.isRegularFile(it) }
+                .map { path -> String(Files.readAllBytes(path), Charsets.UTF_8) }
+                .filter { source ->
+                    scheduledClasses.any { className -> "class $className" in source }
+                }
+                .joinToString("\n")
+        }
+        val pluginSource = String(
+            Files.readAllBytes(
+                repositoryRoot.resolve(
+                    "IndoProvider/src/main/kotlin/com/example/IndoPlugin.kt"
+                )
+            ),
+            Charsets.UTF_8
+        )
+        val registeredProviders = Regex(
+            """registerMainAPI\(([A-Za-z0-9_]+Provider)\(\)\)"""
+        ).findAll(pluginSource)
+            .map { it.groupValues[1] }
+            .toSet()
+        val uncovered = registeredProviders.filterNot { provider ->
+            Regex("""\b${Regex.escape(provider)}\s*\(""").containsMatchIn(testSources)
+        }
+        assertTrue(
+            uncovered.isEmpty(),
+            "registered providers missing from scheduled live suites: $uncovered"
+        )
+    }
+
     private fun findRepositoryRoot(): Path = generateSequence(
         Paths.get("").toAbsolutePath()
     ) { path -> path.parent }

@@ -15,7 +15,9 @@ import java.net.UnknownHostException
 import java.nio.charset.Charset
 import java.util.Locale
 import okhttp3.ConnectionPool
+import okhttp3.Cookie
 import okhttp3.Dns
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.RequestBody
 
 internal const val PROVIDER_HTTP_DEFAULT_BODY_LIMIT_BYTES = 2_000_000
@@ -118,6 +120,8 @@ internal class ProviderHttpSafetyClient(
     private val maxRedirectHops: Int = 5,
     private val defaultMaxBodyBytes: Int = PROVIDER_HTTP_DEFAULT_BODY_LIMIT_BYTES
 ) {
+    private val sessionCookies = ProviderSessionCookieStore()
+
     init {
         require(maxRedirectHops in 0..MAX_REDIRECT_HOPS)
         require(defaultMaxBodyBytes in 0..MAX_BODY_LIMIT_BYTES)
@@ -241,9 +245,18 @@ internal class ProviderHttpSafetyClient(
         while (true) {
             val destination = parseNormalizedUrl(request.url)
             val addresses = resolvePublicAddresses(destination.host)
-            val response = fetcher.fetch(request, addresses)
+            val requestWithSession = request.copy(
+                cookies = sessionCookies.cookiesFor(request.url).toMutableMap().apply {
+                    putAll(request.cookies)
+                }
+            )
+            val response = fetcher.fetch(requestWithSession, addresses)
 
             response.use { currentResponse ->
+                sessionCookies.saveFromResponse(
+                    requestUrl = requestWithSession.url,
+                    headers = currentResponse.headers
+                )
                 if (followRedirects && currentResponse.code in REDIRECT_CODES) {
                     if (redirectsFollowed >= maxRedirectHops) {
                         throw ProviderHttpSafetyException(
@@ -590,6 +603,92 @@ private data class ProviderOrigin(
     val scheme: String,
     val host: String,
     val port: Int
+)
+
+/**
+ * Small per-client cookie jar for provider handshakes. OkHttp performs the
+ * domain, host-only, path, Secure, and expiry checks; this class only bounds
+ * storage and adapts matching cookies to NiceHTTP's map-shaped API.
+ */
+private class ProviderSessionCookieStore {
+    private val lock = Any()
+    private val cookies = linkedMapOf<ProviderCookieKey, Cookie>()
+
+    fun saveFromResponse(
+        requestUrl: String,
+        headers: Map<String, List<String>>
+    ) {
+        val url = requestUrl.toHttpUrlOrNull() ?: return
+        val parsed = headers.entries
+            .asSequence()
+            .filter { (name, _) -> name.equals("Set-Cookie", ignoreCase = true) }
+            .flatMap { (_, values) -> values.asSequence() }
+            .take(MAX_SET_COOKIE_VALUES_PER_RESPONSE)
+            .filter { it.length <= MAX_SET_COOKIE_HEADER_LENGTH }
+            .mapNotNull { value -> runCatching { Cookie.parse(url, value) }.getOrNull() }
+            .toList()
+        if (parsed.isEmpty()) return
+
+        val now = System.currentTimeMillis()
+        synchronized(lock) {
+            removeExpired(now)
+            parsed.forEach { cookie ->
+                val key = ProviderCookieKey(
+                    name = cookie.name,
+                    domain = cookie.domain,
+                    path = cookie.path
+                )
+                cookies.remove(key)
+                if (cookie.expiresAt > now) {
+                    cookies[key] = cookie
+                }
+            }
+            while (cookies.size > MAX_STORED_COOKIES) {
+                val oldest = cookies.entries.iterator()
+                if (!oldest.hasNext()) break
+                oldest.next()
+                oldest.remove()
+            }
+        }
+    }
+
+    fun cookiesFor(requestUrl: String): Map<String, String> {
+        val url = requestUrl.toHttpUrlOrNull() ?: return emptyMap()
+        val now = System.currentTimeMillis()
+        return synchronized(lock) {
+            removeExpired(now)
+            val mostSpecificByName = linkedMapOf<String, Cookie>()
+            cookies.values.forEach { cookie ->
+                if (!cookie.matches(url)) return@forEach
+                val existing = mostSpecificByName[cookie.name]
+                if (existing == null || cookie.path.length > existing.path.length) {
+                    mostSpecificByName[cookie.name] = cookie
+                }
+            }
+            mostSpecificByName.mapValuesTo(linkedMapOf()) { (_, cookie) -> cookie.value }
+        }
+    }
+
+    private fun removeExpired(now: Long) {
+        val iterator = cookies.entries.iterator()
+        while (iterator.hasNext()) {
+            if (iterator.next().value.expiresAt <= now) {
+                iterator.remove()
+            }
+        }
+    }
+
+    private companion object {
+        const val MAX_STORED_COOKIES = 128
+        const val MAX_SET_COOKIE_VALUES_PER_RESPONSE = 32
+        const val MAX_SET_COOKIE_HEADER_LENGTH = 4_096
+    }
+}
+
+private data class ProviderCookieKey(
+    val name: String,
+    val domain: String,
+    val path: String
 )
 
 private fun ProviderHttpRawResponse.header(name: String): String? =

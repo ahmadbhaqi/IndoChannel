@@ -45,10 +45,11 @@ class KuramanimeProvider : MainAPI() {
             ProviderHtmlParser.isNonContentPage(fetch.body)
         ) return newHomePageResponse(request.name, emptyList())
         val document = Jsoup.parse(fetch.body, fetch.url)
+        val excludeFinished = KuramanimeParser.isOngoingCatalog(request.data)
         return newHomePageResponse(
             request.name,
             document.select("div#animeList div.product__item, div.col-lg-4.col-md-6.col-sm-6")
-                .mapNotNull { it.toSearchResult() }
+                .mapNotNull { it.toSearchResult(excludeFinished) }
                 .distinctBy { it.url }
         )
     }
@@ -65,8 +66,8 @@ class KuramanimeProvider : MainAPI() {
             .mapNotNull { it.toSearchResult() }
     }
 
-    private fun Element.toSearchResult(): AnimeSearchResponse? {
-        val anchor = KuramanimeParser.catalogAnchor(this) ?: return null
+    private fun Element.toSearchResult(excludeFinished: Boolean = false): AnimeSearchResponse? {
+        val anchor = KuramanimeParser.catalogAnchor(this, excludeFinished) ?: return null
         val href = animeUrl(anchor.attr("href")) ?: return null
         val title = anchor.text().trim().takeIf { it.isNotBlank() } ?: return null
         if (SensitiveContentPolicy.isBlocked(title, href)) return null
@@ -507,7 +508,25 @@ internal object KuramanimeParser {
         "v17.kuramanime.ing"
     )
 
-    fun catalogAnchor(element: Element): Element? {
+    fun isOngoingCatalog(requestData: String): Boolean {
+        val path = runCatching { URI(requestData).path.orEmpty() }
+            .getOrDefault("")
+            .trimEnd('/')
+        return path.equals("/anime/ongoing", ignoreCase = true) ||
+            path.equals("/quick/ongoing", ignoreCase = true)
+    }
+
+    fun catalogAnchor(
+        element: Element,
+        excludeFinished: Boolean = false
+    ): Element? {
+        if (element.selectFirst(".fa-droplet") != null) return null
+        if (
+            excludeFinished &&
+            element.select(".status span").any {
+                it.text().trim().equals("SELESAI", ignoreCase = true)
+            }
+        ) return null
         return element.selectFirst("h5 a[href]")?.takeIf { it.text().isNotBlank() }
             ?: element.select("a[href*='/anime/'], a[href*='/episode/']")
                 .firstOrNull { it.text().trim().isNotBlank() }
