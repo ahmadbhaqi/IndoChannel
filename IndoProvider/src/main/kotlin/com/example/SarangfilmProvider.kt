@@ -73,6 +73,7 @@ class SarangfilmProvider : MainAPI() {
         val anchor = ProviderHtmlParser.firstTitledLink(this) ?: return null
         val href = providerUrl(anchor.attr("href")) ?: return null
         val title = MovieMetadataParser.title(anchor.text()) ?: return null
+        if (SarangfilmContentPolicy.isBlockedCatalogCard(this, title, href)) return null
         val poster = fixUrlNull(ProviderHtmlParser.firstImageSource(this))
         val quality = selectFirst("div.gmr-quality-item, div.gmr-qual")?.text()?.trim()
         val episodeBadge = selectFirst("div.gmr-numbeps")?.text()?.trim()
@@ -92,6 +93,7 @@ class SarangfilmProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val requestUrl = providerUrl(url) ?: return null
+        if (SensitiveContentPolicy.isBlocked(null, requestUrl)) return null
         val fetch = getProviderPage(requestUrl) ?: return null
         val canonicalUrl = fetch.url
         if (
@@ -101,10 +103,11 @@ class SarangfilmProvider : MainAPI() {
         val document = Jsoup.parse(fetch.body, canonicalUrl)
         val title = MovieMetadataParser.title(document.selectFirst("h1.entry-title")?.text())
             ?: return null
+        if (SarangfilmContentPolicy.isBlockedDetail(document, title, canonicalUrl)) return null
         val poster = fixUrlNull(
             ProviderHtmlParser.firstImageSource(document, "div.gmr-movie-data figure img, figure img")
         )
-        val tags = document.select("div.gmr-moviedata a[href*=/genre/]").map { it.text().trim() }
+        val tags = SarangfilmContentPolicy.detailCategoryLabels(document)
         val year = document.select("div.gmr-moviedata strong:contains(Year:) + a, a[href*=/year/]")
             .firstNotNullOfOrNull { Regex("""(?:19|20)\d{2}""").find(it.text())?.value?.toIntOrNull() }
         val description = MovieMetadataParser.synopsis(document)
@@ -158,6 +161,7 @@ class SarangfilmProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val requestUrl = providerUrl(data) ?: return false
+        if (SensitiveContentPolicy.isBlocked(null, requestUrl)) return false
         val fetch = getProviderPage(requestUrl) ?: return false
         val pageUrl = fetch.url
         if (
@@ -165,6 +169,8 @@ class SarangfilmProvider : MainAPI() {
             ProviderHtmlParser.isNonContentPage(fetch.body)
         ) return false
         val document = Jsoup.parse(fetch.body, pageUrl)
+        val title = MovieMetadataParser.title(document.selectFirst("h1.entry-title")?.text())
+        if (SarangfilmContentPolicy.isBlockedDetail(document, title, pageUrl)) return false
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
 
         val directCandidates = buildList {
@@ -227,4 +233,40 @@ class SarangfilmProvider : MainAPI() {
 
     private fun networkProviderUrl(raw: String?): String? =
         ProviderHtmlParser.preserveProviderPageUrl(raw, mainUrl, ownedHosts)
+}
+
+internal object SarangfilmContentPolicy {
+    private const val CATALOG_TAXONOMY_SELECTOR =
+        "a[rel~=category], a[href*=/category/], a[href*=/genre/]"
+    private const val DETAIL_TAXONOMY_SELECTOR =
+        "div.gmr-moviedata a[rel~=category], " +
+            "div.gmr-moviedata a[href*=/category/], " +
+            "div.gmr-moviedata a[href*=/genre/]"
+
+    fun isBlockedCatalogCard(card: Element, title: String?, url: String?): Boolean =
+        SensitiveContentPolicy.isBlocked(
+            title = title,
+            url = url,
+            categories = taxonomySignals(card, CATALOG_TAXONOMY_SELECTOR)
+        )
+
+    fun isBlockedDetail(document: Element, title: String?, url: String?): Boolean =
+        SensitiveContentPolicy.isBlocked(
+            title = title,
+            url = url,
+            categories = taxonomySignals(document, DETAIL_TAXONOMY_SELECTOR)
+        )
+
+    fun detailCategoryLabels(document: Element): List<String> =
+        document.select(DETAIL_TAXONOMY_SELECTOR)
+            .map { it.text().trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+
+    private fun taxonomySignals(root: Element, selector: String): List<String> =
+        root.select(selector)
+            .flatMap { link ->
+                listOf(link.text().trim(), link.attr("href").trim())
+            }
+            .filter { it.isNotEmpty() }
 }

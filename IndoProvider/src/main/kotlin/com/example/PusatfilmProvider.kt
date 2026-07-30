@@ -11,6 +11,30 @@ import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
 
+internal suspend fun resolvePusatfilmStrategies(
+    currentPlayers: List<String>,
+    currentResolver: suspend (String) -> Boolean,
+    genericResolver: suspend () -> Boolean
+): Boolean {
+    val strategies = mutableListOf<suspend () -> Boolean>()
+    if (currentPlayers.isNotEmpty()) {
+        strategies += {
+            resolveByPriorityTiers(
+                tiers = listOf(currentPlayers),
+                maxConcurrency = 3,
+                attempt = currentResolver
+            )
+        }
+    }
+    strategies += genericResolver
+    return resolveByPriorityTiers(
+        tiers = listOf(strategies),
+        maxConcurrency = 2
+    ) { strategy ->
+        strategy()
+    }
+}
+
 class PusatfilmProvider : MainAPI() {
     override var mainUrl = "https://v4.pusatfilm21info.com"
     private val legacyHosts = setOf("v3.pusatfilm21info.com")
@@ -154,10 +178,23 @@ class PusatfilmProvider : MainAPI() {
             },
             mediaResolver = resolver::resolve
         )
-        iframes.forEach { iframe ->
-            if (currentPlayback.resolve(iframe, canonicalUrl)) return true
-            resolver.resolve(iframe, canonicalUrl)
+        val currentPlayers = iframes.filter { iframe ->
+            PusatfilmPlayerPagePolicy.normalize(iframe)
+                ?.let(PusatfilmPlayerPagePolicy::isKotakPage) == true
         }
+        resolvePusatfilmStrategies(
+            currentPlayers = currentPlayers,
+            currentResolver = { iframe ->
+                currentPlayback.resolve(iframe, canonicalUrl)
+            },
+            genericResolver = {
+                resolver.resolveFirstVerified(
+                    iframes.map { iframe ->
+                        PlayerResolutionCandidate(iframe, canonicalUrl)
+                    }
+                )
+            }
+        )
         return resolver.loaded
     }
 
@@ -257,15 +294,20 @@ internal class PusatfilmCurrentPlayback(
             ?.takeIf(PusatfilmPlayerPagePolicy::isKotakPage)
             ?: return false
         val playerHtml = fetch(normalizedPlayer, detailUrl) ?: return false
-        for (mirror in KotakDataFrameParser.urls(playerHtml)) {
-            val normalizedMirror = PusatfilmPlayerPagePolicy.normalize(mirror)
+        val mirrors = KotakDataFrameParser.urls(playerHtml).mapNotNull { mirror ->
+            PusatfilmPlayerPagePolicy.normalize(mirror)
                 ?.takeIf(PusatfilmPlayerPagePolicy::isTurboPage)
-                ?: continue
-            val mirrorHtml = fetch(normalizedMirror, normalizedPlayer) ?: continue
-            val mediaUrl = PusatfilmCurrentPlayerParser.directMediaUrl(mirrorHtml) ?: continue
-            if (mediaResolver(mediaUrl, normalizedMirror)) return true
         }
-        return false
+        return resolveByPriorityTiers(
+            tiers = listOf(mirrors),
+            maxConcurrency = 3
+        ) { normalizedMirror ->
+            val mirrorHtml =
+                fetch(normalizedMirror, normalizedPlayer) ?: return@resolveByPriorityTiers false
+            val mediaUrl = PusatfilmCurrentPlayerParser.directMediaUrl(mirrorHtml)
+                ?: return@resolveByPriorityTiers false
+            mediaResolver(mediaUrl, normalizedMirror)
+        }
     }
 
     private suspend fun fetch(url: String, referer: String): String? = try {

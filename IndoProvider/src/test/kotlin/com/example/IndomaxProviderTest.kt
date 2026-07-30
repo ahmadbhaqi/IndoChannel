@@ -2,11 +2,81 @@ package com.example
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
 import org.jsoup.Jsoup
 
 class IndomaxProviderTest {
+    @Test
+    fun `healthy primary player skips alternate tab preflight`() = runBlocking {
+        val primary = PlayerResolutionCandidate(
+            "https://imaxstreams.net/e/primary",
+            "https://akses10.indomax21.xyz/movie/example/"
+        )
+        var fallbackLoads = 0
+        val resolvedBatches = mutableListOf<List<PlayerResolutionCandidate>>()
+
+        val resolved = resolveIndomaxPlayerPhases(
+            primary = primary,
+            loadFallbacks = {
+                fallbackLoads++
+                listOf(
+                    PlayerResolutionCandidate(
+                        "https://imaxstreams.net/e/fallback",
+                        "https://akses10.indomax21.xyz/movie/example/?player=2"
+                    )
+                )
+            },
+            resolveBatch = { candidates ->
+                resolvedBatches += candidates
+                true
+            }
+        )
+
+        assertTrue(resolved)
+        assertEquals(0, fallbackLoads)
+        assertEquals(listOf(listOf(primary)), resolvedBatches)
+    }
+
+    @Test
+    fun `failed primary loads alternate tabs once and resolves them as one batch`() = runBlocking {
+        val primary = PlayerResolutionCandidate(
+            "https://imaxstreams.net/e/primary",
+            "https://akses10.indomax21.xyz/movie/example/"
+        )
+        val fallbacks = listOf(
+            PlayerResolutionCandidate(
+                "https://imaxstreams.net/e/fallback-2",
+                "https://akses10.indomax21.xyz/movie/example/?player=2"
+            ),
+            PlayerResolutionCandidate(
+                "https://imaxstreams.net/e/fallback-3",
+                "https://akses10.indomax21.xyz/movie/example/?player=3"
+            )
+        )
+        var fallbackLoads = 0
+        val resolvedBatches = mutableListOf<List<PlayerResolutionCandidate>>()
+
+        val resolved = resolveIndomaxPlayerPhases(
+            primary = primary,
+            loadFallbacks = {
+                fallbackLoads++
+                fallbacks
+            },
+            resolveBatch = { candidates ->
+                resolvedBatches += candidates
+                candidates == fallbacks
+            }
+        )
+
+        assertTrue(resolved)
+        assertEquals(1, fallbackLoads)
+        assertEquals(listOf(listOf(primary), fallbacks), resolvedBatches)
+        assertFalse(resolvedBatches.first() == fallbacks)
+    }
+
     @Test
     fun `provider exposes the verified live domain and catalog route`() {
         val provider = IndomaxProvider()

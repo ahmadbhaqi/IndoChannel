@@ -33,6 +33,7 @@ open class KuronimeProvider : MainAPI() {
         val a = selectFirst("div.bsx > a, div.bsux > a") ?: return null
         val title = a.attr("title").ifBlank { a.selectFirst("h2")?.text() } ?: return null
         val href = ProviderHtmlParser.absoluteUrl(a.attr("href"), mainUrl) ?: return null
+        if (SensitiveContentPolicy.isBlocked(title, href)) return null
         val posterUrl = fixUrlNull(ProviderHtmlParser.firstImageSource(a, "img[itemprop=image], div.limit > img, img[src*=uploads], img"))
         val epNum = selectFirst("span.epx")?.text()?.filter { it.isDigit() }?.toIntOrNull()
         return newAnimeSearchResponse(title.trim(), href, TvType.Anime) { this.posterUrl = posterUrl; addSub(epNum) }
@@ -80,6 +81,7 @@ open class KuronimeProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
+        if (SensitiveContentPolicy.isBlocked(null, url)) return null
         val document = app.get(url).document
         val title = document.selectFirst("h1.entry-title")?.text()?.trim() ?: return null
         val poster = fixUrlNull(
@@ -89,6 +91,7 @@ open class KuronimeProvider : MainAPI() {
         val tags = document.select("div.genxed > a").map { it.text() }.ifEmpty {
             document.infoItem("Genre")?.select("a")?.map { it.text() }.orEmpty()
         }
+        if (SensitiveContentPolicy.isBlocked(title, url, categories = tags)) return null
         val publishedAt = document.selectFirst("meta[property=article:published_time]")?.attr("content")
             ?.takeIf { it.isNotBlank() }
             ?: document.selectFirst("div.infodetail meta[itemprop=datePublished]")?.attr("datetime")
@@ -127,10 +130,21 @@ open class KuronimeProvider : MainAPI() {
                         ?.getOrNull(1)
                         ?.toIntOrNull()
                 val href = ProviderHtmlParser.absoluteUrl(a.attr("href"), mainUrl) ?: return@mapNotNull null
-                newEpisode(href) {
-                    this.episode = epNum
-                    this.name = episodeName.ifBlank { epNum?.let { "Episode $it" } ?: "Episode" }
-                }
+                newEpisode(
+                    AnimePlaybackDataCodec.encode(
+                        url = href,
+                        title = episodeName.ifBlank { title },
+                        categories = tags,
+                        detailUrl = url
+                    ),
+                    initializer = {
+                        this.episode = epNum
+                        this.name = episodeName.ifBlank {
+                            epNum?.let { "Episode $it" } ?: "Episode"
+                        }
+                    },
+                    fix = false
+                )
             }
             .distinctBy { it.data }
             .sortedBy { it.episode ?: Int.MAX_VALUE }
@@ -143,8 +157,17 @@ open class KuronimeProvider : MainAPI() {
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val fetch = app.get(data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
+        val playback = AnimePlaybackDataCodec.decode(data)
+        if (AnimePlaybackDataCodec.isBlocked(data)) return false
+        val pageUrl = playback?.url ?: data
+        if (SensitiveContentPolicy.isBlocked(null, pageUrl)) return false
+        val fetch = app.get(pageUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
         val document = fetch.document
+        val pageTitle = document.selectFirst("h1.entry-title")?.text()
+        val pageTags = document.select("div.genxed > a").map { it.text() }.ifEmpty {
+            document.infoItem("Genre")?.select("a")?.map { it.text() }.orEmpty()
+        }
+        if (SensitiveContentPolicy.isBlocked(pageTitle, fetch.url, categories = pageTags)) return false
         val html = fetch.text
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
 
@@ -153,7 +176,7 @@ open class KuronimeProvider : MainAPI() {
                 val response = app.post(
                     "https://animeku.org/api/v9/sources",
                     json = mapOf("id" to sourceId),
-                    referer = data,
+                    referer = fetch.url,
                     headers = mapOf(
                         "Content-Type" to "application/json",
                         "Accept" to "application/json",
@@ -165,7 +188,7 @@ open class KuronimeProvider : MainAPI() {
                 KuronimeSourceScheduler.resolve(
                     candidates = apiUrls,
                     resolveKuroplayer = { raw -> emitKuroplayerLink(raw, resolver) },
-                    resolveGeneric = { raw -> resolver.resolve(raw, data) }
+                    resolveGeneric = { raw -> resolver.resolve(raw, fetch.url) }
                 )
             } catch (error: CancellationException) {
                 throw error
@@ -177,8 +200,8 @@ open class KuronimeProvider : MainAPI() {
         }
 
         document.select("div.video-nav a[href], #linksDDLContainer a[href]").forEach { link ->
-            val src = ProviderHtmlParser.absoluteUrl(link.attr("href"), data)
-            resolver.resolve(src, data)
+            val src = ProviderHtmlParser.absoluteUrl(link.attr("href"), fetch.url)
+            resolver.resolve(src, fetch.url)
         }
 
         document.select("select.mirror > option[value]").forEach { option ->

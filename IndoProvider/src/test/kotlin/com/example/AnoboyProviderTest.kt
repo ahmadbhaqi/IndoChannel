@@ -10,6 +10,68 @@ import org.jsoup.Jsoup
 
 class AnoboyProviderTest {
     @Test
+    fun `content taxonomy ignores adult navigation outside the scoped article`() {
+        val document = Jsoup.parse(
+            """
+                <nav><a href="/category/hentai/">Hentai</a></nav>
+                <main>
+                  <article>
+                    <h1 class="entry-title">Ordinary Anime</h1>
+                    <div class="entry-meta">
+                      <a rel="category tag" href="/category/anime/">Anime</a>
+                      <a rel="category tag" href="/category/drama/">Drama</a>
+                    </div>
+                  </article>
+                </main>
+            """.trimIndent(),
+            "https://anoboy.xyz/episode/ordinary/"
+        )
+
+        assertEquals(listOf("Anime", "Drama"), AnoboyContentPolicy.categories(document))
+        assertEquals(false, AnoboyContentPolicy.isBlocked(document, document.location()))
+    }
+
+    @Test
+    fun `content taxonomy ignores an adult sidebar inside the main layout`() {
+        val document = Jsoup.parse(
+            """
+                <main>
+                  <aside><a href="/category/hentai/">Hentai</a></aside>
+                  <article>
+                    <h1 class="entry-title">Ordinary Anime</h1>
+                    <div class="entry-meta">
+                      <a rel="category tag" href="/category/drama/">Drama</a>
+                    </div>
+                  </article>
+                </main>
+            """.trimIndent(),
+            "https://anoboy.xyz/episode/ordinary/"
+        )
+
+        assertEquals(listOf("Drama"), AnoboyContentPolicy.categories(document))
+        assertEquals(false, AnoboyContentPolicy.isBlocked(document, document.location()))
+    }
+
+    @Test
+    fun `content taxonomy blocks an adult category inside the scoped article`() {
+        val document = Jsoup.parse(
+            """
+                <main>
+                  <article>
+                    <h1 class="entry-title">Neutral Looking Title</h1>
+                    <div class="entry-meta">
+                      <a rel="category tag" href="/category/hentai/">Hentai</a>
+                    </div>
+                  </article>
+                </main>
+            """.trimIndent(),
+            "https://anoboy.xyz/episode/neutral-looking-title/"
+        )
+
+        assertTrue(AnoboyContentPolicy.isBlocked(document, document.location()))
+    }
+
+    @Test
     fun `uses current domain and rehomes only legacy Anoboy urls`() {
         val currentBase = AnoboyProvider().mainUrl
         val legacyHosts = setOf("ww1.anoboy.boo")

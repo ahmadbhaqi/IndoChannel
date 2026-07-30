@@ -260,7 +260,10 @@ internal object InlineDataParser {
                     }
                     node.forEach(::visit)
                 }
-                node.isObject -> node.fields().forEachRemaining { visit(it.value) }
+                node.isObject -> {
+                    val fields = node.fields()
+                    while (fields.hasNext()) visit(fields.next().value)
+                }
             }
         }
 
@@ -503,7 +506,10 @@ internal object InlineDataParser {
                     .takeIf { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
                     ?.let { urls.add(it) }
                 value.isArray -> value.forEach { visit(it) }
-                value.isObject -> value.fields().forEachRemaining { visit(it.value) }
+                value.isObject -> {
+                    val fields = value.fields()
+                    while (fields.hasNext()) visit(fields.next().value)
+                }
             }
         }
 

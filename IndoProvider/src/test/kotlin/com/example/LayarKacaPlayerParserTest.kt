@@ -1,9 +1,12 @@
 package com.example
 
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
 import org.jsoup.Jsoup
 
 class LayarKacaPlayerParserTest {
@@ -104,6 +107,17 @@ class LayarKacaPlayerParserTest {
             ),
             LayarKacaPlayerParser.orderedPlayerCandidates(document, detailUrl)
         )
+        assertEquals(
+            listOf(
+                listOf(
+                    LayarKacaPlaybackCandidate.ServerPage("$detailUrl?player=2"),
+                    LayarKacaPlaybackCandidate.ServerPage("$detailUrl?player=3")
+                ),
+                listOf(LayarKacaPlaybackCandidate.InlinePlayer(defaultEmbed)),
+                listOf(LayarKacaPlaybackCandidate.ServerPage("$detailUrl?player=1"))
+            ),
+            LayarKacaPlayerParser.playerCandidateTiers(document, detailUrl)
+        )
     }
 
     @Test
@@ -161,5 +175,47 @@ class LayarKacaPlayerParserTest {
             ),
             LayarKacaPlayerParser.pageMediaUrls(document, playerUrl)
         )
+    }
+
+    @Test
+    fun `vidmoly mixed quote source bypasses the incompatible generic jw parser`() = runBlocking {
+        val detailUrl = "https://tv.nontonfilm.red/movie/current/"
+        val playerUrl = "https://vidmoly.example/embed-current.html"
+        val mediaUrl =
+            "https://box.example/hls2/current/master.m3u8?t=signed-token&s=123&e=43200"
+        var genericExtractorCalls = 0
+        val links = mutableListOf<ExtractorLink>()
+        val resolver = LinkResolutionSession(
+            api = LayarKacaProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, referer ->
+                assertEquals(playerUrl, url)
+                assertEquals(detailUrl, referer)
+                """
+                <script>
+                  const sources = [{ "file": '$mediaUrl' }];
+                </script>
+                """.trimIndent()
+            },
+            extractorLoader = { _, _, _, _ ->
+                genericExtractorCalls++
+                false
+            },
+            inlineSourceParser = LayarKacaPlayerParser::mediaUrls,
+            preferInlineSourceParser = true,
+            mediaLinkProbe = { it.takeIf { link -> link.url == mediaUrl } },
+            directLinkFactory = { source, name, url, referer, quality, type, headers ->
+                newExtractorLink(source, name, url, type) {
+                    this.referer = referer
+                    this.quality = quality
+                    this.headers = headers
+                }
+            }
+        )
+
+        assertTrue(resolver.resolve(playerUrl, detailUrl))
+        assertEquals(listOf(mediaUrl), links.map { it.url })
+        assertEquals(0, genericExtractorCalls)
     }
 }

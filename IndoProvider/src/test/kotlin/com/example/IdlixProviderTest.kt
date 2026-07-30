@@ -9,6 +9,10 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 
 class IdlixProviderTest {
@@ -17,6 +21,91 @@ class IdlixProviderTest {
     @Test
     fun `provider display name uses normal capitalization`() {
         assertEquals("Idlix", IdlixProvider().name)
+    }
+
+    @Test
+    fun `concurrent IDLIX failures share one refreshed preflight session`() = runBlocking {
+        val coordinator = IdlixPreflightCoordinator()
+        coordinator.observe(
+            requestCookies = mapOf("session" to "stale"),
+            responseCookies = emptyMap()
+        )
+        val staleSnapshot = coordinator.snapshot()
+        val refreshes = java.util.concurrent.atomic.AtomicInteger()
+
+        val sessions = coroutineScope {
+            (1..4).map {
+                async {
+                    coordinator.refresh(staleSnapshot.preflightGeneration) {
+                        refreshes.incrementAndGet()
+                        delay(50)
+                        mapOf("session" to "fresh")
+                    }
+                }
+            }.awaitAll()
+        }
+
+        assertEquals(1, refreshes.get())
+        assertTrue(sessions.all { it == mapOf("session" to "fresh") })
+
+        val freshSnapshot = coordinator.snapshot()
+        assertEquals(
+            mapOf("session" to "newer"),
+            coordinator.refresh(freshSnapshot.preflightGeneration) {
+                refreshes.incrementAndGet()
+                mapOf("session" to "newer")
+            }
+        )
+        assertEquals(2, refreshes.get())
+    }
+
+    @Test
+    fun `late IDLIX response merges deltas without rolling back a rotated session`() = runBlocking {
+        val coordinator = IdlixPreflightCoordinator()
+        coordinator.observe(
+            requestCookies = mapOf("session" to "s1"),
+            responseCookies = emptyMap()
+        )
+        coordinator.observe(
+            requestCookies = mapOf("session" to "s1"),
+            responseCookies = mapOf("session" to "s2")
+        )
+
+        val merged = coordinator.observe(
+            requestCookies = mapOf("session" to "s1"),
+            responseCookies = mapOf("tracking" to "present")
+        )
+
+        assertEquals(
+            mapOf("session" to "s2", "tracking" to "present"),
+            merged
+        )
+    }
+
+    @Test
+    fun `unrelated IDLIX cookie update does not suppress a required preflight`() = runBlocking {
+        val coordinator = IdlixPreflightCoordinator()
+        coordinator.observe(
+            requestCookies = mapOf("session" to "stale"),
+            responseCookies = emptyMap()
+        )
+        val failedRequestSnapshot = coordinator.snapshot()
+        coordinator.observe(
+            requestCookies = failedRequestSnapshot.cookies,
+            responseCookies = mapOf("tracking" to "new")
+        )
+        var refreshes = 0
+
+        val refreshed = coordinator.refresh(failedRequestSnapshot.preflightGeneration) {
+            refreshes++
+            mapOf("session" to "fresh")
+        }
+
+        assertEquals(1, refreshes)
+        assertEquals(
+            mapOf("session" to "fresh", "tracking" to "new"),
+            refreshed
+        )
     }
 
     @Test
@@ -158,6 +247,139 @@ class IdlixProviderTest {
 
         assertEquals(listOf("only-result"), results)
         assertEquals(listOf(1), requestedPages)
+    }
+
+    @Test
+    fun `search pager batches known remaining pages within its concurrency limit`() = runBlocking {
+        var inFlight = 0
+        var maxInFlight = 0
+        val requestedPages = mutableListOf<Int>()
+
+        val results = IdlixSearchPager.collect(
+            pageSize = 2,
+            maxPages = 10,
+            budgetMs = 1_000L,
+            concurrency = 3,
+            key = { it }
+        ) { page, cookies, _ ->
+            requestedPages += page
+            inFlight++
+            maxInFlight = maxOf(maxInFlight, inFlight)
+            try {
+                delay(20)
+                when (page) {
+                    1 -> IdlixSearchPager.Page(
+                        items = listOf("one", "two"),
+                        total = 8,
+                        cookies = mapOf("session" to "fresh")
+                    )
+                    else -> {
+                        assertEquals(mapOf("session" to "fresh"), cookies)
+                        IdlixSearchPager.Page(
+                            items = listOf("page-$page-a", "page-$page-b"),
+                            total = 8,
+                            cookies = cookies
+                        )
+                    }
+                }
+            } finally {
+                inFlight--
+            }
+        }
+
+        assertEquals(
+            listOf(
+                "one", "two", "page-2-a", "page-2-b", "page-3-a", "page-3-b",
+                "page-4-a", "page-4-b"
+            ),
+            results
+        )
+        assertEquals(listOf(1, 2, 3, 4), requestedPages.sorted())
+        assertEquals(3, maxInFlight)
+    }
+
+    @Test
+    fun `search pager does not roll a refreshed cookie back to a stale batch snapshot`() = runBlocking {
+        var pageTwoCalls = 0
+        var pageFourCookies = emptyMap<String, String>()
+
+        val results = IdlixSearchPager.collect(
+            pageSize = 1,
+            maxPages = 4,
+            budgetMs = 1_000L,
+            concurrency = 2,
+            key = { it }
+        ) { page, cookies, _ ->
+            when (page) {
+                1 -> IdlixSearchPager.Page(listOf("one"), 4, mapOf("session" to "s1"))
+                2 -> {
+                    pageTwoCalls++
+                    if (pageTwoCalls == 1) {
+                        null
+                    } else {
+                        IdlixSearchPager.Page(listOf("two"), 4, mapOf("session" to "s2"))
+                    }
+                }
+                3 -> IdlixSearchPager.Page(listOf("three"), 4, cookies)
+                else -> {
+                    pageFourCookies = cookies
+                    IdlixSearchPager.Page(listOf("four"), 4, cookies)
+                }
+            }
+        }
+
+        assertEquals(listOf("one", "two", "three", "four"), results)
+        assertEquals(mapOf("session" to "s2"), pageFourCookies)
+    }
+
+    @Test
+    fun `search pager keeps completed batch pages when a sibling consumes the deadline`() = runBlocking {
+        var nowMs = 0L
+
+        val results = IdlixSearchPager.collect(
+            pageSize = 1,
+            maxPages = 3,
+            budgetMs = 100L,
+            concurrency = 2,
+            nowMs = { nowMs },
+            key = { it }
+        ) { page, cookies, _ ->
+            when (page) {
+                1 -> IdlixSearchPager.Page(listOf("one"), 3, mapOf("session" to "s1"))
+                2 -> IdlixSearchPager.Page(listOf("two"), 3, cookies)
+                else -> {
+                    nowMs = 100L
+                    null
+                }
+            }
+        }
+
+        assertEquals(listOf("one", "two"), results)
+    }
+
+    @Test
+    fun `search pager stops scheduling later batches after a repeated page`() = runBlocking {
+        val requestedPages = java.util.Collections.synchronizedList(mutableListOf<Int>())
+
+        val results = IdlixSearchPager.collect(
+            pageSize = 1,
+            maxPages = 6,
+            budgetMs = 1_000L,
+            concurrency = 2,
+            key = { it }
+        ) { page, cookies, _ ->
+            requestedPages += page
+            when (page) {
+                1 -> IdlixSearchPager.Page(listOf("same"), 6, mapOf("session" to "s1"))
+                2 -> IdlixSearchPager.Page(listOf("same"), 6, cookies)
+                else -> IdlixSearchPager.Page(listOf("page-$page"), 6, cookies)
+            }
+        }
+
+        assertEquals(listOf("same"), results)
+        assertTrue(2 in requestedPages)
+        assertTrue(3 in requestedPages)
+        assertFalse(requestedPages.any { it >= 4 })
     }
 
     @Test

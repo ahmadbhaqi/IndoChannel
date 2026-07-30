@@ -30,6 +30,13 @@ class AnoboyProvider : MainAPI() {
     private fun Element.toSearchResult(): AnimeSearchResponse? {
         val title = attr("title").ifBlank { selectFirst("h3.ibox1")?.text() }?.trim() ?: return null
         val href = normalizePageUrl(attr("href")) ?: return null
+        if (
+            SensitiveContentPolicy.isBlocked(
+                title,
+                href,
+                categories = AnoboyContentPolicy.categories(this)
+            )
+        ) return null
         val posterUrl = fixUrlNull(ProviderHtmlParser.imageSource(selectFirst("img")))
         val epNum = Regex("Episode\\s*(\\d+)", RegexOption.IGNORE_CASE).find(title)?.groupValues?.getOrNull(1)?.toIntOrNull()
         return newAnimeSearchResponse(title, href, TvType.Anime) {
@@ -48,22 +55,34 @@ class AnoboyProvider : MainAPI() {
         val document = app.get(pageUrl).document
         val rawTitle = document.selectFirst("h1.entry-title, h2.entry-title")?.text()?.trim() ?: return null
         val title = rawTitle.replace("Subtitle Indonesia", "", ignoreCase = true).trim()
+        val categories = AnoboyContentPolicy.categories(document)
+        if (SensitiveContentPolicy.isBlocked(title, pageUrl, categories = categories)) return null
         val description = document.select("div.entry-content p, div.sisi.entry-content").text().trim().takeIf { it.isNotBlank() }
         val poster = document.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
         val episode = Regex("Episode\\s*(\\d+)", RegexOption.IGNORE_CASE).find(rawTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
         val type = if (rawTitle.contains("Movie", ignoreCase = true)) TvType.AnimeMovie else TvType.Anime
 
         val episodes = listOf(
-            newEpisode(pageUrl) {
-                this.name = rawTitle
-                this.episode = episode
-                this.posterUrl = poster
-            }
+            newEpisode(
+                AnimePlaybackDataCodec.encode(
+                    url = pageUrl,
+                    title = rawTitle,
+                    categories = categories,
+                    detailUrl = pageUrl
+                ),
+                initializer = {
+                    this.name = rawTitle
+                    this.episode = episode
+                    this.posterUrl = poster
+                },
+                fix = false
+            )
         )
 
         return newAnimeLoadResponse(title, pageUrl, type) {
             posterUrl = poster
             plot = description
+            tags = categories
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
@@ -74,7 +93,9 @@ class AnoboyProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val pageUrl = normalizePageUrl(data) ?: return false
+        val playback = AnimePlaybackDataCodec.decode(data)
+        if (AnimePlaybackDataCodec.isBlocked(data)) return false
+        val pageUrl = normalizePageUrl(playback?.url ?: data) ?: return false
         val fetch = try {
             app.get(pageUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
         } catch (error: CancellationException) {
@@ -82,6 +103,7 @@ class AnoboyProvider : MainAPI() {
         } catch (_: Exception) {
             return false
         }
+        if (AnoboyContentPolicy.isBlocked(fetch.document, fetch.url)) return false
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
         val bloggerResolver = BloggerVideoResolver(name, resolver::emitResolved)
         val router = AnoboyCandidateRouter(
@@ -116,6 +138,36 @@ class AnoboyProvider : MainAPI() {
     private companion object {
         val ANOBOY_LEGACY_HOSTS = setOf("ww1.anoboy.boo")
     }
+}
+
+internal object AnoboyContentPolicy {
+    private const val TAXONOMY_SELECTOR =
+        ".entry-meta a[rel='category tag'], " +
+            ".entry-meta a[href*='/genre/'], .entry-meta a[href*='/category/'], " +
+            ".tags-links a, .post-tags a"
+
+    fun categories(document: Document): List<String> {
+        val scope = document.selectFirst(
+            "article:has(h1.entry-title), article:has(h2.entry-title)"
+        ) ?: document.selectFirst(
+            "main:has(h1.entry-title), main:has(h2.entry-title), " +
+                "#content:has(h1.entry-title), #content:has(h2.entry-title)"
+        ) ?: return emptyList()
+        return categories(scope)
+    }
+
+    fun categories(scope: Element): List<String> =
+        scope.select(TAXONOMY_SELECTOR)
+            .map { link -> link.text().trim() }
+            .filter(String::isNotBlank)
+            .distinct()
+
+    fun isBlocked(document: Document, pageUrl: String): Boolean =
+        SensitiveContentPolicy.isBlocked(
+            title = document.selectFirst("h1.entry-title, h2.entry-title")?.text(),
+            url = pageUrl,
+            categories = categories(document)
+        )
 }
 
 internal data class AnoboyPlayerCandidate(

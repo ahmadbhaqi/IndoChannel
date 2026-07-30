@@ -180,10 +180,11 @@ class NomatProvider : MainAPI() {
                 ProviderHtmlParser.downloadCandidateUrls(document, responseUrl)
             ).mapNotNull { ProviderHtmlParser.absoluteUrl(it, responseUrl) }.distinct().take(48)
 
-        for (candidate in candidates) {
-            if (resolver.loaded || !resolver.canContinue) break
-            resolver.resolve(candidate, responseUrl)
-        }
+        resolver.resolveFirstVerified(
+            candidates.map { candidate ->
+                PlayerResolutionCandidate(candidate, responseUrl)
+            }
+        )
         if (resolver.loaded || fallbackRequest == null) return resolver.loaded
         return loadFallback(
             request = fallbackRequest,

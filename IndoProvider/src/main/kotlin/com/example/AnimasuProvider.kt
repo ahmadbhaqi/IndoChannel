@@ -106,6 +106,7 @@ class AnimasuProvider : MainAPI() {
         val href = animeUrl(anchor.attr("href")) ?: return null
         val title = selectFirst("div.tt")?.text()?.trim()
             ?.takeIf(String::isNotBlank) ?: return null
+        if (SensitiveContentPolicy.isBlocked(title, href)) return null
         val poster = fixUrlNull(ProviderHtmlParser.firstImageSource(this, "div.limit img, img"))
         val episode = selectFirst("span.epx")?.text()?.filter(Char::isDigit)?.toIntOrNull()
         return newAnimeSearchResponse(title, href, TvType.Anime) {
@@ -116,6 +117,7 @@ class AnimasuProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val requestUrl = animeUrl(url) ?: return null
+        if (SensitiveContentPolicy.isBlocked(null, requestUrl)) return null
         val fetch = getProviderPage(requestUrl) ?: return null
         if (
             fetch.code !in 200..299 ||
@@ -145,17 +147,28 @@ class AnimasuProvider : MainAPI() {
             ShowStatus.Completed
         }
         val trailer = document.selectFirst("div.trailer iframe")?.attr("src")
+        val tags = table?.select("span:contains(Genre:) a")?.map { it.text().trim() }.orEmpty()
+        if (SensitiveContentPolicy.isBlocked(title, requestUrl, categories = tags)) return null
         val episodes = document.select("ul#daftarepisode > li, .eplister li").mapNotNull { row ->
             val anchor = row.selectFirst("a[href]") ?: return@mapNotNull null
             val href = episodeUrl(anchor.attr("href")) ?: return@mapNotNull null
             val label = anchor.text().trim().takeIf(String::isNotBlank) ?: return@mapNotNull null
             val number = Regex("""(?i)episode\s*(\d+)""")
                 .find(label)?.groupValues?.getOrNull(1)?.toIntOrNull()
-            newEpisode(href) {
-                episode = number
-                name = label
-                posterUrl = poster
-            }
+            newEpisode(
+                AnimePlaybackDataCodec.encode(
+                    url = href,
+                    title = label,
+                    categories = tags,
+                    detailUrl = requestUrl
+                ),
+                initializer = {
+                    episode = number
+                    name = label
+                    posterUrl = poster
+                },
+                fix = false
+            )
         }.reversed().distinctBy { it.data }
 
         return newAnimeLoadResponse(title, requestUrl, type) {
@@ -164,7 +177,7 @@ class AnimasuProvider : MainAPI() {
             addEpisodes(DubStatus.Subbed, episodes)
             showStatus = status
             plot = document.select("div.sinopsis p, .entry-content p").text().trim()
-            tags = table?.select("span:contains(Genre:) a")?.map { it.text().trim() }
+            this.tags = tags
             addTrailer(trailer)
         }
     }
@@ -175,11 +188,27 @@ class AnimasuProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val pageUrl = episodeUrl(data) ?: return false
+        val playback = AnimePlaybackDataCodec.decode(data)
+        if (AnimePlaybackDataCodec.isBlocked(data)) return false
+        val pageUrl = episodeUrl(playback?.url ?: data) ?: return false
+        if (SensitiveContentPolicy.isBlocked(null, pageUrl)) return false
         val response = getProviderPage(pageUrl) ?: return false
         if (
             response.code !in 200..299 ||
             ProviderHtmlParser.isNonContentPage(response.body)
+        ) return false
+        val episodeDocument = Jsoup.parse(response.body, response.url)
+        val episodeTitle = episodeDocument.selectFirst("h1.entry-title, div.infox h1")
+            ?.text()
+        val episodeTags = episodeDocument
+            .select("div.infox div.spe span:contains(Genre:) a, .spe span:contains(Genre:) a")
+            .map { it.text().trim() }
+        if (
+            SensitiveContentPolicy.isBlocked(
+                episodeTitle,
+                response.url,
+                categories = episodeTags
+            )
         ) return false
         val resolver = LinkResolutionSession(
             this,

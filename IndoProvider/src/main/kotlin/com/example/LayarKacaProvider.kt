@@ -141,13 +141,17 @@ class LayarKacaProvider : MainAPI() {
             this,
             subtitleCallback,
             callback,
-            inlineSourceParser = LayarKacaPlayerParser::mediaUrls
+            inlineSourceParser = LayarKacaPlayerParser::mediaUrls,
+            preferInlineSourceParser = true
         )
-        for (candidate in LayarKacaPlayerParser.orderedPlayerCandidates(document, canonicalUrl)) {
-            if (resolver.loaded || !resolver.canContinue) break
+        resolveByPriorityTiers(
+            tiers = LayarKacaPlayerParser.playerCandidateTiers(document, canonicalUrl),
+            maxConcurrency = 3,
+            canContinue = { !resolver.loaded && resolver.canContinue }
+        ) { candidate ->
             when (candidate) {
                 is LayarKacaPlaybackCandidate.InlinePlayer ->
-                    resolvePlayer(candidate.url, canonicalUrl, resolver)
+                    resolver.resolveInline(candidate.url, canonicalUrl)
 
                 is LayarKacaPlaybackCandidate.ServerPage -> try {
                     val playerDocument = app.get(
@@ -157,18 +161,32 @@ class LayarKacaProvider : MainAPI() {
                     ).let { response ->
                         val responseUrl = providerUrl(response.url) ?: return@let null
                         response.document to responseUrl
-                    } ?: continue
-                    for (mediaUrl in LayarKacaPlayerParser.pageMediaUrls(
-                        playerDocument.first,
-                        playerDocument.second
-                    )) {
-                        if (resolver.loaded) break
-                        resolvePlayer(mediaUrl, playerDocument.second, resolver)
+                    } ?: return@resolveByPriorityTiers false
+                    val mediaCandidates = LayarKacaPlayerParser.pageMediaUrls(
+                            playerDocument.first,
+                            playerDocument.second
+                        ).mapNotNull { mediaUrl ->
+                            ProviderHtmlParser.absoluteUrl(mediaUrl, playerDocument.second)
+                                ?.let { url ->
+                                    PlayerResolutionCandidate(
+                                        url,
+                                        playerDocument.second,
+                                        inline = true
+                                    )
+                                }
+                        }
+                    resolveByPriorityTiers(
+                        tiers = listOf(mediaCandidates),
+                        maxConcurrency = 3,
+                        canContinue = { !resolver.loaded && resolver.canContinue }
+                    ) { media ->
+                        resolver.resolveInline(media.url, media.referer)
                     }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (_: Exception) {
                     // One dead server must not hide the remaining mirrors.
+                    false
                 }
             }
         }
@@ -186,17 +204,17 @@ class LayarKacaProvider : MainAPI() {
                         timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                     )
                     val responseUrl = providerUrl(response.url) ?: continue
-                    for (mediaUrl in LayarKacaPlayerParser.pageMediaUrls(
-                        response.document,
-                        responseUrl
-                    )) {
-                        if (resolver.loaded || !resolver.canContinue) break
-                        resolvePlayer(
-                            ProviderHtmlParser.absoluteUrl(mediaUrl, responseUrl),
-                            canonicalUrl,
-                            resolver
-                        )
-                    }
+                    resolver.resolveFirstVerified(
+                        LayarKacaPlayerParser.pageMediaUrls(
+                            response.document,
+                            responseUrl
+                        ).mapNotNull { mediaUrl ->
+                            ProviderHtmlParser.absoluteUrl(mediaUrl, responseUrl)
+                                ?.let { url ->
+                                    PlayerResolutionCandidate(url, canonicalUrl, inline = true)
+                                }
+                        }
+                    )
                 } catch (error: CancellationException) {
                     throw error
                 } catch (_: Exception) {
@@ -206,17 +224,15 @@ class LayarKacaProvider : MainAPI() {
         }
 
         if (!resolver.loaded) {
-            for (download in ProviderHtmlParser.downloadCandidateUrls(document, canonicalUrl)) {
-                if (!resolver.canContinue || resolver.resolve(download, canonicalUrl)) break
-            }
+            resolver.resolveFirstVerified(
+                ProviderHtmlParser.downloadCandidateUrls(document, canonicalUrl)
+                    .map { download ->
+                        PlayerResolutionCandidate(download, canonicalUrl)
+                    }
+            )
         }
 
         return resolver.loaded
-    }
-
-    private suspend fun resolvePlayer(raw: String?, referer: String, resolver: LinkResolutionSession) {
-        val url = ProviderHtmlParser.absoluteUrl(raw, referer) ?: return
-        resolver.resolveInline(url, referer)
     }
 
     private fun providerUrl(raw: String?): String? =
@@ -254,14 +270,21 @@ internal object LayarKacaPlayerParser {
     fun orderedPlayerCandidates(
         document: Document,
         detailUrl: String
-    ): List<LayarKacaPlaybackCandidate> {
+    ): List<LayarKacaPlaybackCandidate> =
+        playerCandidateTiers(document, detailUrl).flatten()
+
+    fun playerCandidateTiers(
+        document: Document,
+        detailUrl: String
+    ): List<List<LayarKacaPlaybackCandidate>> {
         val (defaultServerPages, alternateServerPages) =
             serverPageUrls(document, detailUrl).partition(::isDefaultServerPage)
-        return (
-            alternateServerPages.map(LayarKacaPlaybackCandidate::ServerPage) +
-                pageMediaUrls(document, detailUrl).map(LayarKacaPlaybackCandidate::InlinePlayer) +
-                defaultServerPages.map(LayarKacaPlaybackCandidate::ServerPage)
-            ).distinct()
+        return listOf(
+            alternateServerPages.map(LayarKacaPlaybackCandidate::ServerPage),
+            pageMediaUrls(document, detailUrl).map(LayarKacaPlaybackCandidate::InlinePlayer),
+            defaultServerPages.map(LayarKacaPlaybackCandidate::ServerPage)
+        ).map { tier -> tier.distinct() }
+            .filter { tier -> tier.isNotEmpty() }
     }
 
     private fun isDefaultServerPage(url: String): Boolean = runCatching {

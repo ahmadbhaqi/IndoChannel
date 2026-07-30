@@ -182,6 +182,98 @@ class KeBioskopProviderTest {
     }
 
     @Test
+    fun `intermediary batches independent final iframe mirrors`() = runBlocking {
+        val detailUrl = "https://kebioskop21.cfd/nonton-film/example/"
+        val playerUrl = "https://streaming.kebioskop21.cfd/apidrive.php?id=abc"
+        val first = "https://abysscdn.com/?v=first"
+        val second = "https://firestream.to/e/second"
+        val batches = mutableListOf<List<PlayerResolutionCandidate>>()
+        val playback = KeBioskopPlayerOrchestrator(
+            network = object : KeBioskopPlaybackNetwork {
+                override suspend fun get(url: String, referer: String) =
+                    KeBioskopHttpResponse(
+                        "<form method='post'><button name='play' value='play'></button></form>",
+                        playerUrl
+                    )
+
+                override suspend fun postPlay(
+                    url: String,
+                    data: Map<String, String>,
+                    referer: String
+                ) = KeBioskopHttpResponse(
+                    "<iframe src='$first'></iframe><iframe src='$second'></iframe>",
+                    playerUrl
+                )
+            },
+            genericResolver = { _, _ -> error("final mirrors must use the bounded batch") },
+            genericBatchResolver = { candidates ->
+                batches += candidates
+                true
+            }
+        )
+
+        assertTrue(playback.resolve("<iframe id='player' src='$playerUrl'></iframe>", detailUrl))
+        assertEquals(
+            listOf(
+                PlayerResolutionCandidate(first, playerUrl),
+                PlayerResolutionCandidate(second, playerUrl)
+            ),
+            batches.single()
+        )
+    }
+
+    @Test
+    fun `current direct fullscreen iframe without legacy player id resolves`() = runBlocking {
+        val detailUrl = "https://kebioskop21.cfd/nonton-film-todo-kayod-2-2026-sub-indo/"
+        val playerUrl = (
+            "https://abysscdn.com/?v=YH8gMDbrb" +
+                "&thumbnail=https://streaming.kebioskop21.cfd/playme.jpg" +
+                "&sub=https://subtitle.kebioskop21.cfd/sub21/streaming/kebioskop21.srt" +
+                "&sub-lang=Indonesia"
+            )
+        val resolved = mutableListOf<Pair<String, String>>()
+        val playback = KeBioskopPlayerOrchestrator(
+            network = object : KeBioskopPlaybackNetwork {
+                override suspend fun get(
+                    url: String,
+                    referer: String
+                ): KeBioskopHttpResponse = error("direct iframe must not enter the intermediary gate")
+
+                override suspend fun postPlay(
+                    url: String,
+                    data: Map<String, String>,
+                    referer: String
+                ): KeBioskopHttpResponse = error("direct iframe must not post an intermediary form")
+            },
+            genericResolver = { url, referer ->
+                resolved += url to referer
+                true
+            }
+        )
+
+        assertTrue(
+            playback.resolve(
+                """
+                <div class="filmicerik">
+                    <div style="position:relative;display:inline-block;width:100%;">
+                        <iframe
+                            width="100%"
+                            height="400"
+                            src="//abysscdn.com/?v=YH8gMDbrb&amp;thumbnail=https://streaming.kebioskop21.cfd/playme.jpg&amp;sub=https://subtitle.kebioskop21.cfd/sub21/streaming/kebioskop21.srt&amp;sub-lang=Indonesia"
+                            frameborder="0"
+                            scrolling="0"
+                            allowfullscreen>
+                        </iframe>
+                    </div>
+                </div>
+                """.trimIndent(),
+                detailUrl
+            )
+        )
+        assertEquals(listOf(playerUrl to detailUrl), resolved)
+    }
+
+    @Test
     fun `non intermediary iframe uses generic resolver directly`() = runBlocking {
         val detailUrl = "https://kebioskop21.cfd/nonton-film/example/"
         val resolved = mutableListOf<Pair<String, String>>()

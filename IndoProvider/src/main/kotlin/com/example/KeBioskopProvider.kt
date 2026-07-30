@@ -117,6 +117,9 @@ class KeBioskopProvider : MainAPI() {
                 }
             },
             genericResolver = { candidate, referer -> resolver.resolve(candidate, referer) },
+            genericBatchResolver = { candidates ->
+                resolver.resolveFirstVerified(candidates)
+            },
             canContinue = { resolver.canContinue }
         )
         return playback.resolve(detailFetch.text, canonicalUrl) && resolver.loaded
@@ -290,11 +293,14 @@ internal interface KeBioskopPlaybackNetwork {
 internal class KeBioskopPlayerOrchestrator(
     private val network: KeBioskopPlaybackNetwork,
     private val genericResolver: suspend (url: String, referer: String) -> Boolean,
+    private val genericBatchResolver: (
+        suspend (candidates: List<PlayerResolutionCandidate>) -> Boolean
+    )? = null,
     private val canContinue: () -> Boolean = { true }
 ) {
     suspend fun resolve(detailHtml: String, detailUrl: String): Boolean {
         val candidates = Jsoup.parse(detailHtml, detailUrl)
-            .select("iframe#player")
+            .select("iframe#player[src], .filmicerik iframe[src], .filmcontent iframe[src]")
             .mapNotNull { iframe ->
                 ProviderHtmlParser.firstIframeSource(iframe)
                     ?.let { ProviderHtmlParser.absoluteUrl(it, detailUrl) }
@@ -329,9 +335,16 @@ internal class KeBioskopPlayerOrchestrator(
                             ProviderHtmlParser.firstIframeSource(iframe)
                                 ?.let { ProviderHtmlParser.absoluteUrl(it, response.url) }
                         }
-                    for (finalUrl in finalIframes) {
-                        if (!canContinue()) break
-                        if (genericResolver(finalUrl, response.url)) return true
+                    val finalCandidates = finalIframes.map { finalUrl ->
+                        PlayerResolutionCandidate(finalUrl, response.url)
+                    }
+                    val batchLoaded = genericBatchResolver?.invoke(finalCandidates)
+                    if (batchLoaded == true) return true
+                    if (genericBatchResolver == null) {
+                        for (finalUrl in finalIframes) {
+                            if (!canContinue()) break
+                            if (genericResolver(finalUrl, response.url)) return true
+                        }
                     }
                 } else if (genericResolver(candidate, detailUrl)) {
                     return true

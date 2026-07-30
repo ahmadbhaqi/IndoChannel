@@ -43,6 +43,7 @@ class SamehadakuProvider : MainAPI() {
         val a = this.selectFirst("div.animepost a") ?: return null
         val title = a.selectFirst("div.title h2")?.text()?.trim() ?: a.attr("title") ?: return null
         val href = fixUrlNull(a.attr("href")) ?: return null
+        if (SensitiveContentPolicy.isBlocked(title, href)) return null
         val posterUrl = fixUrlNull(this.selectFirst("div.content-thumb img")?.attr("src"))
         return newAnimeSearchResponse(title, href, TvType.Anime) { this.posterUrl = posterUrl }
     }
@@ -51,6 +52,7 @@ class SamehadakuProvider : MainAPI() {
         val a = this.selectFirst("div.thumb a") ?: return null
         val title = this.selectFirst("h2.entry-title a")?.text()?.trim() ?: a.attr("title") ?: return null
         val href = fixUrlNull(a.attr("href")) ?: return null
+        if (SensitiveContentPolicy.isBlocked(title, href)) return null
         val posterUrl = fixUrlNull(a.selectFirst("img")?.attr("src"))
         val epNum = this.selectFirst("div.dtla author")?.text()?.toIntOrNull()
         return newAnimeSearchResponse(title, href, TvType.Anime) { this.posterUrl = posterUrl; addSub(epNum) }
@@ -61,11 +63,13 @@ class SamehadakuProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
+        if (SensitiveContentPolicy.isBlocked(null, url)) return null
         val fixUrl = if (url.contains("/anime/")) url else app.get(url).document.selectFirst("div.nvs.nvsc a")?.attr("href")
         val document = app.get(fixUrl ?: return null).document
         val title = document.selectFirst("h1.entry-title")?.text()?.replace(Regex("(Nonton)|(Anime)|(Subtitle\\sIndonesia)"), "")?.trim() ?: return null
         val poster = document.selectFirst("div.thumb > img")?.attr("src")
         val tags = document.select("div.genre-info > a").map { it.text() }
+        if (SensitiveContentPolicy.isBlocked(title, fixUrl, categories = tags)) return null
         val year = document.selectFirst("div.spe > span:contains(Rilis)")?.ownText()?.let { Regex("\\d,\\s(\\d*)").find(it)?.groupValues?.getOrNull(1)?.toIntOrNull() }
         val status = getStatus(document.selectFirst("div.spe > span:contains(Status)")?.ownText() ?: return null)
         val type = getType(document.selectFirst("div.spe > span:contains(Type)")?.ownText()?.trim()?.lowercase() ?: "tv")
@@ -74,7 +78,17 @@ class SamehadakuProvider : MainAPI() {
         val episodes = document.select("div.lstepsiode.listeps ul li").mapNotNull {
             val header = it.selectFirst("span.lchx > a") ?: return@mapNotNull null
             val episode = Regex("Episode\\s?(\\d+)").find(header.text())?.groupValues?.getOrNull(1)?.toIntOrNull()
-            newEpisode(fixUrl(header.attr("href"))) { this.episode = episode }
+            val episodeUrl = fixUrl(header.attr("href"))
+            newEpisode(
+                AnimePlaybackDataCodec.encode(
+                    url = episodeUrl,
+                    title = header.text().trim().ifBlank { title },
+                    categories = tags,
+                    detailUrl = fixUrl
+                ),
+                initializer = { this.episode = episode },
+                fix = false
+            )
         }.reversed()
         val tracker = APIHolder.getTracker(listOf(title), TrackerType.getTypes(type), year, true)
         return newAnimeLoadResponse(title, url, type) {
@@ -85,7 +99,15 @@ class SamehadakuProvider : MainAPI() {
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val document = app.get(data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS).document
+        val playback = AnimePlaybackDataCodec.decode(data)
+        if (AnimePlaybackDataCodec.isBlocked(data)) return false
+        val pageUrl = playback?.url ?: data
+        if (SensitiveContentPolicy.isBlocked(null, pageUrl)) return false
+        val fetch = app.get(pageUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
+        val document = fetch.document
+        val pageTitle = document.selectFirst("h1.entry-title")?.text()
+        val pageTags = document.select("div.genre-info > a").map { it.text() }
+        if (SensitiveContentPolicy.isBlocked(pageTitle, fetch.url, categories = pageTags)) return false
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
         val bloggerResolver = BloggerVideoResolver(name, resolver::emitResolved)
         val streamingCandidates = document
@@ -125,7 +147,7 @@ class SamehadakuProvider : MainAPI() {
                             "nume" to request.number,
                             "type" to request.type
                         ),
-                        referer = data,
+                        referer = fetch.url,
                         headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
                         timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                     ).document.selectFirst("iframe")
@@ -134,11 +156,11 @@ class SamehadakuProvider : MainAPI() {
                 } ?: return@streamResolver false
 
                 val bloggerLoaded = if (InlineDataParser.bloggerToken(embed) != null) {
-                    resolver.withinBudget { bloggerResolver.resolve(embed, data) } == true
+                    resolver.withinBudget { bloggerResolver.resolve(embed, fetch.url) } == true
                 } else {
                     false
                 }
-                bloggerLoaded || resolver.resolve(embed, data)
+                bloggerLoaded || resolver.resolve(embed, fetch.url)
             },
             downloadResolver = { candidate ->
                 val before = resolver.linkCount

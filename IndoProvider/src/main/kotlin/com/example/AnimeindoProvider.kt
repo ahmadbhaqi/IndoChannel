@@ -52,6 +52,7 @@ class AnimeindoProvider : MainAPI() {
             ?.takeIf { it.isNotBlank() }
             ?: selectFirst("img[alt]")?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
             ?: return null
+        if (SensitiveContentPolicy.isBlocked(title, detailUrl)) return null
         val labels = select("span.label").text()
         val type = when {
             labels.contains("Movie", ignoreCase = true) -> TvType.AnimeMovie
@@ -81,22 +82,33 @@ class AnimeindoProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
+        if (SensitiveContentPolicy.isBlocked(null, url)) return null
         val document = app.get(url).document
         val title = document.selectFirst("h1.title, h1")?.text()?.trim()?.takeIf { it.isNotBlank() }
             ?: return null
         val detail = document.selectFirst("div.detail")
         val poster = fixUrlNull(ProviderHtmlParser.imageSource(detail?.selectFirst("img")))
         val tags = detail?.select("li a[href*=/genres/]")?.map { it.text().trim() }.orEmpty()
+        if (SensitiveContentPolicy.isBlocked(title, url, categories = tags)) return null
         val description = detail?.selectFirst("p")?.text()?.trim()
         val episodes = document.select("div.ep > a[href]").mapNotNull { link ->
             val href = ProviderHtmlParser.absoluteUrl(link.attr("href"), mainUrl) ?: return@mapNotNull null
             val label = link.text().trim()
             val number = Regex("\\d+").find(label)?.value?.toIntOrNull()
-            newEpisode(href) {
-                episode = number
-                name = if (label.isNotBlank()) "Episode $label" else "Episode"
-                posterUrl = poster
-            }
+            newEpisode(
+                AnimePlaybackDataCodec.encode(
+                    url = href,
+                    title = if (label.isNotBlank()) "Episode $label" else title,
+                    categories = tags,
+                    detailUrl = url
+                ),
+                initializer = {
+                    episode = number
+                    name = if (label.isNotBlank()) "Episode $label" else "Episode"
+                    posterUrl = poster
+                },
+                fix = false
+            )
         }
         val type = when {
             title.contains("Movie", ignoreCase = true) -> TvType.AnimeMovie
@@ -118,7 +130,22 @@ class AnimeindoProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS).document
+        val playback = AnimePlaybackDataCodec.decode(data)
+        if (AnimePlaybackDataCodec.isBlocked(data)) return false
+        val pageUrl = playback?.url ?: data
+        if (SensitiveContentPolicy.isBlocked(null, pageUrl)) return false
+        val fetch = app.get(pageUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
+        val document = fetch.document
+        val pageTitle = document.selectFirst("h1.title, h1")?.text()
+        val pageTags = document.select("div.detail li a[href*=/genres/]")
+            .map { it.text().trim() }
+        if (
+            SensitiveContentPolicy.isBlocked(
+                pageTitle,
+                fetch.url,
+                categories = pageTags
+            )
+        ) return false
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
         val emittedDirect = mutableSetOf<String>()
         var directLoaded = false
@@ -184,10 +211,10 @@ class AnimeindoProvider : MainAPI() {
         val candidates = buildList {
             addAll(ProviderHtmlParser.iframeSources(document))
             addAll(document.select("a.server[data-video]").map { it.attr("data-video") })
-        }.mapNotNull { ProviderHtmlParser.absoluteUrl(it, data) }.distinct()
+        }.mapNotNull { ProviderHtmlParser.absoluteUrl(it, fetch.url) }.distinct()
 
         candidates.forEach { candidate ->
-            resolvePlayerCandidate(candidate, data)
+            resolvePlayerCandidate(candidate, fetch.url)
         }
         return directLoaded || resolver.loaded
     }

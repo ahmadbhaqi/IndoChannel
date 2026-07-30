@@ -96,7 +96,10 @@ internal object FirestreamPlayerParser {
                 uri.userInfo != null ||
                 uri.port != -1 ||
                 !supports(uri.host.orEmpty()) ||
-                !uri.path.orEmpty().endsWith(".mp4", ignoreCase = true)
+                (
+                    !uri.path.orEmpty().endsWith(".mp4", ignoreCase = true) &&
+                        !uri.path.orEmpty().endsWith(".m3u8", ignoreCase = true)
+                    )
             ) return@runCatching null
             val signedParameters = uri.rawQuery.orEmpty().split('&').associate { parameter ->
                 parameter.substringBefore('=') to parameter.substringAfter('=', "")

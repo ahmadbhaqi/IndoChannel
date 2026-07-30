@@ -2,6 +2,7 @@ package com.example
 
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.newSubtitleFile
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -9,8 +10,11 @@ import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.jsoup.Jsoup
 
 class ProviderHtmlParserTest {
@@ -1231,6 +1235,233 @@ class ProviderHtmlParserTest {
         )
 
         assertFalse(session.resolve("https://player.example/embed/stalled", null))
+    }
+
+    @Test
+    fun `bounded mirror scheduler returns first verified link and cancels stalled sibling`() = runBlocking {
+        val slowPlayer = "https://slow-player.example/embed/current"
+        val healthyPlayer = "https://healthy-player.example/embed/current"
+        val media = "https://cdn.example/current.mp4"
+        val referer = "https://provider.example/item"
+        val started = mutableSetOf<String>()
+        var slowCancelled = false
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                started += url
+                if (url == slowPlayer) {
+                    try {
+                        delay(5_000)
+                    } catch (error: CancellationException) {
+                        slowCancelled = true
+                        throw error
+                    }
+                    ""
+                } else {
+                    """<source src="$media">"""
+                }
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { link -> link.takeIf { it.url == media } },
+            directLinkFactory = { source, name, url, linkReferer, quality, type, headers ->
+                directExtractorLink(source, name, url, linkReferer, quality, type, headers)
+            },
+            candidateTimeoutMs = 5_000,
+            sessionTimeoutMs = 6_000
+        )
+
+        val loaded = withTimeout(1_000) {
+            session.resolveFirstVerified(
+                candidates = listOf(
+                    PlayerResolutionCandidate(slowPlayer, referer),
+                    PlayerResolutionCandidate(healthyPlayer, referer)
+                ),
+                maxConcurrency = 2
+            )
+        }
+
+        assertTrue(loaded)
+        assertEquals(setOf(slowPlayer, healthyPlayer), started)
+        assertTrue(slowCancelled, "winning mirror must cancel its stalled sibling")
+        assertEquals(listOf(media), links.map { it.url })
+    }
+
+    @Test
+    fun `mirror scheduler returns after the first verified source inside a multi source winner`() = runBlocking {
+        val winnerPlayer = "https://winner-player.example/embed/current"
+        val stalledPlayer = "https://stalled-player.example/embed/current"
+        val fastMedia = "https://cdn.example/fast.mp4"
+        val slowMedia = "https://cdn.example/slow.mp4"
+        val referer = "https://provider.example/item"
+        var slowProbeStarted = false
+        var slowProbeCancelled = false
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                if (url == stalledPlayer) {
+                    delay(5_000)
+                    ""
+                } else {
+                    """
+                        <video>
+                          <source src="$fastMedia">
+                          <source src="$slowMedia">
+                        </video>
+                    """.trimIndent()
+                }
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { link ->
+                if (link.url == slowMedia) {
+                    slowProbeStarted = true
+                    try {
+                        delay(5_000)
+                    } catch (error: CancellationException) {
+                        slowProbeCancelled = true
+                        throw error
+                    }
+                }
+                link
+            },
+            directLinkFactory = { source, name, url, linkReferer, quality, type, headers ->
+                directExtractorLink(source, name, url, linkReferer, quality, type, headers)
+            },
+            candidateTimeoutMs = 5_000,
+            sessionTimeoutMs = 6_000
+        )
+
+        val loaded = withTimeout(1_000) {
+            session.resolveFirstVerified(
+                candidates = listOf(
+                    PlayerResolutionCandidate(winnerPlayer, referer),
+                    PlayerResolutionCandidate(stalledPlayer, referer)
+                ),
+                maxConcurrency = 2
+            )
+        }
+
+        assertTrue(loaded)
+        assertTrue(slowProbeStarted)
+        assertTrue(slowProbeCancelled)
+        assertEquals(listOf(fastMedia), links.map { it.url })
+    }
+
+    @Test
+    fun `parallel mirrors serialize subtitle callbacks`() = runBlocking {
+        val barrier = java.util.concurrent.CyclicBarrier(2)
+        val activeCallbacks = java.util.concurrent.atomic.AtomicInteger()
+        val maxActiveCallbacks = java.util.concurrent.atomic.AtomicInteger()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {
+                val active = activeCallbacks.incrementAndGet()
+                maxActiveCallbacks.updateAndGet { current -> maxOf(current, active) }
+                try {
+                    Thread.sleep(50)
+                } finally {
+                    activeCallbacks.decrementAndGet()
+                }
+            },
+            callback = {},
+            pageFetcher = { _, _ -> "" },
+            extractorLoader = { url, _, subtitle, _ ->
+                withContext(Dispatchers.Default) {
+                    barrier.await()
+                    subtitle(
+                        newSubtitleFile(
+                            "Indonesia",
+                            "https://subtitle.example/${url.substringAfterLast('/')}.vtt"
+                        )
+                    )
+                }
+                false
+            },
+            candidateTimeoutMs = 2_000,
+            sessionTimeoutMs = 3_000
+        )
+
+        assertFalse(
+            session.resolveFirstVerified(
+                candidates = listOf(
+                    PlayerResolutionCandidate("https://mirror-a.example/embed/a", null),
+                    PlayerResolutionCandidate("https://mirror-b.example/embed/b", null)
+                ),
+                maxConcurrency = 2
+            )
+        )
+        assertEquals(1, maxActiveCallbacks.get())
+    }
+
+    @Test
+    fun `priority scheduler races siblings without entering a lower tier`() = runBlocking {
+        val started = java.util.Collections.synchronizedList(mutableListOf<String>())
+        var slowCancelled = false
+
+        val resolved = withTimeout(1_000) {
+            resolveByPriorityTiers(
+                tiers = listOf(
+                    listOf("slow", "healthy"),
+                    listOf("lower-priority")
+                ),
+                maxConcurrency = 2
+            ) { candidate ->
+                started += candidate
+                when (candidate) {
+                    "slow" -> {
+                        try {
+                            delay(5_000)
+                        } catch (error: CancellationException) {
+                            slowCancelled = true
+                            throw error
+                        }
+                        false
+                    }
+                    "healthy" -> {
+                        delay(25)
+                        true
+                    }
+                    else -> true
+                }
+            }
+        }
+
+        assertTrue(resolved)
+        assertTrue("slow" in started)
+        assertTrue("healthy" in started)
+        assertFalse("lower-priority" in started)
+        assertTrue(slowCancelled)
+    }
+
+    @Test
+    fun `priority scheduler advances only after the current tier exhausts`() = runBlocking {
+        val completedFirstTier = java.util.concurrent.atomic.AtomicInteger()
+        var lowerTierObservedCompleted = -1
+
+        val resolved = resolveByPriorityTiers(
+            tiers = listOf(
+                listOf("first-a", "first-b"),
+                listOf("second")
+            ),
+            maxConcurrency = 2
+        ) { candidate ->
+            if (candidate.startsWith("first")) {
+                delay(20)
+                completedFirstTier.incrementAndGet()
+                false
+            } else {
+                lowerTierObservedCompleted = completedFirstTier.get()
+                true
+            }
+        }
+
+        assertTrue(resolved)
+        assertEquals(2, lowerTierObservedCompleted)
     }
 
     @Test

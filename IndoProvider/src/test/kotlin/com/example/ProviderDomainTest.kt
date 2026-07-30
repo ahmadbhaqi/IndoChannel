@@ -339,17 +339,24 @@ class ProviderDomainTest {
     }
 
     @Test
-    fun `Pusatfilm iterates every matching iframe`() {
+    fun `Pusatfilm schedules every matching iframe`() {
         val loadLinksSource = source("PusatfilmProvider.kt")
             .substringAfter("override suspend fun loadLinks")
             .substringBefore("private fun Element.getImageAttr")
-        val allIframeIteration = Regex(
-            """(?s)document\s*\.\s*select\s*\(\s*"[^"]*iframe[^"]*"\s*\)(?:(?!selectFirst)[\s\S])*?\.\s*forEach\s*\{"""
+        val allIframeCollection = Regex(
+            """(?s)val\s+iframes\s*=\s*document\s*\.\s*select\s*\(\s*"[^"]*iframe[^"]*"\s*\)(?:(?!selectFirst)[\s\S])*?\.\s*mapNotNull\s*\{"""
+        )
+        val allIframeScheduling = Regex(
+            """(?s)resolveFirstVerified\s*\(\s*iframes\s*\.\s*map\s*\{"""
         )
 
         assertTrue(
-            allIframeIteration.containsMatchIn(loadLinksSource),
-            "PusatfilmProvider should iterate the complete iframe selection"
+            allIframeCollection.containsMatchIn(loadLinksSource),
+            "PusatfilmProvider should collect the complete iframe selection"
+        )
+        assertTrue(
+            allIframeScheduling.containsMatchIn(loadLinksSource),
+            "PusatfilmProvider should schedule every collected iframe"
         )
         assertFalse(
             Regex("""\bselectFirst\s*\(""").containsMatchIn(loadLinksSource),

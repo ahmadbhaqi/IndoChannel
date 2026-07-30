@@ -1,7 +1,10 @@
 package com.example
 
 import java.util.Base64
+import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -80,6 +83,71 @@ class PusatfilmCurrentPlayerTest {
             requests
         )
         assertEquals(listOf(media to turbo), resolvedMedia)
+    }
+
+    @Test
+    fun `current playback races independent Turbo mirrors`() = runBlocking {
+        val kotak = "https://kotakajaib.me/embed/current"
+        val slowTurbo = "https://emturbovid.com/t/slow"
+        val healthyTurbo = "https://turbovidhls.com/t/healthy"
+        val media = "https://cdn.turboviplay.com/data3/current/healthy.m3u8"
+        var slowCancelled = false
+        val playback = PusatfilmCurrentPlayback(
+            pageFetcher = { url, _ ->
+                when (url) {
+                    kotak -> """
+                        <button class="server-item" data-frame="${encoded(slowTurbo)}"></button>
+                        <button class="server-item" data-frame="${encoded(healthyTurbo)}"></button>
+                    """.trimIndent()
+                    slowTurbo -> {
+                        try {
+                            delay(5_000)
+                        } catch (error: CancellationException) {
+                            slowCancelled = true
+                            throw error
+                        }
+                        ""
+                    }
+                    healthyTurbo -> """<div id="video_player" data-hash="$media"></div>"""
+                    else -> error("Unexpected fetch: $url")
+                }
+            },
+            mediaResolver = { url, _ -> url == media }
+        )
+
+        assertTrue(
+            withTimeout(1_000) {
+                playback.resolve(kotak, "https://v4.pusatfilm21info.com/current/")
+            }
+        )
+        assertTrue(slowCancelled)
+    }
+
+    @Test
+    fun `generic Pusatfilm mirrors do not wait for a stalled current adapter`() = runBlocking {
+        var currentCancelled = false
+
+        val resolved = withTimeout(1_000) {
+            resolvePusatfilmStrategies(
+                currentPlayers = listOf("https://kotakajaib.me/embed/stalled"),
+                currentResolver = {
+                    try {
+                        delay(5_000)
+                    } catch (error: CancellationException) {
+                        currentCancelled = true
+                        throw error
+                    }
+                    false
+                },
+                genericResolver = {
+                    delay(25)
+                    true
+                }
+            )
+        }
+
+        assertTrue(resolved)
+        assertTrue(currentCancelled)
     }
 
     @Test

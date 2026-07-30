@@ -25,9 +25,22 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import java.net.URI
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+
+internal suspend fun resolveIndomaxPlayerPhases(
+    primary: PlayerResolutionCandidate?,
+    loadFallbacks: suspend () -> List<PlayerResolutionCandidate>,
+    resolveBatch: suspend (List<PlayerResolutionCandidate>) -> Boolean
+): Boolean {
+    if (primary != null && resolveBatch(listOf(primary))) return true
+    val fallbacks = loadFallbacks()
+    return fallbacks.isNotEmpty() && resolveBatch(fallbacks)
+}
 
 class IndomaxProvider : MainAPI() {
     override var mainUrl = "https://idmxl.ink"
@@ -235,33 +248,37 @@ class IndomaxProvider : MainAPI() {
             inlineSourceParser = IndomaxParser::imaxMediaUrls,
             maxCandidates = 12
         )
-        var attemptedPlayers = 0
-
-        suspend fun resolvePrimaryPlayer(playerDocument: Document, referer: String) {
-            if (
-                attemptedPlayers >= IndomaxParser.MAX_PLAYER_PAGES ||
-                !resolver.canContinue
-            ) return
-            val playerUrl = IndomaxParser.primaryPlayerUrl(playerDocument, referer) ?: return
-            attemptedPlayers++
-            resolver.resolve(playerUrl, referer)
+        val primary = IndomaxParser.primaryPlayerUrl(document, pageUrl)?.let { playerUrl ->
+            PlayerResolutionCandidate(playerUrl, pageUrl)
         }
-
-        resolvePrimaryPlayer(document, pageUrl)
-        val remainingPlayers = IndomaxParser.MAX_PLAYER_PAGES - attemptedPlayers
-        for (tabUrl in IndomaxParser.alternateTabUrls(document, pageUrl, remainingPlayers)) {
-            if (
-                attemptedPlayers >= IndomaxParser.MAX_PLAYER_PAGES ||
-                !resolver.canContinue
-            ) break
-            val tabFetch = getProviderPage(tabUrl) ?: continue
-            if (
-                tabFetch.code !in 200..299 ||
-                ProviderHtmlParser.isNonContentPage(tabFetch.body)
-            ) continue
-            resolvePrimaryPlayer(Jsoup.parse(tabFetch.body, tabFetch.url), tabFetch.url)
-        }
-        return resolver.loaded
+        val resolved = resolveIndomaxPlayerPhases(
+            primary = primary,
+            loadFallbacks = {
+                val remainingPlayers =
+                    IndomaxParser.MAX_PLAYER_PAGES - if (primary == null) 0 else 1
+                val tabUrls =
+                    IndomaxParser.alternateTabUrls(document, pageUrl, remainingPlayers)
+                coroutineScope {
+                    tabUrls.map { tabUrl ->
+                        async {
+                            val tabFetch = resolver.withinBudget {
+                                getProviderPage(tabUrl)
+                            } ?: return@async null
+                            if (
+                                tabFetch.code !in 200..299 ||
+                                ProviderHtmlParser.isNonContentPage(tabFetch.body)
+                            ) return@async null
+                            val tabDocument = Jsoup.parse(tabFetch.body, tabFetch.url)
+                            IndomaxParser.primaryPlayerUrl(tabDocument, tabFetch.url)?.let {
+                                playerUrl -> PlayerResolutionCandidate(playerUrl, tabFetch.url)
+                            }
+                        }
+                    }.awaitAll().filterNotNull()
+                }
+            },
+            resolveBatch = resolver::resolveFirstVerified
+        )
+        return resolved && resolver.loaded
     }
 
     private suspend fun getProviderPage(url: String): ProviderHttpResult? = try {

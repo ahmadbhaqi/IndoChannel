@@ -16,10 +16,15 @@ import java.io.ByteArrayOutputStream
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.URI
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
@@ -133,6 +138,56 @@ private data class EmittedLinkKey(
     val headers: Map<String, String>
 )
 
+internal data class PlayerResolutionCandidate(
+    val url: String?,
+    val referer: String?,
+    val inline: Boolean = false
+)
+
+internal suspend fun <T> resolveByPriorityTiers(
+    tiers: Iterable<Iterable<T>>,
+    maxConcurrency: Int = 3,
+    canContinue: () -> Boolean = { true },
+    attempt: suspend (T) -> Boolean
+): Boolean {
+    val concurrency = maxConcurrency.coerceIn(1, 8)
+    for (tier in tiers) {
+        if (!canContinue()) return false
+        val candidates = tier.toList()
+        if (candidates.isEmpty()) continue
+        val resolved = supervisorScope {
+            val winner = CompletableDeferred<Boolean>()
+            val semaphore = Semaphore(concurrency)
+            val jobs = candidates.map { candidate ->
+                launch {
+                    semaphore.withPermit {
+                        if (winner.isCompleted || !canContinue()) return@withPermit
+                        val succeeded = try {
+                            attempt(candidate)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Exception) {
+                            false
+                        }
+                        if (succeeded) winner.complete(true)
+                    }
+                }
+            }
+            val completion = launch {
+                jobs.joinAll()
+                winner.complete(false)
+            }
+            val result = winner.await()
+            if (result) jobs.forEach { job -> job.cancel() }
+            jobs.joinAll()
+            completion.cancel()
+            result
+        }
+        if (resolved) return true
+    }
+    return false
+}
+
 internal class LinkResolutionSession(
     private val api: MainAPI,
     private val subtitleCallback: (SubtitleFile) -> Unit,
@@ -145,6 +200,7 @@ internal class LinkResolutionSession(
     private val firestreamApiFetcher: FirestreamApiFetcher = ::fetchBoundedFirestreamApi,
     private val extractorLoader: CloudstreamExtractorLoader = ::loadExtractorWithResult,
     private val inlineSourceParser: InlineSourceParser? = null,
+    private val preferInlineSourceParser: Boolean = false,
     private val maxDepth: Int = 2,
     private val maxCandidates: Int = MAX_RESOLUTION_CANDIDATES,
     private val candidateTimeoutMs: Long = CANDIDATE_TIMEOUT_MS,
@@ -164,9 +220,15 @@ internal class LinkResolutionSession(
         }
     }
 ) {
-    private val visitedCandidates = mutableSetOf<CandidateKey>()
-    private val emittedLinks = mutableSetOf<EmittedLinkKey>()
+    private val visitedCandidates =
+        Collections.newSetFromMap(ConcurrentHashMap<CandidateKey, Boolean>())
+    private val emittedLinks =
+        Collections.newSetFromMap(ConcurrentHashMap<EmittedLinkKey, Boolean>())
     private val emissionMutex = Mutex()
+    private val subtitleEmissionMutex = Mutex()
+    private val mirrorRaceMutex = Mutex()
+    @Volatile
+    private var activeRaceWinner: CompletableDeferred<Boolean>? = null
     private val deadlineNanos = System.nanoTime() +
         sessionTimeoutMs.coerceIn(1L, 10 * 60_000L) * 1_000_000L
 
@@ -199,6 +261,58 @@ internal class LinkResolutionSession(
             )
         }
         return emittedLinks.size > before
+    }
+
+    suspend fun resolveFirstVerified(
+        candidates: List<PlayerResolutionCandidate>,
+        maxConcurrency: Int = 3
+    ): Boolean = mirrorRaceMutex.withLock {
+        supervisorScope {
+            if (loaded) return@supervisorScope true
+            val remainingCandidates = (maxCandidates - visitedCandidates.size).coerceAtLeast(0)
+            val pending = candidates
+                .distinctBy { candidate ->
+                    Triple(
+                        candidate.url.orEmpty(),
+                        candidate.referer.orEmpty(),
+                        candidate.inline
+                    )
+                }
+                .take(remainingCandidates)
+            if (pending.isEmpty()) return@supervisorScope false
+
+            val winner = CompletableDeferred<Boolean>()
+            activeRaceWinner = winner
+            try {
+                val semaphore = Semaphore(maxConcurrency.coerceIn(1, 8))
+                val jobs = pending.map { candidate ->
+                    launch {
+                        semaphore.withPermit {
+                            if (winner.isCompleted || !canContinue) return@withPermit
+                            val resolved = if (candidate.inline) {
+                                resolveInline(candidate.url, candidate.referer)
+                            } else {
+                                resolve(candidate.url, candidate.referer)
+                            }
+                            if (resolved || loaded) {
+                                winner.complete(true)
+                            }
+                        }
+                    }
+                }
+                val completion = launch {
+                    jobs.joinAll()
+                    winner.complete(loaded)
+                }
+                val result = winner.await()
+                if (result) jobs.forEach { job -> job.cancel() }
+                jobs.joinAll()
+                completion.cancel()
+                result
+            } finally {
+                if (activeRaceWinner === winner) activeRaceWinner = null
+            }
+        }
     }
 
     /** Emits a direct media declaration with browser-style Origin/Referer. */
@@ -332,7 +446,11 @@ internal class LinkResolutionSession(
                         return@repeat
                     }
                     FirestreamPlayerParser.signedVideoUrl(response)?.let { mediaUrl ->
-                        emitDirect(mediaUrl, url, ExtractorLinkType.VIDEO)
+                        emitDirect(
+                            mediaUrl,
+                            url,
+                            directMediaType(mediaUrl) ?: ExtractorLinkType.VIDEO
+                        )
                     }
                     if (emittedLinks.size > beforeAdapter) return
                 }
@@ -549,7 +667,7 @@ internal class LinkResolutionSession(
                 val beforeAdapter = emittedLinks.size
                 JuicyCodesPlayerParser.playback(resolvedHtml)?.let { playback ->
                     playback.tracks.forEach { track ->
-                        subtitleCallback(newSubtitleFile(track.label, track.url))
+                        emitSubtitle(newSubtitleFile(track.label, track.url))
                     }
                     playback.media.forEach { media ->
                         emitVerified(
@@ -651,8 +769,28 @@ internal class LinkResolutionSession(
                 if (emittedLinks.size > beforeAdapter) return
             }
 
+            val preferredParser = inlineSourceParser
+            if (preferInlineSourceParser && preferredParser != null) {
+                val html = cachedHtml ?: pageFetcher(url, referer).also { cachedHtml = it }
+                if (ProviderHtmlParser.isNonContentPage(html)) return
+                val beforePreferredParser = emittedLinks.size
+                runCatching { preferredParser(html, url) }
+                    .getOrDefault(emptyList())
+                    .distinct()
+                    .take(MAX_RESOLUTION_CANDIDATES)
+                    .forEach { nested ->
+                        val playable = ProviderHtmlParser.absoluteUrl(nested, url)
+                            ?: return@forEach
+                        val directType = directMediaType(playable)
+                            ?: return@forEach
+                        emitDirect(playable, url, directType, includeOrigin = true)
+                    }
+                if (emittedLinks.size > beforePreferredParser) return
+            }
+
             val beforeExtractor = emittedLinks.size
             val extractedLinks = mutableListOf<ExtractorLink>()
+            val extractedSubtitles = ConcurrentLinkedQueue<SubtitleFile>()
             try {
                 // Generic Cloudstream extractors can perform their own network
                 // retries. Bound that work separately and reserve at least half
@@ -660,7 +798,7 @@ internal class LinkResolutionSession(
                 // Keep callbacks outside the timed block so links emitted before
                 // a stalled extractor is cancelled can still be verified below.
                 withTimeoutOrNull(genericExtractorBudgetMs(candidateDeadlineNanos)) {
-                    extractorLoader(url, referer, subtitleCallback, extractedLinks::add)
+                    extractorLoader(url, referer, extractedSubtitles::add, extractedLinks::add)
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -672,6 +810,7 @@ internal class LinkResolutionSession(
                 // request fails. Keep and verify those callbacks, then continue
                 // through the cached HTML fallback instead of discarding them.
             }
+            extractedSubtitles.forEach { subtitle -> emitSubtitle(subtitle) }
             for (link in extractedLinks) {
                 if (!canContinue) break
                 emitVerified(link)
@@ -687,7 +826,7 @@ internal class LinkResolutionSession(
             val beforeJuicyCodes = emittedLinks.size
             JuicyCodesPlayerParser.playback(html)?.let { playback ->
                 playback.tracks.forEach { track ->
-                    subtitleCallback(newSubtitleFile(track.label, track.url))
+                    emitSubtitle(newSubtitleFile(track.label, track.url))
                 }
                 playback.media.forEach { media ->
                     emitVerified(
@@ -842,7 +981,7 @@ internal class LinkResolutionSession(
             }
             .filter { track -> isSafeRemoteHttpUrl(track.url) }
             .forEach { track ->
-                subtitleCallback(
+                emitSubtitle(
                     newSubtitleFile(
                         track.label.ifBlank { track.language.ifBlank { "Subtitle" } },
                         track.url
@@ -918,7 +1057,16 @@ internal class LinkResolutionSession(
             type = link.type,
             headers = link.headers.toMap()
         )
-        if (emittedLinks.add(key)) callback(link.withSimpleServerName(api.name))
+        if (emittedLinks.add(key)) {
+            callback(link.withSimpleServerName(api.name))
+            activeRaceWinner?.complete(true)
+        }
+    }
+
+    private suspend fun emitSubtitle(subtitle: SubtitleFile) {
+        subtitleEmissionMutex.withLock {
+            subtitleCallback(subtitle)
+        }
     }
 
     private fun remainingBudgetMs(): Long =

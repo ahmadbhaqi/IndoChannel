@@ -69,6 +69,18 @@ internal object OtakudesuEpisodeParser {
         }.getOrDefault(false)
 }
 
+internal object OtakudesuMetadata {
+    fun categories(document: Document): List<String> {
+        val genreRow = document.select("div.infozingle > p").firstOrNull { row ->
+            Regex("""(?i)^\s*genre\b""").containsMatchIn(row.text())
+        } ?: return emptyList()
+        return genreRow.select("a")
+            .map { link -> link.text().trim() }
+            .filter(String::isNotBlank)
+            .distinct()
+    }
+}
+
 internal fun ExtractorLink.withOtakudesuQuality(explicitQuality: Int): ExtractorLink = apply {
     if (explicitQuality != Qualities.Unknown.value) {
         quality = explicitQuality
@@ -137,6 +149,7 @@ class OtakudesuProvider : MainAPI() {
     private fun Element.toSearchResult(): AnimeSearchResponse? {
         val title = this.selectFirst("h2.jdlflm")?.text()?.trim() ?: return null
         val href = this.selectFirst("a")!!.attr("href")
+        if (SensitiveContentPolicy.isBlocked(title, href)) return null
         val posterUrl = this.select("div.thumbz > img").attr("src").toString()
         val epNum = this.selectFirst("div.epz")?.ownText()?.replace(Regex("\\D"), "")?.trim()?.toIntOrNull()
         return newAnimeSearchResponse(title, href, TvType.Anime) { this.posterUrl = posterUrl; addSub(epNum) }
@@ -147,25 +160,42 @@ class OtakudesuProvider : MainAPI() {
         return document.select("ul.chivsrc > li").mapNotNull {
             val title = it.selectFirst("h2")?.text()?.trim() ?: return@mapNotNull null
             val href = it.selectFirst("a")?.attr("href") ?: return@mapNotNull null
+            if (SensitiveContentPolicy.isBlocked(title, href)) return@mapNotNull null
             val posterUrl = it.selectFirst("img")?.attr("src")?.trim()
             newAnimeSearchResponse(title, href, TvType.Anime) { this.posterUrl = posterUrl }
         }
     }
 
     override suspend fun load(url: String): LoadResponse {
+        if (SensitiveContentPolicy.isBlocked(null, url)) {
+            throw ErrorLoadingException("Konten dewasa disembunyikan")
+        }
         val document = app.get(url).document
         val title = document.selectFirst("div.infozingle > p:nth-child(1) > span")?.ownText()?.replace(":", "")?.trim().toString()
         val poster = document.selectFirst("div.fotoanime > img")?.attr("src")
-        val tags = document.select("div.infozingle > p:nth-child(11) > span > a").map { it.text() }
+        val tags = OtakudesuMetadata.categories(document)
+        if (SensitiveContentPolicy.isBlocked(title, url, categories = tags)) {
+            throw ErrorLoadingException("Konten dewasa disembunyikan")
+        }
         val type = getType(document.selectFirst("div.infozingle > p:nth-child(5) > span")?.ownText()?.replace(":", "")?.trim() ?: "tv")
         val year = Regex("\\d, (\\d*)").find(document.select("div.infozingle > p:nth-child(9) > span").text())?.groupValues?.get(1)?.toIntOrNull()
         val status = getStatus(document.selectFirst("div.infozingle > p:nth-child(6) > span")!!.ownText().replace(":", "").trim())
         val description = document.select("div.sinopc > p").text()
         val episodes = OtakudesuEpisodeParser.episodes(document, mainUrl).map { entry ->
-            newEpisode(fixUrl(entry.href)) {
-                name = "Episode ${entry.number}"
-                episode = entry.number
-            }
+            val episodeUrl = fixUrl(entry.href)
+            newEpisode(
+                AnimePlaybackDataCodec.encode(
+                    url = episodeUrl,
+                    title = "$title Episode ${entry.number}",
+                    categories = tags,
+                    detailUrl = url
+                ),
+                initializer = {
+                    name = "Episode ${entry.number}"
+                    episode = entry.number
+                },
+                fix = false
+            )
         }.reversed()
         val tracker = APIHolder.getTracker(listOf(title), TrackerType.getTypes(type), year, true)
         return newAnimeLoadResponse(title, url, type) {
@@ -184,10 +214,14 @@ class OtakudesuProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val playback = AnimePlaybackDataCodec.decode(data)
+        if (AnimePlaybackDataCodec.isBlocked(data)) return false
+        val playbackUrl = playback?.url ?: data
+        if (SensitiveContentPolicy.isBlocked(null, playbackUrl)) return false
         var emitted = false
         return withTimeoutOrNull(OTAKUDESU_PLAYBACK_TIMEOUT_MS) {
             loadLinksWithinBudget(
-                data,
+                playbackUrl,
                 subtitleCallback,
                 callback = { link ->
                     emitted = true
@@ -214,6 +248,15 @@ class OtakudesuProvider : MainAPI() {
             ProviderHtmlParser.isNonContentPage(page.body)
         ) return false
         val document = Jsoup.parse(page.body, page.url)
+        val pageTitle = document.selectFirst("h1, .posttl, .venser")?.text()
+        val pageTags = OtakudesuMetadata.categories(document)
+        if (
+            SensitiveContentPolicy.isBlocked(
+                pageTitle,
+                page.url,
+                categories = pageTags
+            )
+        ) return false
         var activeQuality = Qualities.Unknown.value
         val resolver = LinkResolutionSession(
             this,

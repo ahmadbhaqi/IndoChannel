@@ -36,7 +36,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -53,6 +55,7 @@ private const val IDLIX_SEASON_CONCURRENCY = 4
 private const val IDLIX_MAX_STREAMS = 6
 private const val IDLIX_SEARCH_PAGE_SIZE = 30
 private const val IDLIX_MAX_SEARCH_PAGES = 20
+private const val IDLIX_SEARCH_CONCURRENCY = 4
 private const val IDLIX_SEARCH_BUDGET_MS = 30_000L
 private const val IDLIX_JSON_MEDIA_TYPE = "application/json;charset=UTF-8"
 private const val IDLIX_PLAYBACK_PATH = "/__idlix_playback__/"
@@ -97,6 +100,47 @@ internal class IdlixPlaybackCookieCache(
     }
 }
 
+internal class IdlixPreflightCoordinator {
+    data class Snapshot(
+        val cookies: Map<String, String>,
+        val preflightGeneration: Long
+    )
+
+    private val mutex = Mutex()
+    private var latestCookies = emptyMap<String, String>()
+    private var preflightGeneration = 0L
+
+    suspend fun snapshot(seedCookies: Map<String, String> = emptyMap()): Snapshot =
+        mutex.withLock {
+            if (seedCookies.isNotEmpty()) {
+                latestCookies = seedCookies.filterKeys { key -> key !in latestCookies } + latestCookies
+            }
+            Snapshot(latestCookies.toMap(), preflightGeneration)
+        }
+
+    suspend fun observe(
+        requestCookies: Map<String, String>,
+        responseCookies: Map<String, String>
+    ): Map<String, String> = mutex.withLock {
+        val missingRequestCookies = requestCookies.filterKeys { key -> key !in latestCookies }
+        latestCookies = missingRequestCookies + latestCookies + responseCookies
+        latestCookies.toMap()
+    }
+
+    suspend fun refresh(
+        observedPreflightGeneration: Long,
+        fetch: suspend () -> Map<String, String>?
+    ): Map<String, String>? = mutex.withLock {
+        if (preflightGeneration > observedPreflightGeneration && latestCookies.isNotEmpty()) {
+            return@withLock latestCookies.toMap()
+        }
+        val fresh = fetch()?.takeIf { it.isNotEmpty() }?.toMap() ?: return@withLock null
+        latestCookies = latestCookies + fresh
+        preflightGeneration++
+        latestCookies.toMap()
+    }
+}
+
 internal suspend fun <C, R> resolveWithFreshCookies(
     cachedCookies: C?,
     attempt: suspend (C) -> R?,
@@ -123,17 +167,50 @@ internal object IdlixSearchPager {
         pageSize: Int,
         maxPages: Int,
         budgetMs: Long,
+        concurrency: Int = 1,
         nowMs: () -> Long = { System.nanoTime() / 1_000_000L },
         key: (T) -> K,
         fetch: suspend (page: Int, cookies: Map<String, String>, timeoutMs: Long) -> Page<T>?
     ): List<T> {
-        if (pageSize <= 0 || maxPages <= 0 || budgetMs <= 0L) return emptyList()
+        if (pageSize <= 0 || maxPages <= 0 || budgetMs <= 0L || concurrency <= 0) {
+            return emptyList()
+        }
         val startedAt = nowMs()
         val results = mutableListOf<T>()
         val seenKeys = LinkedHashSet<K>()
         var cookies = emptyMap<String, String>()
         var page = 1
         var loadedCount = 0
+
+        fun append(
+            response: Page<T>,
+            currentPage: Int,
+            baselineCookies: Map<String, String>? = null
+        ): Boolean {
+            val previousUniqueCount = seenKeys.size
+            response.items.forEach { item ->
+                if (seenKeys.add(key(item))) results += item
+            }
+            loadedCount += response.receivedCount
+            val responseCookies = response.cookies.toMap()
+            cookies = if (baselineCookies == null) {
+                responseCookies
+            } else {
+                val updates = responseCookies.filter { (name, value) ->
+                    baselineCookies[name] != value
+                }
+                cookies + updates
+            }
+            return seenKeys.size > previousUniqueCount &&
+                IdlixParser.shouldLoadNextSearchPage(
+                    total = response.total,
+                    loadedCount = loadedCount,
+                    currentPageCount = response.receivedCount,
+                    currentPage = currentPage,
+                    pageSize = pageSize,
+                    maxPages = maxPages
+                )
+        }
 
         while (page <= maxPages) {
             val elapsedMs = (nowMs() - startedAt).coerceAtLeast(0L)
@@ -142,23 +219,57 @@ internal object IdlixSearchPager {
             val response = withTimeoutOrNull(remainingMs) {
                 fetch(page, cookies, remainingMs)
             } ?: break
-            cookies = response.cookies
-            val previousUniqueCount = seenKeys.size
-            response.items.forEach { item ->
-                if (seenKeys.add(key(item))) results += item
+            if (!append(response, page)) break
+
+            if (concurrency == 1 || response.total < 0) {
+                page++
+                continue
             }
-            loadedCount += response.receivedCount
-            if (seenKeys.size == previousUniqueCount ||
-                !IdlixParser.shouldLoadNextSearchPage(
-                    total = response.total,
-                    loadedCount = loadedCount,
-                    currentPageCount = response.receivedCount,
-                    currentPage = page,
-                    pageSize = pageSize,
-                    maxPages = maxPages
-                )
-            ) break
-            page++
+
+            // Search pages after the first one are independent: the first
+            // response establishes both the total and the session cookie. Fetch
+            // only the known remaining range in small batches, retain page order,
+            // and retry a failed member serially with the newest cookie.
+            val totalPages = ((response.total.toLong() + pageSize - 1L) / pageSize)
+                .coerceIn((page + 1).toLong(), maxPages.toLong())
+                .toInt()
+            var nextPage = page + 1
+            val batchSize = concurrency.coerceAtMost(IDLIX_SEARCH_CONCURRENCY)
+            while (nextPage <= totalPages) {
+                val batch = (nextPage..minOf(totalPages, nextPage + batchSize - 1)).toList()
+                val batchCookies = cookies.toMap()
+                val batchResponses = coroutineScope {
+                    batch.map { candidatePage ->
+                        async {
+                            val elapsed = (nowMs() - startedAt).coerceAtLeast(0L)
+                            val remaining = budgetMs - elapsed
+                            candidatePage to if (remaining > 0L) {
+                                withTimeoutOrNull(remaining) {
+                                    fetch(candidatePage, batchCookies, remaining)
+                                }
+                            } else {
+                                null
+                            }
+                        }
+                    }.awaitAll().toMap()
+                }
+                for (candidatePage in batch) {
+                    val prefetched = batchResponses[candidatePage]
+                    if (prefetched != null) {
+                        if (!append(prefetched, candidatePage, batchCookies)) return results
+                        continue
+                    }
+                    val elapsed = (nowMs() - startedAt).coerceAtLeast(0L)
+                    val remaining = budgetMs - elapsed
+                    if (remaining <= 0L) return results
+                    val retried = withTimeoutOrNull(remaining) {
+                        fetch(candidatePage, cookies.toMap(), remaining)
+                    } ?: return results
+                    if (!append(retried, candidatePage)) return results
+                }
+                nextPage += batch.size
+            }
+            return results
         }
         return results
     }
@@ -178,7 +289,9 @@ class IdlixProvider : MainAPI() {
 
     private val mapper = jacksonObjectMapper()
     private val cloudflareKiller by lazy { CloudflareKiller() }
+    private val cloudflareMutex = Mutex()
     private val playbackCookieCache = IdlixPlaybackCookieCache()
+    private val preflightCoordinator = IdlixPreflightCoordinator()
     private val apiUrl: String get() = "$mainUrl/api"
 
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
@@ -208,6 +321,7 @@ class IdlixProvider : MainAPI() {
             pageSize = IDLIX_SEARCH_PAGE_SIZE,
             maxPages = IDLIX_MAX_SEARCH_PAGES,
             budgetMs = IDLIX_SEARCH_BUDGET_MS,
+            concurrency = IDLIX_SEARCH_CONCURRENCY,
             key = SearchResponse::url
         ) { page, cookies, timeoutMs ->
             val response = apiGetJson(
@@ -348,13 +462,15 @@ class IdlixProvider : MainAPI() {
             ?.takeIf(IdlixParser::isTrustedMasterUrl)
             ?: return false
         val manifestResponse = try {
-            app.get(
-                masterUrl,
-                referer = request.pageUrl,
-                headers = browserHeaders(request.pageUrl),
-                timeout = IDLIX_API_TIMEOUT_SECONDS,
-                interceptor = cloudflareKiller
-            )
+            cloudflareMutex.withLock {
+                app.get(
+                    masterUrl,
+                    referer = request.pageUrl,
+                    headers = browserHeaders(request.pageUrl),
+                    timeout = IDLIX_API_TIMEOUT_SECONDS,
+                    interceptor = cloudflareKiller
+                )
+            }
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
@@ -475,15 +591,17 @@ class IdlixProvider : MainAPI() {
             .put("mode", "browser")
             .toString()
         val response = try {
-            app.post(
-                redeemUrl,
-                requestBody = body.toRequestBody(IDLIX_JSON_MEDIA_TYPE.toMediaType()),
-                referer = referer,
-                headers = browserHeaders(referer) +
-                    mapOf("Content-Type" to IDLIX_JSON_MEDIA_TYPE),
-                timeout = IDLIX_API_TIMEOUT_SECONDS,
-                interceptor = cloudflareKiller
-            )
+            cloudflareMutex.withLock {
+                app.post(
+                    redeemUrl,
+                    requestBody = body.toRequestBody(IDLIX_JSON_MEDIA_TYPE.toMediaType()),
+                    referer = referer,
+                    headers = browserHeaders(referer) +
+                        mapOf("Content-Type" to IDLIX_JSON_MEDIA_TYPE),
+                    timeout = IDLIX_API_TIMEOUT_SECONDS,
+                    interceptor = cloudflareKiller
+                )
+            }
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
@@ -521,8 +639,7 @@ class IdlixProvider : MainAPI() {
                         "$apiUrl$path",
                         referer = referer,
                         headers = browserHeaders(referer) + cookieHeaders(requestCookies),
-                        timeout = requestTimeoutSeconds,
-                        interceptor = cloudflareKiller
+                        timeout = requestTimeoutSeconds
                     )
                 } catch (error: CancellationException) {
                     throw error
@@ -536,13 +653,22 @@ class IdlixProvider : MainAPI() {
                     text.trimStart().firstOrNull() !in setOf('{', '[')
                 ) return null
                 val node = runCatching { mapper.readTree(text) }.getOrNull() ?: return null
-                return ApiResult(node, requestCookies + response.cookies)
+                val responseCookies = preflightCoordinator.observe(
+                    requestCookies = requestCookies,
+                    responseCookies = response.cookies
+                )
+                return ApiResult(node, responseCookies)
             }
 
-            request(cookies)?.let { return@withTimeoutOrNull it }
+            val requestSnapshot = preflightCoordinator.snapshot(cookies)
+            request(requestSnapshot.cookies)?.let { return@withTimeoutOrNull it }
             if (!retryWithPreflight) return@withTimeoutOrNull null
-            val pageCookies = preflightPage(referer) ?: return@withTimeoutOrNull null
-            request(cookies + pageCookies)
+            val pageCookies = preflightCoordinator.refresh(
+                requestSnapshot.preflightGeneration
+            ) {
+                preflightPage(referer)
+            } ?: return@withTimeoutOrNull null
+            request(pageCookies)
         }
     }
 
@@ -554,16 +680,18 @@ class IdlixProvider : MainAPI() {
         timeoutSeconds: Long = IDLIX_API_TIMEOUT_SECONDS
     ): ApiResult? {
         val response = try {
-            app.post(
-                "$apiUrl$path",
-                requestBody = body.toString().toRequestBody(IDLIX_JSON_MEDIA_TYPE.toMediaType()),
-                referer = referer,
-                headers = browserHeaders(referer) +
-                    cookieHeaders(cookies) +
-                    mapOf("Content-Type" to IDLIX_JSON_MEDIA_TYPE),
-                timeout = timeoutSeconds,
-                interceptor = cloudflareKiller
-            )
+            cloudflareMutex.withLock {
+                app.post(
+                    "$apiUrl$path",
+                    requestBody = body.toString().toRequestBody(IDLIX_JSON_MEDIA_TYPE.toMediaType()),
+                    referer = referer,
+                    headers = browserHeaders(referer) +
+                        cookieHeaders(cookies) +
+                        mapOf("Content-Type" to IDLIX_JSON_MEDIA_TYPE),
+                    timeout = timeoutSeconds,
+                    interceptor = cloudflareKiller
+                )
+            }
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
@@ -584,16 +712,18 @@ class IdlixProvider : MainAPI() {
         if (page == null && url != "$mainUrl/movie" && url != "$mainUrl/series" &&
             !url.startsWith("$mainUrl/search?")) return null
         val response = try {
-            app.get(
-                url,
-                headers = mapOf(
-                    "User-Agent" to IDLIX_USER_AGENT,
-                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language" to "id-ID,id;q=0.9,en;q=0.8"
-                ),
-                timeout = IDLIX_API_TIMEOUT_SECONDS,
-                interceptor = cloudflareKiller
-            )
+            cloudflareMutex.withLock {
+                app.get(
+                    url,
+                    headers = mapOf(
+                        "User-Agent" to IDLIX_USER_AGENT,
+                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language" to "id-ID,id;q=0.9,en;q=0.8"
+                    ),
+                    timeout = IDLIX_API_TIMEOUT_SECONDS,
+                    interceptor = cloudflareKiller
+                )
+            }
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {

@@ -80,6 +80,38 @@ class FirestreamPlayerParserTest {
     }
 
     @Test
+    fun `link session accepts current signed Firestream hls and emits the matching type`() =
+        runBlocking {
+            val media =
+                "https://fr-cdn-1.firestream.to/encodings/fixture/video.mp4/video.m3u8" +
+                    "?md5=fixture&expires=4102444800"
+            val links = mutableListOf<ExtractorLink>()
+            var genericCalled = false
+            val session = LinkResolutionSession(
+                api = LayarKacaProvider(),
+                subtitleCallback = {},
+                callback = links::add,
+                pageFetcher = { url, _ ->
+                    assertEquals(playerUrl, url)
+                    playerHtml
+                },
+                firestreamApiFetcher = {
+                    mapper.writeValueAsString(mapOf("signedVideoUrl" to media))
+                },
+                extractorLoader = { _, _, _, _ ->
+                    genericCalled = true
+                    false
+                },
+                mediaLinkProbe = { it }
+            )
+
+            assertTrue(session.resolve(playerUrl, providerUrl))
+            assertFalse(genericCalled)
+            assertEquals(media, links.single().url)
+            assertEquals(ExtractorLinkType.M3U8, links.single().type)
+        }
+
+    @Test
     fun `link session exchanges token blob and emits signed mp4 without generic fallback`() =
         runBlocking {
             val media =

@@ -69,6 +69,7 @@ class KuramanimeProvider : MainAPI() {
         val anchor = KuramanimeParser.catalogAnchor(this) ?: return null
         val href = animeUrl(anchor.attr("href")) ?: return null
         val title = anchor.text().trim().takeIf { it.isNotBlank() } ?: return null
+        if (SensitiveContentPolicy.isBlocked(title, href)) return null
         val poster = fixUrlNull(
             selectFirst("div.product__item__pic")?.attr("data-setbg")
                 ?: ProviderHtmlParser.firstImageSource(this)
@@ -84,6 +85,7 @@ class KuramanimeProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val requestUrl = animeUrl(url) ?: return null
+        if (SensitiveContentPolicy.isBlocked(null, requestUrl)) return null
         val fetch = getProviderPage(requestUrl) ?: return null
         if (
             fetch.code !in 200..299 ||
@@ -100,6 +102,7 @@ class KuramanimeProvider : MainAPI() {
         val tags = document.select(
             ".anime__details__widget li:contains(Genre:) a, a[href*='/properties/genre/']"
         ).map { it.text().trim() }.filter(String::isNotBlank).distinct()
+        if (SensitiveContentPolicy.isBlocked(title, requestUrl, categories = tags)) return null
         val metadataText = document.select(".anime__details__widget").text()
         val year = Regex("""(?:19|20)\d{2}""").find(metadataText)?.value?.toIntOrNull()
         val status = when {
@@ -126,11 +129,20 @@ class KuramanimeProvider : MainAPI() {
                 pageEpisodes.forEach { (episodeUrl, label) ->
                     val number = Regex("""\d+(?:[.,]\d+)?""").find(label)?.value
                         ?.replace(',', '.')?.toDoubleOrNull()?.toInt()
-                    episodes += newEpisode(episodeUrl) {
-                        episode = number
-                        name = label
-                        posterUrl = poster
-                    }
+                    episodes += newEpisode(
+                        AnimePlaybackDataCodec.encode(
+                            url = episodeUrl,
+                            title = label,
+                            categories = tags,
+                            detailUrl = requestUrl
+                        ),
+                        initializer = {
+                            episode = number
+                            name = label
+                            posterUrl = poster
+                        },
+                        fix = false
+                    )
                 }
             }
         }
@@ -147,6 +159,7 @@ class KuramanimeProvider : MainAPI() {
             val href = animeUrl(anchor.attr("href")) ?: return@mapNotNull null
             val recommendationTitle = anchor.selectFirst("h5")?.text()?.trim()
                 ?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+            if (SensitiveContentPolicy.isBlocked(recommendationTitle, href)) return@mapNotNull null
             newAnimeSearchResponse(recommendationTitle, href, TvType.Anime) {
                 posterUrl = fixUrlNull(
                     anchor.selectFirst(".product__sidebar__view__item")?.attr("data-setbg")
@@ -172,11 +185,28 @@ class KuramanimeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val pageUrl = episodeUrl(data) ?: return false
+        val playback = AnimePlaybackDataCodec.decode(data)
+        if (AnimePlaybackDataCodec.isBlocked(data)) return false
+        val pageUrl = episodeUrl(playback?.url ?: data) ?: return false
+        if (SensitiveContentPolicy.isBlocked(null, pageUrl)) return false
         val response = getProviderPage(pageUrl) ?: return false
         if (
             response.code !in 200..299 ||
             ProviderHtmlParser.isNonContentPage(response.body)
+        ) return false
+        val episodeDocument = Jsoup.parse(response.body, response.url)
+        val episodeTitle = episodeDocument.selectFirst("h1, .anime__details__title h3")
+            ?.text()
+        val episodeTags = episodeDocument.select(
+            ".anime__details__widget li:contains(Genre:) a, " +
+                ".anime__details__widget a[href*='/properties/genre/']"
+        ).map { it.text().trim() }
+        if (
+            SensitiveContentPolicy.isBlocked(
+                episodeTitle,
+                response.url,
+                categories = episodeTags
+            )
         ) return false
         val staticCandidates = KuramanimeParser.playerUrls(response.body, response.url)
         val hydratedCandidates = fetchHydratedCandidates(response)

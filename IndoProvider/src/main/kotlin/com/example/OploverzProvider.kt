@@ -37,14 +37,17 @@ class OploverzProvider : MainAPI() {
                 "X-Requested-With" to "XMLHttpRequest"
             )
         ).text
-        return OploverzSearchParser.parse(json).map { item ->
+        return OploverzSearchParser.parse(json).mapNotNull { item ->
             val type = if (item.title.contains("Movie", ignoreCase = true)) {
                 TvType.AnimeMovie
             } else {
                 TvType.Anime
             }
+            val title = item.title.cleanOploverzTitle()
+            val detailUrl = "$mainUrl/${item.slug}/"
+            if (SensitiveContentPolicy.isBlocked(title, detailUrl)) return@mapNotNull null
             val poster = "$mainUrl/assets/covers/${item.image.replace(" ", "%20")}"
-            newAnimeSearchResponse(item.title.cleanOploverzTitle(), "$mainUrl/${item.slug}/", type) {
+            newAnimeSearchResponse(title, detailUrl, type) {
                 posterUrl = poster
             }
         }
@@ -62,6 +65,8 @@ class OploverzProvider : MainAPI() {
             ?: selectFirst("img")?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
             ?: attr("title").trim().takeIf { it.isNotBlank() }
             ?: return null
+        val cleanTitle = title.cleanOploverzTitle()
+        if (SensitiveContentPolicy.isBlocked(cleanTitle, href)) return null
         val poster = fixUrlNull(ProviderHtmlParser.imageSource(selectFirst("img")))
         val episode = Regex("""(?:Episode|Ep\.?)[\s-]*(\d+)""", RegexOption.IGNORE_CASE)
             .find(selectFirst(".eplist")?.text().orEmpty())
@@ -74,13 +79,14 @@ class OploverzProvider : MainAPI() {
             TvType.Anime
         }
 
-        return newAnimeSearchResponse(title.cleanOploverzTitle(), href, type) {
+        return newAnimeSearchResponse(cleanTitle, href, type) {
             posterUrl = poster
             addSub(episode)
         }
     }
 
     override suspend fun load(url: String): LoadResponse? {
+        if (SensitiveContentPolicy.isBlocked(null, url)) return null
         val document = app.get(url).document
         val rawTitle = document.selectFirst("h1.entry-title, meta[property=og:title]")
             ?.let { if (it.tagName() == "meta") it.attr("content") else it.text() }
@@ -107,6 +113,7 @@ class OploverzProvider : MainAPI() {
             .map { it.text().trim() }
             .filter { it.isNotBlank() }
             .distinct()
+        if (SensitiveContentPolicy.isBlocked(title, url, categories = tags)) return null
         val status = when {
             infoText.contains("Completed", ignoreCase = true) ||
                 infoText.contains("Tamat", ignoreCase = true) -> ShowStatus.Completed
@@ -122,11 +129,22 @@ class OploverzProvider : MainAPI() {
                     ?.groupValues
                     ?.getOrNull(1)
                     ?.toIntOrNull()
-                newEpisode(href) {
-                    name = label.ifBlank { episodeNumber?.let { "Episode $it" } ?: "Episode" }
-                    episode = episodeNumber
-                    posterUrl = poster
-                }
+                newEpisode(
+                    AnimePlaybackDataCodec.encode(
+                        url = href,
+                        title = label.ifBlank { title },
+                        categories = tags,
+                        detailUrl = url
+                    ),
+                    initializer = {
+                        name = label.ifBlank {
+                            episodeNumber?.let { "Episode $it" } ?: "Episode"
+                        }
+                        episode = episodeNumber
+                        posterUrl = poster
+                    },
+                    fix = false
+                )
             }
             .distinctBy { it.data }
         val type = if (title.contains("Movie", ignoreCase = true) ||
@@ -138,10 +156,21 @@ class OploverzProvider : MainAPI() {
         }
 
         val playableEpisodes = episodes.ifEmpty {
-            listOf(newEpisode(url) {
-                name = title
-                posterUrl = poster
-            })
+            listOf(
+                newEpisode(
+                    AnimePlaybackDataCodec.encode(
+                        url = url,
+                        title = title,
+                        categories = tags,
+                        detailUrl = url
+                    ),
+                    initializer = {
+                        name = title
+                        posterUrl = poster
+                    },
+                    fix = false
+                )
+            )
         }
         return newAnimeLoadResponse(title, url, type) {
             posterUrl = poster
@@ -159,14 +188,24 @@ class OploverzProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val playback = AnimePlaybackDataCodec.decode(data)
+        if (AnimePlaybackDataCodec.isBlocked(data)) return false
+        val pageUrl = playback?.url ?: data
+        if (SensitiveContentPolicy.isBlocked(null, pageUrl)) return false
         val fetch = try {
-            app.get(data, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
+            app.get(pageUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
             return false
         }
         val document = fetch.document
+        val pageTitle = document.selectFirst("h1.entry-title, meta[property=og:title]")
+            ?.let { if (it.tagName() == "meta") it.attr("content") else it.text() }
+        val pageTags = document
+            .select(".infopost a[href*='/genres/'], .infopost a[href*='/genre/']")
+            .map { it.text().trim() }
+        if (SensitiveContentPolicy.isBlocked(pageTitle, fetch.url, categories = pageTags)) return false
         val resolver = LinkResolutionSession(
             this,
             subtitleCallback,

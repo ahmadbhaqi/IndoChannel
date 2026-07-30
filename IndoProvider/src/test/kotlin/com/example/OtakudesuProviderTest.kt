@@ -12,6 +12,29 @@ import org.jsoup.Jsoup
 
 class OtakudesuProviderTest {
     @Test
+    fun `metadata parser finds genres by label after rows are reordered`() {
+        val document = Jsoup.parse(
+            """
+                <div class="infozingle">
+                  <p><b>Status</b>: <span>Ongoing</span></p>
+                  <p><b>Genre</b>:
+                    <span>
+                      <a href="/genres/action/">Action</a>
+                      <a href="/genres/adventure/">Adventure</a>
+                    </span>
+                  </p>
+                  <p><b>Judul</b>: <span>Example</span></p>
+                </div>
+            """.trimIndent()
+        )
+
+        assertEquals(
+            listOf("Action", "Adventure"),
+            OtakudesuMetadata.categories(document)
+        )
+    }
+
+    @Test
     fun `episode parser keeps only real same-host episode links across all lists`() {
         val document = Jsoup.parse(
             """
