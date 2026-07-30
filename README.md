@@ -21,8 +21,6 @@ IndoChannel adalah repositori ekstensi komunitas untuk CloudStream yang menghadi
 | Pusatfilm        |            |
 | keBioskop21      |            |
 
-Provider tambahan ditempatkan di awal masing-masing kelompok dan diurutkan dari estimasi trafik publik tertinggi yang tersedia pada 2026.
-
 ## Instalasi
 
 [![Install Repository in CloudStream](https://img.shields.io/badge/Install%20Repository-CloudStream-5c6bc0?style=for-the-badge&logo=android&logoColor=white)](https://self-similarity.github.io/http-protocol-redirector?r=cloudstreamrepo://raw.githubusercontent.com/ahmadbhaqi/IndoChannel/builds/repo.json)
