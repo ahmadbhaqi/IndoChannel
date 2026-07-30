@@ -1,5 +1,6 @@
 package com.example
 
+import com.lagradost.cloudstream3.TvType
 import java.io.File
 import java.net.URI
 import kotlin.test.Test
@@ -84,12 +85,56 @@ class RotatingMovieProviderRegressionTest {
     }
 
     @Test
-    fun `rotating providers also detect series from episode markup`() {
-        listOf("NgefilmProvider.kt", "PusatfilmProvider.kt", "DutamovieProvider.kt").forEach { fileName ->
+    fun `validated detail classifier never returns an empty series response`() {
+        assertEquals(
+            TvType.TvSeries,
+            RotatingMovieDetailClassifier.classify(
+                "https://provider.example/tv/current-show/",
+                validatedEpisodeCount = 2
+            )
+        )
+        assertEquals(
+            null,
+            RotatingMovieDetailClassifier.classify(
+                "https://provider.example/tv/current-show/",
+                validatedEpisodeCount = 0
+            )
+        )
+        assertEquals(
+            TvType.Movie,
+            RotatingMovieDetailClassifier.classify(
+                "https://provider.example/movie/current-movie/",
+                validatedEpisodeCount = 0
+            )
+        )
+        assertEquals(
+            TvType.TvSeries,
+            RotatingMovieDetailClassifier.classify(
+                "https://provider.example/movie/mislabeled-show/",
+                validatedEpisodeCount = 1
+            )
+        )
+    }
+
+    @Test
+    fun `popular providers use the validated detail classifier`() {
+        listOf(
+            "NgefilmProvider.kt",
+            "PusatfilmProvider.kt",
+            "DutamovieProvider.kt",
+            "KawanfilmProvider.kt",
+            "SarangfilmProvider.kt"
+        ).forEach { fileName ->
             val provider = File(sourceRoot, fileName).readText()
             assertTrue(
-                provider.contains("episodeElements.isNotEmpty()"),
-                "$fileName must classify series pages even when their URL has no tv segment"
+                provider.contains(
+                    "RotatingMovieDetailClassifier.classify(canonicalUrl, episodes.size)"
+                ),
+                "$fileName must classify details from the validated episode count"
+            )
+            assertFalse(
+                provider.contains("canonicalUrl.contains(\"/tv/\""),
+                "$fileName must not return an empty series based on its URL alone"
             )
         }
     }
@@ -161,6 +206,30 @@ class RotatingMovieProviderRegressionTest {
                 "$fileName must use the shared, directly tested episode mapper"
             )
         }
+    }
+
+    @Test
+    fun `shared episode mapper rejects navigation links without episode identity`() {
+        val provider = PusatfilmProvider()
+
+        assertEquals(
+            null,
+            DutamoviePlayerParser.newEpisode(
+                provider,
+                "https://v4.pusatfilm21info.com/aduan-masyarakat/",
+                "Aduan masyarakat",
+                null
+            )
+        )
+        assertEquals(
+            null,
+            DutamoviePlayerParser.newEpisode(
+                provider,
+                "https://t.me/pusatfilm",
+                "Telegram",
+                null
+            )
+        )
     }
 
     @Test
@@ -247,6 +316,8 @@ class RotatingMovieProviderRegressionTest {
             ),
             MorenciusPlayerParser.mediaUrls(html, playerUrl)
         )
+        assertTrue(MorenciusPlayerParser.supports("odvidhide.com"))
+        assertTrue(MorenciusPlayerParser.supports("embed.odvidhide.com"))
     }
 
     @Test

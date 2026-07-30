@@ -2,6 +2,7 @@ package com.example
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import java.net.URI
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
@@ -200,6 +201,41 @@ class KuramanimeProvider : MainAPI() {
     ): KuramanimeCandidateBatch? {
         return try {
             val document = Jsoup.parse(response.body, response.url)
+            val pageMetadata = KuramanimeBootstrap.pageMetadata(document, response.url)
+                ?: return null
+            val checkUrl = providerAssetUrl(pageMetadata.checkUrl, response.url)
+                ?: return null
+            val checkResponse = getProviderAsset(
+                checkUrl,
+                response.url,
+                response.url,
+                KURAMANIME_TOKEN_BODY_LIMIT_BYTES
+            ) ?: return null
+            if (
+                checkResponse.code !in 200..299 ||
+                ProviderHtmlParser.isNonContentPage(checkResponse.body)
+            ) return null
+            val checkedPage = KuramanimeBootstrap.checkPageValue(checkResponse.body)
+                ?: return null
+            val secureLoaderUrl = providerAssetUrl(
+                pageMetadata.secureLoaderUrl,
+                response.url
+            ) ?: return null
+            val secureLoaderResponse = getProviderAsset(
+                secureLoaderUrl,
+                response.url,
+                response.url,
+                KURAMANIME_SCRIPT_BODY_LIMIT_BYTES
+            ) ?: return null
+            if (
+                secureLoaderResponse.code !in 200..299 ||
+                ProviderHtmlParser.isNonContentPage(secureLoaderResponse.body)
+            ) return null
+            val secureLoaderAuthorization =
+                KuramanimeBootstrap.secureLoaderAuthorization(
+                    secureLoaderResponse.body,
+                    secureLoaderUrl
+                ) ?: return null
             val directConfigurationUrl = document
                 .select("script.js__var[src]")
                 .mapNotNull { providerAssetUrl(it.attr("src"), response.url) }
@@ -258,14 +294,21 @@ class KuramanimeProvider : MainAPI() {
                 ProviderHtmlParser.isNonContentPage(tokenResponse.body)
             ) return null
             val token = KuramanimeBootstrap.tokenValue(tokenResponse.body) ?: return null
-            val hydratedUrl = KuramanimeBootstrap.hydratedPageUrl(
-                response.url,
-                token,
-                configuration
-            )?.let(::networkProviderUrl)
+            val hydrationRequest = KuramanimeBootstrap.hydrationRequest(
+                episodeUrl = response.url,
+                accessToken = token,
+                configuration = configuration,
+                page = checkedPage,
+                secureLoaderAuthorization = secureLoaderAuthorization,
+                csrfToken = pageMetadata.csrfToken
+            ) ?: return null
+            val hydratedUrl = networkProviderUrl(hydrationRequest.url)
                 ?: return null
-            val hydratedResponse = getProviderPage(
-                hydratedUrl,
+            val hydratedResponse = postProviderPage(
+                url = hydratedUrl,
+                form = hydrationRequest.form,
+                headers = hydrationRequest.headers,
+                cookies = hydrationRequest.cookies,
                 referer = response.url,
                 timeoutSeconds = KURAMANIME_BOOTSTRAP_TIMEOUT_SECONDS
             ) ?: return null
@@ -273,11 +316,12 @@ class KuramanimeProvider : MainAPI() {
                 hydratedResponse.code !in 200..299 ||
                 ProviderHtmlParser.isNonContentPage(hydratedResponse.body)
             ) return null
+            val hydratedUrls = KuramanimeParser.playerUrls(
+                hydratedResponse.body,
+                hydratedResponse.url
+            )
             KuramanimeCandidateBatch(
-                urls = KuramanimeParser.playerUrls(
-                    hydratedResponse.body,
-                    hydratedResponse.url
-                ),
+                urls = hydratedUrls,
                 referer = hydratedResponse.url
             )
         } catch (error: CancellationException) {
@@ -318,6 +362,29 @@ class KuramanimeProvider : MainAPI() {
             referer = referer,
             maxBodyBytes = maxBodyBytes,
             timeoutSeconds = KURAMANIME_BOOTSTRAP_TIMEOUT_SECONDS
+        )
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        null
+    }
+
+    private suspend fun postProviderPage(
+        url: String,
+        form: Map<String, String>,
+        headers: Map<String, String>,
+        cookies: Map<String, String>,
+        referer: String,
+        timeoutSeconds: Long
+    ): ProviderHttpResult? = try {
+        safeHttp.postForm(
+            url = url,
+            form = form,
+            normalizer = ProviderUrlNormalizer(::networkProviderUrl),
+            headers = headers,
+            referer = referer,
+            cookies = cookies,
+            timeoutSeconds = timeoutSeconds
         )
     } catch (error: CancellationException) {
         throw error
@@ -505,13 +572,82 @@ internal data class KuramanimeBootstrapConfig(
     val streamServerKey: String
 )
 
+internal data class KuramanimePageMetadata(
+    val checkUrl: String,
+    val secureLoaderUrl: String,
+    val csrfToken: String
+)
+
+internal data class KuramanimeHydrationRequest(
+    val url: String,
+    val form: Map<String, String>,
+    val headers: Map<String, String>,
+    val cookies: Map<String, String>
+)
+
 internal object KuramanimeBootstrap {
     private const val MAX_SCRIPT_SIZE = 262_144
+    private const val BROWSER_USER_AGENT =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     private val safeRouteValue = Regex("""^[A-Za-z0-9_./-]{1,256}$""")
     private val safeIdentifier = Regex("""^[A-Za-z_][A-Za-z0-9_]{0,127}$""")
     private val safeToken = Regex("""^[A-Za-z0-9_-]{1,256}$""")
+    private val safeSecureLoaderAuthorization = Regex("""^[A-Za-z0-9_-]{20,128}$""")
+    private val safeCsrfToken = Regex("""^[A-Za-z0-9_-]{8,256}$""")
+    private val knownSecureLoaderAuthorizations = mapOf(
+        "1448" to "kJuHHkaqcBFXiGMHQf6bJw8YAyDcwGD8Ur"
+    )
     private const val REQUEST_ID_ALPHABET =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+    fun pageMetadata(document: Document, pageUrl: String): KuramanimePageMetadata? {
+        val checkUrl = ProviderHtmlParser.absoluteUrl(
+            document.selectFirst("#checkEp[value]")?.attr("value"),
+            pageUrl
+        )?.takeIf(::isSafeRemoteHttpUrl) ?: return null
+        val secureLoaderUrl = ProviderHtmlParser.absoluteUrl(
+            document.selectFirst("#tokenAuthJs[value]")?.attr("value"),
+            pageUrl
+        )?.takeIf(::isSafeRemoteHttpUrl) ?: return null
+        val csrfToken = document.selectFirst("meta[name=csrf-token][content]")
+            ?.attr("content")
+            ?.trim()
+            ?.takeIf(safeCsrfToken::matches)
+            ?: return null
+        return KuramanimePageMetadata(
+            checkUrl = checkUrl,
+            secureLoaderUrl = secureLoaderUrl,
+            csrfToken = csrfToken
+        )
+    }
+
+    fun checkPageValue(raw: String?): Int? {
+        val value = raw?.trim()?.removeSurrounding("\"")?.trim()
+            ?.takeIf { Regex("""^\d{1,5}$""").matches(it) }
+            ?: return null
+        return value.toIntOrNull()?.takeIf { it in 1..10_000 }
+    }
+
+    fun secureLoaderAuthorization(script: String, loaderUrl: String): String? {
+        if (script.isBlank() || script.length > MAX_SCRIPT_SIZE) return null
+        val explicit = listOf(
+            Regex(
+                """(?i)\bauthorization\s*[:=]\s*["']([A-Za-z0-9_-]{20,128})["']"""
+            ),
+            Regex("""(?i)\bBearer\s+([A-Za-z0-9_-]{20,128})""")
+        ).firstNotNullOfOrNull { pattern ->
+            pattern.find(script)?.groupValues?.getOrNull(1)
+        }
+        if (explicit != null) return explicit.takeIf(safeSecureLoaderAuthorization::matches)
+        val version = Regex("""(?:[?&])v=(\d{1,8})(?:&|$)""")
+            .find(loaderUrl)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?: return null
+        return knownSecureLoaderAuthorizations[version]
+            ?.takeIf(safeSecureLoaderAuthorization::matches)
+    }
 
     fun configurationScriptUrl(script: String, bootstrapUrl: String): String? {
         if (script.isBlank() || script.length > MAX_SCRIPT_SIZE) return null
@@ -583,12 +719,14 @@ internal object KuramanimeBootstrap {
     fun hydratedPageUrl(
         episodeUrl: String,
         token: String,
-        configuration: KuramanimeBootstrapConfig
+        configuration: KuramanimeBootstrapConfig,
+        page: Int = 1
     ): String? {
         if (!isSafeRemoteHttpUrl(episodeUrl) || tokenValue(token) == null) return null
         if (
             !safeIdentifier.matches(configuration.pageTokenKey) ||
-            !safeIdentifier.matches(configuration.streamServerKey)
+            !safeIdentifier.matches(configuration.streamServerKey) ||
+            page !in 1..10_000
         ) return null
         val withoutFragment = episodeUrl.substringBefore('#')
         val separator = if ('?' in withoutFragment) '&' else '?'
@@ -600,8 +738,42 @@ internal object KuramanimeBootstrap {
             append(encode(token))
             append('&')
             append(configuration.streamServerKey)
-            append("=kuramadrive&page=1")
+            append("=kuramadrive&page=")
+            append(page)
         }
+    }
+
+    fun hydrationRequest(
+        episodeUrl: String,
+        accessToken: String,
+        configuration: KuramanimeBootstrapConfig,
+        page: Int,
+        secureLoaderAuthorization: String,
+        csrfToken: String
+    ): KuramanimeHydrationRequest? {
+        val authorization = secureLoaderAuthorization.trim()
+            .takeIf(safeSecureLoaderAuthorization::matches)
+            ?: return null
+        val csrf = csrfToken.trim().takeIf(safeCsrfToken::matches) ?: return null
+        val url = hydratedPageUrl(episodeUrl, accessToken, configuration, page)
+            ?: return null
+        val origin = runCatching {
+            val uri = URI(url)
+            val port = uri.port.takeIf { it >= 0 }?.let { ":$it" }.orEmpty()
+            "${uri.scheme}://${uri.host}$port"
+        }.getOrNull()?.takeIf(::isSafeRemoteHttpUrl) ?: return null
+        return KuramanimeHydrationRequest(
+            url = url,
+            form = mapOf("authorization" to authorization),
+            headers = mapOf(
+                "X-CSRF-TOKEN" to csrf,
+                "X-Requested-With" to "XMLHttpRequest",
+                "Accept" to "text/html, */*; q=0.01",
+                "Origin" to origin,
+                "User-Agent" to BROWSER_USER_AGENT
+            ),
+            cookies = emptyMap()
+        )
     }
 
     fun requestId(): String = buildString(6) {

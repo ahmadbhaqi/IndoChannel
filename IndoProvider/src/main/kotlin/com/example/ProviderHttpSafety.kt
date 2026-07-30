@@ -462,8 +462,12 @@ internal class NiceHttpProviderFetcher(
             .build()
         val pinnedRequests = Requests().apply {
             baseClient = pinnedClient
+            defaultHeaders = emptyMap()
         }
-        val combinedHeaders = inheritedSafeHeaders(requests.defaultHeaders) + request.headers
+        val combinedHeaders = mergeProviderRequestHeaders(
+            requests.defaultHeaders,
+            request.headers
+        )
         val explicitHeaderReferer = combinedHeaders.entries
             .lastOrNull { it.key.equals("Referer", ignoreCase = true) }
             ?.value
@@ -633,6 +637,17 @@ private fun String.toOriginOnlyReferer(): String? {
 
 private fun inheritedSafeHeaders(headers: Map<String, String>): Map<String, String> =
     headers.filterKeys(String::isSafeCrossOriginHeader)
+
+internal fun mergeProviderRequestHeaders(
+    inherited: Map<String, String>,
+    explicit: Map<String, String>
+): Map<String, String> = linkedMapOf<String, String>().apply {
+    putAll(inheritedSafeHeaders(inherited))
+    explicit.forEach { (name, value) ->
+        keys.firstOrNull { it.equals(name, ignoreCase = true) }?.let(::remove)
+        put(name, value)
+    }
+}
 
 private fun String.isSafeCrossOriginHeader(): Boolean =
     equals("Accept", ignoreCase = true) ||

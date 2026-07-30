@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import java.net.URI
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
@@ -36,7 +37,7 @@ class RotatingMovieProvidersLiveTest {
             org.junit.Assume.assumeTrue(false)
             return@runBlocking
         }
-        verify(DutamovieProvider(), "https://restaurantesabadell.com/lunok-2026/")
+        verify(DutamovieProvider(), "https://cowboysgab.com/lunok-2026/")
     }
 
     @Test
@@ -75,15 +76,22 @@ class RotatingMovieProvidersLiveTest {
                     ).code
                 }
             }.getOrNull()
-            probes[link.url] = code
+            probes[link.url.safeHost()] = code
             if (code in 200..299) break
         }
 
-        println("${provider.name} loaded=$loaded links=${links.map { it.url }} probes=$probes")
+        println(
+            "${provider.name} loaded=$loaded " +
+                "linkHosts=${links.map { it.url.safeHost() }} probes=$probes"
+        )
         assertTrue(loaded && links.isNotEmpty(), "${provider.name} emitted no concrete media link")
         assertTrue(
             probes.values.any { it in 200..299 },
             "${provider.name} emitted no reachable media link: $probes"
         )
     }
+
+    private fun String.safeHost(): String = runCatching {
+        URI(this).host?.takeIf(String::isNotBlank) ?: "opaque"
+    }.getOrDefault("opaque")
 }

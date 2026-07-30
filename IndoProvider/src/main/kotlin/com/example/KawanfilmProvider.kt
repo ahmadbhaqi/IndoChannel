@@ -111,20 +111,15 @@ class KawanfilmProvider : MainAPI() {
         val recommendations = document.select("article.item.col-md-20, article.item")
             .mapNotNull { it.toSearchResult() }
         val episodeLinks = document.select("div.vid-episodes a[href], div.gmr-listseries a[href]")
-        val isSeries = canonicalUrl.contains("/tv/", ignoreCase = true) || episodeLinks.isNotEmpty()
+        val episodes = episodeLinks.mapNotNull { link ->
+            val href = providerUrl(link.attr("href")) ?: return@mapNotNull null
+            val label = link.attr("title").ifBlank { link.text() }.trim()
+            DutamoviePlayerParser.newEpisode(this, href, label, poster)
+        }.distinctBy { it.data }
+        val tvType = RotatingMovieDetailClassifier.classify(canonicalUrl, episodes.size)
+            ?: throw ErrorLoadingException("Tautan episode belum tersedia")
 
-        return if (isSeries) {
-            val episodes = episodeLinks.mapNotNull { link ->
-                val href = providerUrl(link.attr("href")) ?: return@mapNotNull null
-                val label = link.text().trim()
-                val (seasonNumber, episodeNumber) = PopularProviderEpisodeParser.position(label)
-                newEpisode(href) {
-                    episode = episodeNumber
-                    season = seasonNumber
-                    name = episodeNumber?.let { "Episode $it" } ?: label
-                    posterUrl = poster
-                }
-            }
+        return if (tvType == TvType.TvSeries) {
             newTvSeriesLoadResponse(title, canonicalUrl, TvType.TvSeries, episodes) {
                 posterUrl = poster
                 this.year = year

@@ -9,6 +9,40 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
+internal object AnimasuCatalogRouting {
+    const val FAST_TIMEOUT_SECONDS = 20L
+    const val DEFAULT_TIMEOUT_SECONDS = 35L
+
+    fun pageUrl(mainUrl: String, page: Int, requestData: String): String {
+        val baseUrl = mainUrl.trimEnd('/')
+        val safePage = page.coerceAtLeast(1)
+        return if (safePage == 1 && requestData == "urutan=update") {
+            "$baseUrl/"
+        } else {
+            "$baseUrl/pencarian/?$requestData&halaman=$safePage"
+        }
+    }
+
+    fun pageUrls(mainUrl: String, page: Int, requestData: String): List<String> {
+        val primary = pageUrl(mainUrl, page, requestData)
+        if (page.coerceAtLeast(1) != 1 || requestData != "urutan=update") {
+            return listOf(primary)
+        }
+        val fallback = "${mainUrl.trimEnd('/')}/pencarian/?" +
+            "$requestData&halaman=1"
+        return listOf(primary, fallback).distinct()
+    }
+
+    fun timeoutSeconds(index: Int, candidateCount: Int): Long {
+        require(candidateCount > 0 && index in 0 until candidateCount)
+        return if (index == 0 && candidateCount > 1) {
+            FAST_TIMEOUT_SECONDS
+        } else {
+            DEFAULT_TIMEOUT_SECONDS
+        }
+    }
+}
+
 class AnimasuProvider : MainAPI() {
     override var mainUrl = "https://v2.animasu.work"
     override var name = "Animasu"
@@ -37,18 +71,22 @@ class AnimasuProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val fetch = getProviderPage(
-            "$mainUrl/pencarian/?${request.data}&halaman=${page.coerceAtLeast(1)}"
-        ) ?: return newHomePageResponse(request.name, emptyList())
-        if (
-            fetch.code !in 200..299 ||
-            ProviderHtmlParser.isNonContentPage(fetch.body)
-        ) return newHomePageResponse(request.name, emptyList())
-        val document = Jsoup.parse(fetch.body, fetch.url)
-        return newHomePageResponse(
-            request.name,
-            document.select("div.listupd div.bs").mapNotNull { it.toSearchResult() }
-        )
+        val urls = AnimasuCatalogRouting.pageUrls(mainUrl, page, request.data)
+        for ((index, url) in urls.withIndex()) {
+            val timeoutSeconds = AnimasuCatalogRouting.timeoutSeconds(index, urls.size)
+            val fetch = getProviderPage(url, timeoutSeconds) ?: continue
+            if (
+                fetch.code !in 200..299 ||
+                ProviderHtmlParser.isNonContentPage(fetch.body)
+            ) continue
+            val items = Jsoup.parse(fetch.body, fetch.url)
+                .select("div.listupd div.bs")
+                .mapNotNull { it.toSearchResult() }
+            if (items.isNotEmpty()) {
+                return newHomePageResponse(request.name, items)
+            }
+        }
+        return newHomePageResponse(request.name, emptyList())
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -155,11 +193,14 @@ class AnimasuProvider : MainAPI() {
         return resolver.loaded
     }
 
-    private suspend fun getProviderPage(url: String): ProviderHttpResult? = try {
+    private suspend fun getProviderPage(
+        url: String,
+        timeoutSeconds: Long = AnimasuCatalogRouting.DEFAULT_TIMEOUT_SECONDS
+    ): ProviderHttpResult? = try {
         safeHttp.get(
             url = url,
             normalizer = ProviderUrlNormalizer(::networkProviderUrl),
-            timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
+            timeoutSeconds = timeoutSeconds
         )
     } catch (error: CancellationException) {
         throw error

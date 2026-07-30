@@ -7,9 +7,8 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.loadExtractor
-import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.runBlocking
+import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -29,12 +28,15 @@ internal object OtakudesuEpisodeParser {
         "(?i)(?:^|[-/_.])(?:episode|eps?|ep)[-_.]*(\\d+)(?=$|[-/_.])"
     )
 
-    fun episodes(document: Document): List<OtakudesuEpisodeEntry> =
+    fun episodes(
+        document: Document,
+        providerBaseUri: String = document.baseUri()
+    ): List<OtakudesuEpisodeEntry> =
         document.select("div.episodelist ul > li a")
             .mapNotNull { link ->
                 val href = link.attr("href").trim().takeIf(String::isNotBlank)
                     ?: return@mapNotNull null
-                if (!isProviderEpisodeLink(href, document.baseUri())) {
+                if (!isProviderEpisodeLink(href, providerBaseUri)) {
                     return@mapNotNull null
                 }
                 val label = link.attr("title").ifBlank { link.text() }
@@ -67,6 +69,42 @@ internal object OtakudesuEpisodeParser {
         }.getOrDefault(false)
 }
 
+internal fun ExtractorLink.withOtakudesuQuality(explicitQuality: Int): ExtractorLink = apply {
+    if (explicitQuality != Qualities.Unknown.value) {
+        quality = explicitQuality
+    }
+}
+
+internal object OtakudesuPlaybackScheduler {
+    suspend fun resolve(
+        mirrors: Iterable<OtakudesuProvider.ResponseSources>,
+        canContinue: () -> Boolean,
+        playerSources: suspend (OtakudesuProvider.ResponseSources) -> Iterable<String>,
+        sourceResolver: suspend (String, Int) -> Boolean
+    ): Boolean {
+        var loaded = false
+        for (mirror in mirrors) {
+            if (!canContinue()) break
+            val quality = ServerLinkLabelFormatter.resolution(
+                Qualities.Unknown.value,
+                mirror.q
+            ) ?: Qualities.Unknown.value
+            val sources = try {
+                playerSources(mirror)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                continue
+            }
+            for (source in sources.distinct()) {
+                if (!canContinue()) break
+                loaded = sourceResolver(source, quality) || loaded
+            }
+        }
+        return loaded
+    }
+}
+
 class OtakudesuProvider : MainAPI() {
     override var mainUrl = "https://otakudesu.blog/"
     override var name = "Otakudesu"
@@ -74,10 +112,16 @@ class OtakudesuProvider : MainAPI() {
     override var lang = "id"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
+    private val safeHttp by lazy {
+        ProviderHttpSafetyClient(NiceHttpProviderFetcher(app))
+    }
 
     companion object {
         const val acefile = "https://acefile.co"
         val mirrorBlackList = arrayOf("Mega", "MegaUp", "Otakufiles")
+        private const val OTAKUDESU_PLAYBACK_TIMEOUT_MS = 60_000L
+        private const val OTAKUDESU_PAGE_BODY_LIMIT_BYTES = 1_000_000
+        private const val OTAKUDESU_AJAX_BODY_LIMIT_BYTES = 256_000
         fun getType(t: String): TvType = if (t.contains("OVA", true) || t.contains("Special")) TvType.OVA else if (t.contains("Movie", true)) TvType.AnimeMovie else TvType.Anime
         fun getStatus(t: String): ShowStatus = when (t) { "Completed" -> ShowStatus.Completed; "Ongoing" -> ShowStatus.Ongoing; else -> ShowStatus.Completed }
     }
@@ -117,7 +161,7 @@ class OtakudesuProvider : MainAPI() {
         val year = Regex("\\d, (\\d*)").find(document.select("div.infozingle > p:nth-child(9) > span").text())?.groupValues?.get(1)?.toIntOrNull()
         val status = getStatus(document.selectFirst("div.infozingle > p:nth-child(6) > span")!!.ownText().replace(":", "").trim())
         val description = document.select("div.sinopc > p").text()
-        val episodes = OtakudesuEpisodeParser.episodes(document).map { entry ->
+        val episodes = OtakudesuEpisodeParser.episodes(document, mainUrl).map { entry ->
             newEpisode(fixUrl(entry.href)) {
                 name = "Episode ${entry.number}"
                 episode = entry.number
@@ -134,41 +178,129 @@ class OtakudesuProvider : MainAPI() {
     data class ResponseSources(@JsonProperty("id") val id: String, @JsonProperty("i") val i: String, @JsonProperty("q") val q: String)
     data class ResponseData(@JsonProperty("data") val data: String)
 
-    override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val document = app.get(data).document
-        var loaded = false
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        var emitted = false
+        return withTimeoutOrNull(OTAKUDESU_PLAYBACK_TIMEOUT_MS) {
+            loadLinksWithinBudget(
+                data,
+                subtitleCallback,
+                callback = { link ->
+                    emitted = true
+                    callback(link)
+                }
+            )
+        } ?: emitted
+    }
+
+    private suspend fun loadLinksWithinBudget(
+        data: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val requestUrl = networkProviderUrl(data) ?: return false
+        val page = safeHttp.get(
+            url = requestUrl,
+            normalizer = ProviderUrlNormalizer(::networkProviderUrl),
+            maxBodyBytes = OTAKUDESU_PAGE_BODY_LIMIT_BYTES,
+            timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
+        )
+        if (
+            page.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(page.body)
+        ) return false
+        val document = Jsoup.parse(page.body, page.url)
+        var activeQuality = Qualities.Unknown.value
+        val resolver = LinkResolutionSession(
+            this,
+            subtitleCallback,
+            callback = { link ->
+                callback(link.withOtakudesuQuality(activeQuality))
+            },
+            candidateTimeoutMs = 18_000L,
+            genericExtractorTimeoutMs = 8_000L,
+            sessionTimeoutMs = 60_000L
+        )
         try {
             val scriptData = document.select("script:containsData(action:)").lastOrNull()?.data()
-            val token = scriptData?.substringAfter("{action:\"")?.substringBefore("\"}").toString()
-            val nonce = app.post("$mainUrl/wp-admin/admin-ajax.php", data = mapOf("action" to token)).parsed<ResponseData>().data
-            val action = scriptData?.substringAfter(",action:\"")?.substringBefore("\"}").toString()
-            val mirrorData = document.select("div.mirrorstream > ul > li").mapNotNull { base64Decode(it.select("a").attr("data-content")) }.toString()
-            tryParseJson<List<ResponseSources>>(mirrorData)?.forEach { res ->
-                val sources = Jsoup.parse(base64Decode(app.post("$mainUrl/wp-admin/admin-ajax.php", data = mapOf("id" to res.id, "i" to res.i, "q" to res.q, "nonce" to nonce, "action" to action)).parsed<ResponseData>().data)).select("iframe").attr("src")
-                loaded = loadCustomExtractor(sources, data, subtitleCallback, callback, getQuality(res.q)) || loaded
-            }
-        } catch (_: Exception) {}
-        return loaded
-    }
-
-    private suspend fun loadCustomExtractor(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit, quality: Int = Qualities.Unknown.value): Boolean {
-        var loaded = false
-        val server = toPlayableUrl(url) ?: return false
-        loadExtractor(server, referer, subtitleCallback) { link ->
-            loaded = true
-            runBlocking {
-                callback.invoke(
-                    newExtractorLink(link.source, link.name, link.url, link.type) {
-                        this.referer = link.referer
-                        this.quality = quality
-                        this.headers = link.headers
-                        this.extractorData = link.extractorData
-                    }.withSimpleServerName(name)
-                )
-            }
+            val token = scriptData?.substringAfter("{action:\"")?.substringBefore("\"}")
+                ?.takeIf(String::isNotBlank) ?: return false
+            val action = scriptData.substringAfter(",action:\"").substringBefore("\"}")
+                .takeIf(String::isNotBlank) ?: return false
+            val pageUri = URI(page.url)
+            val ajaxUrl = "${pageUri.scheme}://${pageUri.rawAuthority}/wp-admin/admin-ajax.php"
+            val ajaxNormalizer = ProviderUrlNormalizer(::networkProviderUrl)
+            val nonceResponse = safeHttp.postForm(
+                url = ajaxUrl,
+                form = mapOf("action" to token),
+                normalizer = ajaxNormalizer,
+                referer = page.url,
+                headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                maxBodyBytes = OTAKUDESU_AJAX_BODY_LIMIT_BYTES,
+                timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
+            )
+            if (nonceResponse.code !in 200..299) return false
+            val nonce = tryParseJson<ResponseData>(nonceResponse.body)
+                ?.data?.takeIf(String::isNotBlank) ?: return false
+            val mirrors = document.select("div.mirrorstream a[data-content]")
+                .asSequence()
+                .mapNotNull { anchor ->
+                    runCatching { base64Decode(anchor.attr("data-content")) }
+                        .getOrNull()
+                        ?.let { tryParseJson<ResponseSources>(it) }
+                }
+                .distinctBy { Triple(it.id, it.i, it.q) }
+                .take(48)
+                .toList()
+            OtakudesuPlaybackScheduler.resolve(
+                mirrors = mirrors,
+                canContinue = { resolver.canContinue },
+                playerSources = { res ->
+                    val response = safeHttp.postForm(
+                        url = ajaxUrl,
+                        form = mapOf(
+                            "id" to res.id,
+                            "i" to res.i,
+                            "q" to res.q,
+                            "nonce" to nonce,
+                            "action" to action
+                        ),
+                        normalizer = ajaxNormalizer,
+                        referer = page.url,
+                        headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                        maxBodyBytes = OTAKUDESU_AJAX_BODY_LIMIT_BYTES,
+                        timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
+                    )
+                    if (response.code !in 200..299) {
+                        emptyList()
+                    } else {
+                        tryParseJson<ResponseData>(response.body)?.data
+                            ?.let { encoded ->
+                                runCatching { base64Decode(encoded) }.getOrNull()
+                            }
+                            ?.let { fragment -> Jsoup.parse(fragment, page.url) }
+                            ?.select("iframe[src]")
+                            ?.map { it.attr("src") }
+                            .orEmpty()
+                    }
+                },
+                sourceResolver = { source, quality ->
+                    activeQuality = quality
+                    resolver.resolve(source, data)
+                }
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            // A rotating AJAX mirror can fail independently of the next episode.
         }
-        return loaded
+        return resolver.loaded
     }
 
-    private fun getQuality(str: String?): Int = Regex("(\\d{3,4})[pP]").find(str ?: "")?.groupValues?.getOrNull(1)?.toIntOrNull() ?: Qualities.Unknown.value
+    private fun networkProviderUrl(raw: String?): String? =
+        ProviderHtmlParser.preserveProviderPageUrl(raw, mainUrl)
 }

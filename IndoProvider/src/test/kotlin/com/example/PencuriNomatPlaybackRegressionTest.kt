@@ -1,5 +1,6 @@
 package com.example
 
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -7,6 +8,11 @@ import kotlin.test.assertTrue
 import org.jsoup.Jsoup
 
 class PencuriNomatPlaybackRegressionTest {
+    private val sourceRoot = listOf(
+        File("src/main/kotlin/com/example"),
+        File("IndoProvider/src/main/kotlin/com/example")
+    ).first { it.exists() }
+
     @Test
     fun `pencurimovie rewrites dsvplay embeds for the registered playmogo extractor`() {
         assertEquals(
@@ -82,6 +88,45 @@ class PencuriNomatPlaybackRegressionTest {
                 "https://nomat.shop/play/nonton-awarapan-2007-subtitle-indonesia-m8x88"
             )
         )
+    }
+
+    @Test
+    fun `nomat discovers base64 server buttons on the nested player page`() {
+        val pageUrl = "https://nontonhemat.link/?id=fixture"
+        val fileMoon = "https://filemoon.sx/e/current"
+        val streamHide = "https://streamhide.to/e/current"
+        val document = Jsoup.parse(
+            """
+            <div class="server-item active" data-url="${encodeBase64NoPadding(fileMoon.toByteArray())}">
+                FMOON [1080p]
+            </div>
+            <div class="server-item" data-url="${encodeBase64NoPadding(streamHide.toByteArray())}">
+                STREAMH [1080p]
+            </div>
+            """.trimIndent(),
+            pageUrl
+        )
+
+        assertEquals(
+            listOf(fileMoon, streamHide),
+            NomatParser.playerUrls(document, pageUrl)
+        )
+    }
+
+    @Test
+    fun `nomat wires nested player discovery into the shared resolver`() {
+        val source = File(sourceRoot, "NomatProvider.kt").readText()
+
+        assertTrue(source.contains("inlineSourceParser = { html, playerUrl ->"))
+        assertTrue(source.contains("NomatParser.playerUrls(Jsoup.parse(html, playerUrl), playerUrl)"))
+    }
+
+    @Test
+    fun `otakudesu uses the bounded resolver instead of stopping at registry host aliases`() {
+        val source = File(sourceRoot, "OtakudesuProvider.kt").readText()
+
+        assertTrue(source.contains("LinkResolutionSession("))
+        assertFalse(source.contains("loadExtractor(server, referer"))
     }
 
     @Test

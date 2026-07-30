@@ -68,10 +68,14 @@ jobs:
         run: |
           cd src
           chmod +x gradlew
-          ./gradlew make makePluginsJson --project-prop=kotlin.compiler.execution.strategy=in-process -x lint --continue --no-daemon --console=plain
-          cp **/build/*.cs3 ../builds || true
+          ./gradlew make makePluginsJson --project-prop=kotlin.compiler.execution.strategy=in-process -x lint --no-daemon --console=plain
+          cp IndoProvider/build/IndoProvider.cs3 ../builds/IndoProvider.cs3
           cp **/build/*.jar ../builds || true
-          cp build/plugins.json ../builds || true
+          cp build/plugins.json ../builds/plugins.json
+          python3 scripts/verify_plugin_artifact.py \
+            --artifact ../builds/IndoProvider.cs3 \
+            --plugins ../builds/plugins.json \
+            --repository "$GITHUB_REPOSITORY"
 
       - name: Generate repo.json
         run: |

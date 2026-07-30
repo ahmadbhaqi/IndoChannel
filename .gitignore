@@ -12,3 +12,7 @@ local.properties
 .vscode
 .worktrees/
 .superpowers/sdd/
+.android-sdk-local/
+.gradle-user-home/
+.sandbox-build/
+.sandbox-gradle/

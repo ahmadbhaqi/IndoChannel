@@ -2,6 +2,7 @@ package com.example
 
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import org.jsoup.Jsoup
 import org.jsoup.parser.Parser
 import java.security.MessageDigest
 import java.net.URI
@@ -12,6 +13,10 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 internal object InlineDataParser {
+    private const val MAX_PLAYABLE_INLINE_PAGE_SIZE = 1_000_000
+    private const val MAX_PLAYABLE_INLINE_SOURCES = 48
+    private const val MAX_INERTIA_PAGE_SIZE = 1_000_000
+    private const val MAX_INERTIA_DATA_SIZE = 512_000
     private const val PLAY_SOBAT_KEY = "96fb393f57087e9333cc067bf4aa378e"
     private const val KURONIME_PASSPHRASE = "3&!Z0M,VIZ;dZW=="
     private const val KURONIME_LEGACY_PASSPHRASE = "3&!Z0M,;dZWrawa=="
@@ -81,18 +86,94 @@ internal object InlineDataParser {
 
     fun inlinePlayerUrls(html: String): List<String> = inlinePlayerSources(html).map { it.url }
 
-    fun playableInlineUrls(html: String): List<String> = inlinePlayerSources(html)
-        .filter { source ->
-            val mimeType = source.mimeType.orEmpty().lowercase()
-            val path = runCatching { URI(source.url).path.orEmpty().lowercase() }
-                .getOrDefault(source.url.substringBefore('?').lowercase())
-            path.endsWith(".m3u8") ||
-                path.endsWith(".mp4") ||
-                mimeType.contains("mpegurl") ||
-                mimeType == "hls" ||
-                mimeType.startsWith("video/")
+    fun playableInlineUrls(
+        html: String,
+        playerUrl: String? = null
+    ): List<String> {
+        if (html.isBlank() || html.length > MAX_PLAYABLE_INLINE_PAGE_SIZE) {
+            return emptyList()
         }
-        .map { it.url }
+        val inlineFallbackHtml = if (isFileDonPlayerUrl(playerUrl)) {
+            Jsoup.parse(html).apply {
+                select("[data-page]").forEach { element ->
+                    element.removeAttr("data-page")
+                }
+            }.outerHtml()
+        } else {
+            html
+        }
+        return (
+            inertiaPlaybackUrls(html, playerUrl) +
+                parseInlinePlayerSources(
+                    inlineFallbackHtml,
+                    MAX_PLAYABLE_INLINE_SOURCES,
+                    MAX_PLAYABLE_INLINE_PAGE_SIZE
+                )
+                    .filter { source ->
+                        val mimeType = source.mimeType.orEmpty().lowercase()
+                        val path = runCatching { URI(source.url).path.orEmpty().lowercase() }
+                            .getOrDefault(source.url.substringBefore('?').lowercase())
+                        path.endsWith(".m3u8") ||
+                            path.endsWith(".mp4") ||
+                            mimeType.contains("mpegurl") ||
+                            mimeType == "hls" ||
+                            mimeType.startsWith("video/")
+                    }
+                    .map { it.url }
+            )
+            .distinct()
+            .take(MAX_PLAYABLE_INLINE_SOURCES)
+    }
+
+    private fun inertiaPlaybackUrls(html: String, playerUrl: String?): List<String> {
+        if (
+            html.isBlank() ||
+            html.length > MAX_INERTIA_PAGE_SIZE ||
+            !isFileDonPlayerUrl(playerUrl)
+        ) return emptyList()
+        return Jsoup.parse(html).select("#app[data-page]")
+            .asSequence()
+            .take(1)
+            .mapNotNull { element ->
+            val data = element.attr("data-page")
+                .trim()
+                .takeIf { it.length in 1..MAX_INERTIA_DATA_SIZE }
+                ?: return@mapNotNull null
+            runCatching {
+                val page = mapper.readTree(data)
+                if (
+                    !page.path("component").asText()
+                        .equals("public/embed", ignoreCase = true)
+                ) return@runCatching null
+                val hls = sequenceOf(
+                    page.at("/props/media/hls_url").asText()
+                ).map(String::trim)
+                    .firstOrNull { it.isHlsUrl() }
+                if (hls != null) return@runCatching hls
+
+                sequenceOf(
+                    page.at("/props/url").asText()
+                ).map(String::trim)
+                    .firstOrNull { candidate ->
+                        isSafeRemoteHttpUrl(candidate) &&
+                            (isDirectHttpVideo(candidate) || candidate.isHlsUrl())
+                    }
+            }.getOrNull()
+        }.distinct().toList()
+    }
+
+    private fun isFileDonPlayerUrl(playerUrl: String?): Boolean = runCatching {
+        val uri = URI(playerUrl ?: return false)
+        val host = uri.host?.lowercase()?.removeSuffix(".") ?: return false
+        uri.scheme?.lowercase() in setOf("http", "https") &&
+            uri.userInfo == null &&
+            (host == "filedon.co" || host.endsWith(".filedon.co"))
+    }.getOrDefault(false)
+
+    private fun String.isHlsUrl(): Boolean =
+        isSafeRemoteHttpUrl(this) &&
+            runCatching { URI(this).path.orEmpty().endsWith(".m3u8", ignoreCase = true) }
+                .getOrDefault(false)
 
     fun isDirectHttpVideo(url: String): Boolean {
         return runCatching {

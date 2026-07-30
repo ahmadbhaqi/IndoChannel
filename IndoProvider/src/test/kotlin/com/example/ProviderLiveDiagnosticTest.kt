@@ -41,7 +41,7 @@ class ProviderLiveDiagnosticTest {
         }
 
         val provider = DutamovieProvider()
-        val detailUrl = "https://restaurantesabadell.com/tv/the-east-palace-2026/"
+        val detailUrl = "https://cowboysgab.com/tv/the-east-palace-2026/"
         val detail = withTimeout(45_000) { provider.load(detailUrl) }
         val episodes = (detail as? TvSeriesLoadResponse)?.episodes.orEmpty()
         assertTrue(episodes.isNotEmpty(), "Dutamovie discarded compact S1 Eps1 labels")

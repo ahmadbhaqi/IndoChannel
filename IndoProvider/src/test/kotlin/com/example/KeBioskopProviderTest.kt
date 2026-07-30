@@ -84,8 +84,12 @@ class KeBioskopProviderTest {
 
     @Test
     fun `only the exact apidrive intermediary is recognized`() {
+        assertTrue(KeBioskopPlayerOrchestrator.isIntermediary("https://streaming.kebioskop21.cfd/apidrive.php?id=1"))
+        assertTrue(KeBioskopPlayerOrchestrator.isIntermediary("https://streaming.kebioskop21.cfd:443/apidrive.php?id=1"))
         assertTrue(KeBioskopPlayerOrchestrator.isIntermediary("https://streaming.kebioskop21.pro/apidrive.php?id=1"))
         assertTrue(KeBioskopPlayerOrchestrator.isIntermediary("https://streaming.kebioskop21.pro:443/apidrive.php?id=1"))
+        assertFalse(KeBioskopPlayerOrchestrator.isIntermediary("https://streaming.evil.example/apidrive.php?id=1"))
+        assertFalse(KeBioskopPlayerOrchestrator.isIntermediary("https://cdn.kebioskop21.cfd/apidrive.php?id=1"))
         assertFalse(KeBioskopPlayerOrchestrator.isIntermediary("https://streaming.kebioskop21.pro/other.php?id=1"))
         assertFalse(KeBioskopPlayerOrchestrator.isIntermediary("https://evil.example/apidrive.php?id=1"))
         assertFalse(KeBioskopPlayerOrchestrator.isIntermediary("https://user@streaming.kebioskop21.pro/apidrive.php?id=1"))

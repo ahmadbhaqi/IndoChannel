@@ -514,6 +514,11 @@ class ProviderHtmlParserTest {
             directMediaType("https://cdn.example/video/MASTER.M3U8?token=abc")
         )
         assertEquals(
+            ExtractorLinkType.M3U8,
+            directMediaType("https://cdn.example/video/master.txt?token=abc")
+        )
+        assertNull(directMediaType("https://cdn.example/video/release-notes.txt"))
+        assertEquals(
             ExtractorLinkType.VIDEO,
             directMediaType("https://cdn.example/video/movie.mp4?download=1")
         )

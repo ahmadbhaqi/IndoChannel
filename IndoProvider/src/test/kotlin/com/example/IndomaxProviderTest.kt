@@ -201,6 +201,20 @@ class IndomaxProviderTest {
     }
 
     @Test
+    fun `imax packer accepts current master txt hls fallback but rejects ordinary text files`() {
+        val packed = """
+            <script>
+            eval(function(p,a,c,k,e,d){return p}('0={1:"2",3:"4"};',62,5,'sources|hls3|https://cdn.example/current/master.txt|notes|https://cdn.example/current/release-notes.txt'.split('|'),0,{}))
+            </script>
+        """.trimIndent()
+
+        assertEquals(
+            listOf("https://cdn.example/current/master.txt"),
+            IndomaxParser.imaxMediaUrls(packed, "https://imaxstreams.net/e/example")
+        )
+    }
+
+    @Test
     fun `external page trust requires exact https and leaves public dns validation to safety client`() {
         assertEquals(
             "https://imaxstreams.com/embed/example",

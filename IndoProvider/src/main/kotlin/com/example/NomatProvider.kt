@@ -165,7 +165,14 @@ class NomatProvider : MainAPI() {
         val fallbackRequest = providerUrl(responseUrl)?.let {
             NomatParser.fallbackRequest(document)
         }
-        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        val resolver = LinkResolutionSession(
+            this,
+            subtitleCallback,
+            callback,
+            inlineSourceParser = { html, playerUrl ->
+                NomatParser.playerUrls(Jsoup.parse(html, playerUrl), playerUrl)
+            }
+        )
         val candidates = (
             NomatParser.serverUrls(document) +
                 NomatParser.playerUrls(document, responseUrl) +
@@ -335,12 +342,15 @@ internal object NomatParser {
     }
 
     fun playerUrls(document: Document, pageUrl: String): List<String> =
-        document.select(
-            "div.video-wrapper a[href], div.video-wrapper iframe[src], " +
-                "div.video-wrapper iframe[data-src]"
-        ).flatMap { element ->
-            listOf(element.attr("href"), element.attr("data-src"), element.attr("src"))
-        }.mapNotNull { ProviderHtmlParser.absoluteUrl(it, pageUrl) }
+        (
+            serverUrls(document) +
+                document.select(
+                    "div.video-wrapper a[href], div.video-wrapper iframe[src], " +
+                        "div.video-wrapper iframe[data-src]"
+                ).flatMap { element ->
+                    listOf(element.attr("href"), element.attr("data-src"), element.attr("src"))
+                }
+            ).mapNotNull { ProviderHtmlParser.absoluteUrl(it, pageUrl) }
             .filter(::isSafeRemoteHttpUrl)
             .distinct()
 

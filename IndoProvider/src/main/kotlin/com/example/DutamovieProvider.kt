@@ -27,8 +27,12 @@ private const val MAX_DUTAMOVIE_DISCOVERY_TABS = 16
 private const val DUTAMOVIE_DISCOVERY_CONCURRENCY = 4
 
 class DutamovieProvider : MainAPI() {
-    override var mainUrl = "https://restaurantesabadell.com"
-    private val legacyHosts = setOf("austincomputerworks.org", "wavereview.com")
+    override var mainUrl = "https://cowboysgab.com"
+    private val legacyHosts = setOf(
+        "restaurantesabadell.com",
+        "austincomputerworks.org",
+        "wavereview.com"
+    )
     override var name = "Dutamovie"
     override val hasMainPage = true
     override var lang = "id"
@@ -86,28 +90,25 @@ class DutamovieProvider : MainAPI() {
         val tags = document.select("div.gmr-moviedata a").map { it.text() }
         val year = document.select("div.gmr-moviedata strong:contains(Year:) > a").text().trim().toIntOrNull()
         val episodeElements = document.select("div.vid-episodes a, div.gmr-listseries a")
-        val tvType = if (canonicalUrl.contains("/tv/") || episodeElements.isNotEmpty()) {
-            TvType.TvSeries
-        } else {
-            TvType.Movie
-        }
+        val episodes = episodeElements.mapNotNull { eps ->
+            val href = normalizePageUrl(eps.attr("href")) ?: return@mapNotNull null
+            val label = eps.attr("title").ifBlank { eps.text() }.trim()
+            if (
+                label.contains("Lihat Semua Episode", ignoreCase = true) ||
+                label.contains("View All Episodes", ignoreCase = true) ||
+                href.substringBefore('?').substringBefore('#').trimEnd('/') ==
+                canonicalUrl.substringBefore('?').substringBefore('#').trimEnd('/')
+            ) return@mapNotNull null
+            DutamoviePlayerParser.newEpisode(this, href, label, poster)
+        }.distinctBy { it.data }
+        val tvType = RotatingMovieDetailClassifier.classify(canonicalUrl, episodes.size)
+            ?: throw ErrorLoadingException("Tautan episode belum tersedia")
         val description = MovieMetadataParser.synopsis(document)
         val trailer = document.selectFirst("ul.gmr-player-nav li a.gmr-trailer-popup")?.attr("href")
         val rating = document.selectFirst("div.gmr-meta-rating span[itemprop=ratingValue]")?.text()?.trim()
         val actors = document.select("div.gmr-moviedata").last()?.select("span[itemprop=actors] a")?.map { it.text() }
 
         return if (tvType == TvType.TvSeries) {
-            val episodes = episodeElements.mapNotNull { eps ->
-                val href = normalizePageUrl(eps.attr("href")) ?: return@mapNotNull null
-                val label = eps.attr("title").ifBlank { eps.text() }.trim()
-                if (
-                    label.contains("Lihat Semua Episode", ignoreCase = true) ||
-                    label.contains("View All Episodes", ignoreCase = true) ||
-                    href.substringBefore('?').substringBefore('#').trimEnd('/') ==
-                    canonicalUrl.substringBefore('?').substringBefore('#').trimEnd('/')
-                ) return@mapNotNull null
-                DutamoviePlayerParser.newEpisode(this, href, label, poster)
-            }.distinctBy { it.data }
             newTvSeriesLoadResponse(title, canonicalUrl, TvType.TvSeries, episodes) {
                 posterUrl = poster; this.year = year; plot = description; this.tags = tags; addActors(actors); addTrailer(trailer)
             }
@@ -426,7 +427,10 @@ internal object MorenciusPlayerParser {
     )
 
     fun supports(host: String): Boolean =
-        host == "morencius.com" || host.endsWith(".morencius.com")
+        host == "morencius.com" ||
+            host.endsWith(".morencius.com") ||
+            host == "odvidhide.com" ||
+            host.endsWith(".odvidhide.com")
 
     fun mediaUrls(html: String, playerUrl: String): List<String> {
         val scripts = mutableListOf(html)

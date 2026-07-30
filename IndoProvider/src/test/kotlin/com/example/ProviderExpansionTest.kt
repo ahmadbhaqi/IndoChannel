@@ -46,7 +46,7 @@ class ProviderExpansionTest {
         val expectedDomains = mapOf(
             "MovieboxProvider.kt" to "https://h5-api.aoneroom.com",
             "PencurimovieProvider.kt" to "https://ww21.pencurimovie.sbs",
-            "SarangfilmProvider.kt" to "https://sarangfilm.asia",
+            "SarangfilmProvider.kt" to "https://sarangfilm.diy",
             "NomatProvider.kt" to "https://nomat.shop",
             "IndomaxProvider.kt" to "https://idmxl.ink",
             "KawanfilmProvider.kt" to "https://web.kawanfilm21.co",
@@ -62,6 +62,44 @@ class ProviderExpansionTest {
                 "$fileName must use $domain"
             )
         }
+    }
+
+    @Test
+    fun `animasu uses the fast homepage only for the first update catalog page`() {
+        val mainUrl = "https://v2.animasu.work"
+
+        assertEquals(
+            "$mainUrl/",
+            AnimasuCatalogRouting.pageUrl(mainUrl, 1, "urutan=update")
+        )
+        assertEquals(
+            "$mainUrl/pencarian/?urutan=update&halaman=2",
+            AnimasuCatalogRouting.pageUrl(mainUrl, 2, "urutan=update")
+        )
+        assertEquals(
+            "$mainUrl/pencarian/?status=&tipe=Movie&urutan=update&halaman=1",
+            AnimasuCatalogRouting.pageUrl(
+                mainUrl,
+                1,
+                "status=&tipe=Movie&urutan=update"
+            )
+        )
+        assertEquals(
+            listOf(
+                "$mainUrl/",
+                "$mainUrl/pencarian/?urutan=update&halaman=1"
+            ),
+            AnimasuCatalogRouting.pageUrls(mainUrl, 1, "urutan=update")
+        )
+        assertEquals(
+            listOf("$mainUrl/pencarian/?urutan=update&halaman=2"),
+            AnimasuCatalogRouting.pageUrls(mainUrl, 2, "urutan=update")
+        )
+        val attempts = AnimasuCatalogRouting.pageUrls(mainUrl, 1, "urutan=update")
+            .indices
+            .map { index -> AnimasuCatalogRouting.timeoutSeconds(index, 2) }
+        assertEquals(listOf(20L, 35L), attempts)
+        assertTrue(attempts.sum() <= 55L)
     }
 
     @Test
@@ -91,7 +129,7 @@ class ProviderExpansionTest {
     @Test
     fun `provider repairs bump the plugin release`() {
         val moduleBuild = File(projectRoot, "IndoProvider/build.gradle.kts").readText()
-        assertTrue(Regex("""(?m)^version\s*=\s*16\s*$""").containsMatchIn(moduleBuild))
+        assertTrue(Regex("""(?m)^version\s*=\s*17\s*$""").containsMatchIn(moduleBuild))
     }
 
     @Test
@@ -100,6 +138,17 @@ class ProviderExpansionTest {
         assertEquals(listOf(1, 2, 3), movieboxEpisodeNumbers(null, 3))
         assertEquals(emptyList(), movieboxEpisodeNumbers(null, 0))
         assertEquals(listOf(1, 2), movieboxEpisodeNumbers("-1,0,1,2,10001", 3))
+        assertEquals(2_000, movieboxEpisodeNumbers(null, 10_000).size)
+
+        val tooManySeasons = (1..200).map { season ->
+            MovieboxDetailResponse.Season(season = season, maxEp = 1)
+        }
+        assertEquals(100, movieboxEpisodeCoordinates(tooManySeasons).size)
+
+        val oversizedCatalog = (1..100).map { season ->
+            MovieboxDetailResponse.Season(season = season, maxEp = 100)
+        }
+        assertEquals(5_000, movieboxEpisodeCoordinates(oversizedCatalog).size)
     }
 
     @Test
@@ -754,9 +803,11 @@ class ProviderExpansionTest {
                 "pencurimovie.sbs"
             ),
             "SarangfilmProvider.kt" to listOf(
+                "sarangfilm.asia",
                 "sarangfilm.uno",
                 "sarangfilm.world",
-                "sarangfilm.link"
+                "sarangfilm.link",
+                "sarangfilm21.com"
             ),
             "NomatProvider.kt" to listOf("nomat.site", "nomat.store", "nomat.asia"),
             "IndomaxProvider.kt" to listOf(

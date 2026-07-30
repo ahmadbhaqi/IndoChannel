@@ -30,7 +30,7 @@ class ProviderDomainTest {
             "LayarKacaProvider.kt" to """override var mainUrl = "https://tv.nontonfilm.red"""",
             "NgefilmProvider.kt" to """override var mainUrl = "https://new39.ngefilm.site"""",
             "PusatfilmProvider.kt" to """override var mainUrl = "https://v4.pusatfilm21info.com"""",
-            "DutamovieProvider.kt" to """override var mainUrl = "https://restaurantesabadell.com"""",
+            "DutamovieProvider.kt" to """override var mainUrl = "https://cowboysgab.com"""",
             "IndoxxiProvider.kt" to """override var mainUrl = "https://filmbioskop21.lk21.in.net"""",
             "FilmapikProvider.kt" to """override var mainUrl = "https://filmapik.college"""",
             "RebahinProvider.kt" to """override var mainUrl = "https://rebahinxxi3.lol""""
@@ -128,7 +128,7 @@ class ProviderDomainTest {
 
     @Test
     fun `dutamovie uses the current official domain`() {
-        assertEquals("https://restaurantesabadell.com", DutamovieProvider().mainUrl)
+        assertEquals("https://cowboysgab.com", DutamovieProvider().mainUrl)
     }
 
     @Test
@@ -136,9 +136,11 @@ class ProviderDomainTest {
         val provider = DutamovieProvider()
         val cachedUrls = mapOf(
             "https://austincomputerworks.org/lunok-2026/?server=2#player" to
-                "https://restaurantesabadell.com/lunok-2026/?server=2#player",
+                "https://cowboysgab.com/lunok-2026/?server=2#player",
             "https://wavereview.com/tv/series/episode-7/?quality=720p#watch" to
-                "https://restaurantesabadell.com/tv/series/episode-7/?quality=720p#watch"
+                "https://cowboysgab.com/tv/series/episode-7/?quality=720p#watch",
+            "https://restaurantesabadell.com/legacy-title/?player=2" to
+                "https://cowboysgab.com/legacy-title/?player=2"
         )
 
         cachedUrls.forEach { (cached, expected) ->
@@ -304,7 +306,7 @@ class ProviderDomainTest {
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
         assertTrue(
-            Regex("""(?m)^version\s*=\s*15\s*$""").containsMatchIn(moduleBuild.readText()),
+            Regex("""(?m)^version\s*=\s*17\s*$""").containsMatchIn(moduleBuild.readText()),
             "Cloudstream must see the provider expansion as a new plugin release"
         )
     }
@@ -340,6 +342,7 @@ class ProviderDomainTest {
     fun `Pusatfilm iterates every matching iframe`() {
         val loadLinksSource = source("PusatfilmProvider.kt")
             .substringAfter("override suspend fun loadLinks")
+            .substringBefore("private fun Element.getImageAttr")
         val allIframeIteration = Regex(
             """(?s)document\s*\.\s*select\s*\(\s*"[^"]*iframe[^"]*"\s*\)(?:(?!selectFirst)[\s\S])*?\.\s*forEach\s*\{"""
         )

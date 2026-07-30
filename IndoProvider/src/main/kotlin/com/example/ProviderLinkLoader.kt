@@ -64,6 +64,7 @@ private const val GENERIC_EXTRACTOR_TIMEOUT_MS = 12_000L
 internal const val PROVIDER_HTTP_TIMEOUT_SECONDS = 25L
 private const val SESSION_TIMEOUT_MS = 90_000L
 private const val MAX_RESOLUTION_CANDIDATES = 48
+internal const val PLAYER_PAGE_BODY_LIMIT_BYTES = 1_000_000
 private const val MAX_BYSE_API_RESPONSE_BYTES = 2_000_000
 private const val MAX_JUSTPLAY_API_RESPONSE_BYTES = 2_000_000
 private const val MAX_EMBED4ME_API_RESPONSE_BYTES = 4_000_000
@@ -78,11 +79,46 @@ private const val MAX_CONCURRENT_PLAYLIST_PROBES = 4
 private const val MAX_AUDIO_TRACK_PROBE_ITEMS = 8
 private const val JSON_MEDIA_TYPE = "application/json;charset=UTF-8"
 private const val JUICY_CODES_ACCEPT_LANGUAGE = "*"
+private val playerHttp by lazy {
+    ProviderHttpSafetyClient(NiceHttpProviderFetcher(app))
+}
 private val mediaProbeHttp by lazy {
     ProviderHttpSafetyClient(NiceHttpProviderFetcher(app))
 }
 private val publicMediaUrlNormalizer = ProviderUrlNormalizer { candidate ->
     candidate.takeIf(::isSafeRemoteHttpUrl)
+}
+private val defaultPlayerPageFetcher: PlayerPageFetcher by lazy {
+    safePlayerPageFetcher(playerHttp)
+}
+private val defaultPlayerApiFetcher: PlayerApiFetcher by lazy {
+    safePlayerApiFetcher(playerHttp)
+}
+
+internal fun safePlayerPageFetcher(
+    client: ProviderHttpSafetyClient
+): PlayerPageFetcher = { url, referer ->
+    client.get(
+        url = url,
+        normalizer = publicMediaUrlNormalizer,
+        headers = juicyCodesPlayerPageHeaders(url),
+        referer = referer,
+        maxBodyBytes = PLAYER_PAGE_BODY_LIMIT_BYTES,
+        timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
+    ).body
+}
+
+internal fun safePlayerApiFetcher(
+    client: ProviderHttpSafetyClient
+): PlayerApiFetcher = { url, referer, headers ->
+    client.get(
+        url = url,
+        normalizer = publicMediaUrlNormalizer,
+        headers = headers,
+        referer = referer,
+        maxBodyBytes = MAX_EMBED4ME_API_RESPONSE_BYTES,
+        timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
+    ).body
 }
 
 private data class CandidateKey(
@@ -101,23 +137,8 @@ internal class LinkResolutionSession(
     private val api: MainAPI,
     private val subtitleCallback: (SubtitleFile) -> Unit,
     private val callback: (ExtractorLink) -> Unit,
-    private val pageFetcher: PlayerPageFetcher = { url, referer ->
-        app.get(
-            url,
-            referer = referer,
-            headers = juicyCodesPlayerPageHeaders(url),
-            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-        ).text
-    },
-    private val playerApiFetcher: PlayerApiFetcher = { url, referer, headers ->
-        val response = app.get(
-            url,
-            referer = referer,
-            headers = headers,
-            timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-        )
-        readBoundedBody(response.body, MAX_EMBED4ME_API_RESPONSE_BYTES)
-    },
+    private val pageFetcher: PlayerPageFetcher = defaultPlayerPageFetcher,
+    private val playerApiFetcher: PlayerApiFetcher = defaultPlayerApiFetcher,
     private val byseApiFetcher: PlayerPageFetcher = ::fetchBoundedByseApi,
     private val justPlayApiFetcher: JustPlayApiFetcher = ::fetchBoundedJustPlayApi,
     private val howNetworkApiFetcher: HowNetworkApiFetcher = ::fetchBoundedHowNetworkApi,
@@ -238,6 +259,54 @@ internal class LinkResolutionSession(
                 // These fragment embeds require the encrypted API. Their HTML is
                 // only a JavaScript loading shell, so a generic extractor cannot
                 // recover a media URL when the API itself has no usable source.
+                return
+            }
+
+            if (VoePlayerParser.supports(host)) {
+                val shell = pageFetcher(url, referer)
+                cachedHtml = shell
+                if (ProviderHtmlParser.isNonContentPage(shell)) return
+                var playerUrl = url
+                var playback = VoePlayerParser.playback(shell, playerUrl)
+                if (playback == null) {
+                    val target = VoePlayerParser.redirectTarget(shell, url) ?: return
+                    val targetHtml = pageFetcher(target, url)
+                    if (ProviderHtmlParser.isNonContentPage(targetHtml)) return
+                    playerUrl = target
+                    playback = VoePlayerParser.playback(targetHtml, playerUrl)
+                }
+                playback?.let { emitBysePlayback(it, playerUrl) }
+                // A recognized VOE page can expose a playable decoy in a normal
+                // script assignment. Never fall through to generic extraction.
+                return
+            }
+
+            if (DesuStreamPlayerParser.supports(host)) {
+                val html = pageFetcher(url, referer)
+                cachedHtml = html
+                if (ProviderHtmlParser.isNonContentPage(html)) return
+                val apiUrl = DesuStreamPlayerParser.apiUrl(html, url) ?: return
+                val payload = try {
+                    playerApiFetcher(
+                        apiUrl,
+                        url,
+                        mapOf(
+                            "Accept" to "application/json",
+                            "Cache-Control" to "no-cache"
+                        )
+                    )
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    return
+                }
+                val nested = DesuStreamPlayerParser.videoUrl(payload, url) ?: return
+                resolveCandidate(
+                    nested,
+                    url,
+                    genericDepth + 1,
+                    candidateDeadlineNanos
+                )
                 return
             }
 
@@ -638,9 +707,16 @@ internal class LinkResolutionSession(
             }
             if (emittedLinks.size > beforeJuicyCodes) return
             if (JuicyCodesPlayerParser.recognizes(html)) return
-            inlineSourceParser
-                ?.let { parser -> runCatching { parser(html, url) }.getOrDefault(emptyList()) }
-                .orEmpty()
+            (
+                InlineDataParser.playableInlineUrls(html, url) +
+                    inlineSourceParser
+                        ?.let { parser ->
+                            runCatching { parser(html, url) }.getOrDefault(emptyList())
+                        }
+                        .orEmpty()
+                )
+                .distinct()
+                .take(MAX_RESOLUTION_CANDIDATES)
                 .forEach { nested ->
                     val playable = ProviderHtmlParser.absoluteUrl(nested, url)
                         ?: return@forEach
@@ -1405,7 +1481,7 @@ internal fun directMediaType(url: String): ExtractorLinkType? {
     val path = uri.path.orEmpty().lowercase()
     if (StreamTapePlayerParser.supports(host, path)) return null
     return when {
-        path.endsWith(".m3u8") -> ExtractorLinkType.M3U8
+        path.endsWith(".m3u8") || path.endsWith("/master.txt") -> ExtractorLinkType.M3U8
         path.endsWith(".mp4") -> ExtractorLinkType.VIDEO
         else -> null
     }

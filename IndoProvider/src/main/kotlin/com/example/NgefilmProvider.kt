@@ -83,11 +83,16 @@ class NgefilmProvider : MainAPI() {
         val tags = document.select("div.gmr-moviedata a").map { it.text() }
         val year = document.select("div.gmr-moviedata strong:contains(Year:) > a").text().trim().toIntOrNull()
         val episodeElements = document.select("div.vid-episodes a, div.gmr-listseries a")
-        val tvType = if (canonicalUrl.contains("/tv/") || episodeElements.isNotEmpty()) {
-            TvType.TvSeries
-        } else {
-            TvType.Movie
-        }
+        val episodes = episodeElements
+            .mapNotNull { eps ->
+                val href = normalizePageUrl(eps.attr("href")) ?: return@mapNotNull null
+                val rawTitle = eps.attr("title").takeIf { it.isNotBlank() } ?: eps.text()
+                val label = rawTitle.replaceFirst(Regex("(?i)Permalink ke\\s*"), "").trim()
+                DutamoviePlayerParser.newEpisode(this, href, label, poster)
+            }
+            .distinctBy { it.data }
+        val tvType = RotatingMovieDetailClassifier.classify(canonicalUrl, episodes.size)
+            ?: throw ErrorLoadingException("Tautan episode belum tersedia")
         val description = MovieMetadataParser.synopsis(document)
         val trailer = document.selectFirst("ul.gmr-player-nav li a.gmr-trailer-popup")?.attr("href")
         val rating = document.selectFirst("div.gmr-meta-rating > span[itemprop=ratingValue]")?.text()?.trim()
@@ -95,14 +100,6 @@ class NgefilmProvider : MainAPI() {
         val duration = document.selectFirst("div.gmr-moviedata span[property=duration]")?.text()?.replace(Regex("\\D"), "")?.toIntOrNull()
 
         return if (tvType == TvType.TvSeries) {
-            val episodes = episodeElements
-                .mapNotNull { eps ->
-                    val href = normalizePageUrl(eps.attr("href")) ?: return@mapNotNull null
-                    val rawTitle = eps.attr("title").takeIf { it.isNotBlank() } ?: eps.text()
-                    val label = rawTitle.replaceFirst(Regex("(?i)Permalink ke\\s*"), "").trim()
-                    DutamoviePlayerParser.newEpisode(this, href, label, poster)
-                }
-
             newTvSeriesLoadResponse(title, canonicalUrl, TvType.TvSeries, episodes) {
                 this.posterUrl = poster
                 this.year = year

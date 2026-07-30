@@ -1,5 +1,6 @@
 package com.example
 
+import com.lagradost.nicehttp.Requests
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
 import java.io.InputStream
@@ -16,9 +17,81 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import okhttp3.RequestBody.Companion.toRequestBody
 
 class ProviderHttpSafetyTest {
+    @Test
+    fun `nicehttp adapter sends one explicit browser user agent`() = runBlocking {
+        val browserUserAgent = "Mozilla/5.0 ProviderHttpSafetyTest"
+        val captured = mutableListOf<okhttp3.Request>()
+        val requests = Requests().apply {
+            defaultHeaders = mapOf(
+                "user-agent" to "NiceHttp",
+                "accept" to "*/*"
+            )
+            baseClient = OkHttpClient.Builder()
+                .addInterceptor { chain ->
+                    captured += chain.request()
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body("ready".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                }
+                .build()
+        }
+        val response = NiceHttpProviderFetcher(requests).fetch(
+            request = ProviderHttpRequest(
+                method = ProviderHttpMethod.GET,
+                url = "https://movie.example/headers",
+                headers = mapOf(
+                    "User-Agent" to browserUserAgent,
+                    "Accept" to "text/html"
+                )
+            ),
+            resolvedAddresses = listOf(publicAddress())
+        )
+        response.close()
+
+        val sent = captured.single()
+        assertEquals(listOf(browserUserAgent), sent.headers.values("User-Agent"))
+        assertEquals(listOf("text/html"), sent.headers.values("Accept"))
+        assertFalse(sent.headers.values("User-Agent").any { it.contains("NiceHttp") })
+    }
+
+    @Test
+    fun `explicit headers replace inherited headers case insensitively`() {
+        val merged = mergeProviderRequestHeaders(
+            inherited = mapOf(
+                "user-agent" to "NiceHttp",
+                "accept" to "*/*",
+                "X-Internal" to "must-not-leak"
+            ),
+            explicit = mapOf(
+                "User-Agent" to "Mozilla/5.0 Browser",
+                "Accept" to "text/html",
+                "X-CSRF-TOKEN" to "current"
+            )
+        )
+
+        assertEquals("Mozilla/5.0 Browser", merged["User-Agent"])
+        assertEquals("text/html", merged["Accept"])
+        assertEquals("current", merged["X-CSRF-TOKEN"])
+        assertFalse(merged.containsKey("user-agent"))
+        assertFalse(merged.containsKey("accept"))
+        assertFalse(merged.containsKey("X-Internal"))
+        assertEquals(
+            1,
+            merged.keys.count { it.equals("User-Agent", ignoreCase = true) }
+        )
+    }
+
     @Test
     fun `redirects are normalized resolved and fetched one hop at a time`() = runBlocking {
         val events = mutableListOf<String>()
@@ -450,6 +523,59 @@ class ProviderHttpSafetyTest {
 
         assertContentEquals(raw, result.bodyBytes)
         assertEquals(raw.toString(Charsets.UTF_8), result.body)
+    }
+
+    @Test
+    fun `player fetch adapters reject private DNS before page or API requests`() = runBlocking {
+        val fetcher = ScriptedFetcher(emptyList())
+        val client = ProviderHttpSafetyClient(
+            fetcher,
+            ProviderDnsResolver { host ->
+                listOf(
+                    InetAddress.getByAddress(
+                        host,
+                        byteArrayOf(169.toByte(), 254.toByte(), 169.toByte(), 254.toByte())
+                    )
+                )
+            }
+        )
+        val pageFetcher = safePlayerPageFetcher(client)
+        val apiFetcher = safePlayerApiFetcher(client)
+        val rebindingHost = "https://169.254.169.254.nip.io/private"
+
+        assertFailsWith<ProviderHttpSafetyException> {
+            pageFetcher(rebindingHost, "https://provider.example/watch")
+        }
+        assertFailsWith<ProviderHttpSafetyException> {
+            apiFetcher(
+                rebindingHost,
+                "https://provider.example/watch",
+                mapOf("Accept" to "application/json")
+            )
+        }
+        assertTrue(fetcher.requests.isEmpty())
+    }
+
+    @Test
+    fun `player page adapter rejects an oversized response while streaming`() = runBlocking {
+        val response = FakeRawResponse(
+            code = 200,
+            url = "https://player.example/embed/current",
+            rawBody = ByteArray(PLAYER_PAGE_BODY_LIMIT_BYTES + 1)
+        )
+        val client = ProviderHttpSafetyClient(
+            ScriptedFetcher(listOf(response)),
+            ProviderDnsResolver { listOf(publicAddress()) }
+        )
+
+        assertFailsWith<ProviderBodyTooLargeException> {
+            safePlayerPageFetcher(client)(
+                "https://player.example/embed/current",
+                "https://provider.example/watch"
+            )
+        }
+        assertEquals(PLAYER_PAGE_BODY_LIMIT_BYTES + 1, response.bytesRead)
+        assertTrue(response.closed)
     }
 
     @Test

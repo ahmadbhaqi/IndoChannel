@@ -12,14 +12,20 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
 class SarangfilmProvider : MainAPI() {
-    override var mainUrl = "https://sarangfilm.asia"
+    override var mainUrl = "https://sarangfilm.diy"
     override var name = "Sarangfilm"
     override var lang = "id"
     override val hasMainPage = true
     override val supportedTypes =
         setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AsianDrama)
     private val ownedHosts =
-        setOf("sarangfilm.uno", "sarangfilm.world", "sarangfilm.link")
+        setOf(
+            "sarangfilm.asia",
+            "sarangfilm.uno",
+            "sarangfilm.world",
+            "sarangfilm.link",
+            "sarangfilm21.com"
+        )
     private val safeHttp by lazy {
         ProviderHttpSafetyClient(NiceHttpProviderFetcher(app))
     }
@@ -110,20 +116,15 @@ class SarangfilmProvider : MainAPI() {
         val recommendations = document.select("article.item-infinite, article.item.col-md-20")
             .mapNotNull { it.toSearchResult() }
         val episodeLinks = document.select("div.vid-episodes a[href], div.gmr-listseries a[href]")
-        val isSeries = canonicalUrl.contains("/tv/", ignoreCase = true) || episodeLinks.isNotEmpty()
+        val episodes = episodeLinks.mapNotNull { link ->
+            val href = providerUrl(link.attr("href")) ?: return@mapNotNull null
+            val label = link.attr("title").ifBlank { link.text() }.trim()
+            DutamoviePlayerParser.newEpisode(this, href, label, poster)
+        }.distinctBy { it.data }
+        val tvType = RotatingMovieDetailClassifier.classify(canonicalUrl, episodes.size)
+            ?: throw ErrorLoadingException("Tautan episode belum tersedia")
 
-        return if (isSeries) {
-            val episodes = episodeLinks.mapNotNull { link ->
-                val href = providerUrl(link.attr("href")) ?: return@mapNotNull null
-                val label = link.text().trim()
-                val (seasonNumber, episodeNumber) = PopularProviderEpisodeParser.position(label)
-                newEpisode(href) {
-                    episode = episodeNumber
-                    season = seasonNumber
-                    name = episodeNumber?.let { "Episode $it" } ?: label
-                    posterUrl = poster
-                }
-            }
+        return if (tvType == TvType.TvSeries) {
             newTvSeriesLoadResponse(title, canonicalUrl, TvType.TvSeries, episodes) {
                 posterUrl = poster
                 this.year = year

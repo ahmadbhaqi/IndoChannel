@@ -340,7 +340,7 @@ internal object IndomaxParser {
         Regex("""^akses\d{1,3}\.indomax21\.xyz$""")
     private val imaxHosts = setOf("imaxstreams.net", "imaxstreams.com")
     private val hlsUrlRegex = Regex(
-        """(?i)https://[^\s"'<>\\]+\.m3u8(?:\?[^\s"'<>\\]*)?"""
+        """(?i)https://[^\s"'<>\\]+(?:\.m3u8|/master\.txt)(?:\?[^\s"'<>\\]*)?"""
     )
     private val packerArgumentsRegex = Regex(
         """^\s*,\s*(\d{1,3})\s*,\s*(\d{1,5})\s*,"""

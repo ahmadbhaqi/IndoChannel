@@ -5,7 +5,10 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import kotlinx.coroutines.CancellationException
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import java.net.URI
 import java.net.URLEncoder
 
 class PusatfilmProvider : MainAPI() {
@@ -15,6 +18,9 @@ class PusatfilmProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "id"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AsianDrama)
+    private val playerHttp by lazy(LazyThreadSafetyMode.NONE) {
+        ProviderHttpSafetyClient(NiceHttpProviderFetcher(app))
+    }
 
     override val mainPage = mainPageOf(
         "film-terbaru/page/%d/" to "Terbaru",
@@ -80,11 +86,16 @@ class PusatfilmProvider : MainAPI() {
         val tags = document.select("div.gmr-moviedata a").map { it.text() }
         val year = document.select("div.gmr-moviedata strong:contains(Year:) > a").text().trim().toIntOrNull()
         val episodeElements = document.select("div.vid-episodes a, div.gmr-listseries a")
-        val tvType = if (canonicalUrl.contains("/tv/") || episodeElements.isNotEmpty()) {
-            TvType.TvSeries
-        } else {
-            TvType.Movie
-        }
+        val episodes = episodeElements
+            .mapNotNull { eps ->
+                val href = normalizePageUrl(eps.attr("href")) ?: return@mapNotNull null
+                val rawTitle = eps.attr("title").takeIf { it.isNotBlank() } ?: eps.text()
+                val label = rawTitle.replaceFirst(Regex("(?i)Permalink ke\\s*"), "").trim()
+                DutamoviePlayerParser.newEpisode(this, href, label, poster)
+            }
+            .distinctBy { it.data }
+        val tvType = RotatingMovieDetailClassifier.classify(canonicalUrl, episodes.size)
+            ?: throw ErrorLoadingException("Tautan episode belum tersedia")
         val description = MovieMetadataParser.synopsis(document)
         val trailer = document.selectFirst("ul.gmr-player-nav li a.gmr-trailer-popup")?.attr("href")
         val rating = document.selectFirst("div.gmr-meta-rating > span[itemprop=ratingValue]")?.text()?.trim()
@@ -92,14 +103,6 @@ class PusatfilmProvider : MainAPI() {
         val duration = document.selectFirst("div.gmr-moviedata span[property=duration]")?.text()?.replace(Regex("\\D"), "")?.toIntOrNull()
 
         return if (tvType == TvType.TvSeries) {
-            val episodes = episodeElements
-                .mapNotNull { eps ->
-                    val href = normalizePageUrl(eps.attr("href")) ?: return@mapNotNull null
-                    val rawTitle = eps.attr("title").takeIf { it.isNotBlank() } ?: eps.text()
-                    val label = rawTitle.replaceFirst(Regex("(?i)Permalink ke\\s*"), "").trim()
-                    DutamoviePlayerParser.newEpisode(this, href, label, poster)
-                }
-
             newTvSeriesLoadResponse(title, canonicalUrl, TvType.TvSeries, episodes) {
                 this.posterUrl = poster
                 this.year = year
@@ -139,7 +142,20 @@ class PusatfilmProvider : MainAPI() {
             .mapNotNull { ProviderHtmlParser.firstIframeSource(it) }
 
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        val currentPlayback = PusatfilmCurrentPlayback(
+            pageFetcher = { url, referer ->
+                playerHttp.get(
+                    url = url,
+                    normalizer = ProviderUrlNormalizer(PusatfilmPlayerPagePolicy::normalize),
+                    referer = referer,
+                    maxBodyBytes = PUSATFILM_PLAYER_PAGE_LIMIT_BYTES,
+                    timeoutSeconds = PUSATFILM_PLAYER_TIMEOUT_SECONDS
+                ).body
+            },
+            mediaResolver = resolver::resolve
+        )
         iframes.forEach { iframe ->
+            if (currentPlayback.resolve(iframe, canonicalUrl)) return true
             resolver.resolve(iframe, canonicalUrl)
         }
         return resolver.loaded
@@ -164,3 +180,102 @@ class PusatfilmProvider : MainAPI() {
         return ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, legacyHosts)
     }
 }
+
+/**
+ * Current TurboVIP pages expose their concrete HLS URL on the actual player
+ * element. Keeping this selector exact avoids treating unrelated analytics or
+ * advertising URLs as media.
+ */
+internal object PusatfilmCurrentPlayerParser {
+    private const val MAX_HTML_SIZE = 2_000_000
+
+    fun directMediaUrl(html: String): String? {
+        if (html.length > MAX_HTML_SIZE) return null
+        val candidate = runCatching {
+            Jsoup.parse(html)
+                .selectFirst("#video_player[data-hash]")
+                ?.attr("data-hash")
+                ?.trim()
+        }.getOrNull()?.takeIf { it.isNotEmpty() } ?: return null
+        val path = runCatching { URI(candidate).path.orEmpty().lowercase() }
+            .getOrDefault("")
+        return candidate.takeIf {
+            path.endsWith(".m3u8") && isSafeRemoteHttpUrl(it)
+        }
+    }
+}
+
+internal object PusatfilmPlayerPagePolicy {
+    private val allowedHosts = setOf(
+        "kotakajaib.me",
+        "emturbovid.com",
+        "turbovidhls.com",
+        "turboviplay.com"
+    )
+
+    fun normalize(candidate: String): String? {
+        if (!isSafeRemoteHttpUrl(candidate)) return null
+        return runCatching {
+            val uri = URI(candidate)
+            val host = uri.host?.lowercase() ?: return@runCatching null
+            if (uri.scheme?.lowercase() != "https" ||
+                uri.userInfo != null ||
+                uri.port !in setOf(-1, 443) ||
+                allowedHosts.none { allowed -> host == allowed || host.endsWith(".$allowed") }
+            ) {
+                return@runCatching null
+            }
+            uri.toASCIIString()
+        }.getOrNull()
+    }
+
+    fun isKotakPage(candidate: String): Boolean = (
+        normalizedHost(candidate)
+            ?.let { it == "kotakajaib.me" || it.endsWith(".kotakajaib.me") }
+        ) == true
+
+    fun isTurboPage(candidate: String): Boolean =
+        normalizedHost(candidate)?.let { host ->
+            host == "emturbovid.com" ||
+                host.endsWith(".emturbovid.com") ||
+                host == "turbovidhls.com" ||
+                host.endsWith(".turbovidhls.com") ||
+                host == "turboviplay.com" ||
+                host.endsWith(".turboviplay.com")
+        } == true
+
+    private fun normalizedHost(candidate: String): String? =
+        normalize(candidate)?.let { URI(it).host?.lowercase() }
+}
+
+internal class PusatfilmCurrentPlayback(
+    private val pageFetcher: suspend (url: String, referer: String) -> String,
+    private val mediaResolver: suspend (url: String, referer: String) -> Boolean
+) {
+    suspend fun resolve(playerUrl: String, detailUrl: String): Boolean {
+        val normalizedPlayer = PusatfilmPlayerPagePolicy.normalize(playerUrl)
+            ?.takeIf(PusatfilmPlayerPagePolicy::isKotakPage)
+            ?: return false
+        val playerHtml = fetch(normalizedPlayer, detailUrl) ?: return false
+        for (mirror in KotakDataFrameParser.urls(playerHtml)) {
+            val normalizedMirror = PusatfilmPlayerPagePolicy.normalize(mirror)
+                ?.takeIf(PusatfilmPlayerPagePolicy::isTurboPage)
+                ?: continue
+            val mirrorHtml = fetch(normalizedMirror, normalizedPlayer) ?: continue
+            val mediaUrl = PusatfilmCurrentPlayerParser.directMediaUrl(mirrorHtml) ?: continue
+            if (mediaResolver(mediaUrl, normalizedMirror)) return true
+        }
+        return false
+    }
+
+    private suspend fun fetch(url: String, referer: String): String? = try {
+        pageFetcher(url, referer)
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private const val PUSATFILM_PLAYER_PAGE_LIMIT_BYTES = 1_000_000
+private const val PUSATFILM_PLAYER_TIMEOUT_SECONDS = 20L

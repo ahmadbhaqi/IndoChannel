@@ -90,7 +90,7 @@ class MovieProviderPipelineLiveTest {
             ),
             DetailCase(
                 DutamovieProvider(),
-                "https://restaurantesabadell.com/bagong-tukso-2-2026/",
+                "https://cowboysgab.com/bagong-tukso-2-2026/",
                 "Bagong Tukso 2"
             ),
             DetailCase(

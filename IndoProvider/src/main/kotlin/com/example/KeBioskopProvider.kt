@@ -346,10 +346,15 @@ internal class KeBioskopPlayerOrchestrator(
     }
 
     companion object {
+        private val intermediaryHosts = setOf(
+            "streaming.${URI(KEBIOSKOP_MAIN_URL).host}",
+            "streaming.kebioskop21.pro"
+        )
+
         fun isIntermediary(url: String): Boolean = runCatching {
             val uri = URI(url)
             uri.scheme.equals("https", ignoreCase = true) &&
-                uri.host.equals("streaming.kebioskop21.pro", ignoreCase = true) &&
+                intermediaryHosts.any { host -> uri.host.equals(host, ignoreCase = true) } &&
                 uri.userInfo == null &&
                 uri.port in setOf(-1, 443) &&
                 uri.path == "/apidrive.php"

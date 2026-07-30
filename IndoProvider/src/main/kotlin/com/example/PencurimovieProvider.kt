@@ -177,9 +177,9 @@ class PencurimovieProvider : MainAPI() {
             this,
             subtitleCallback,
             callback,
-            candidateTimeoutMs = 30_000L,
-            genericExtractorTimeoutMs = 25_000L,
-            sessionTimeoutMs = 100_000L
+            candidateTimeoutMs = 20_000L,
+            genericExtractorTimeoutMs = 8_000L,
+            sessionTimeoutMs = 60_000L
         )
         val candidates = PencurimovieParser.orderedPlayerCandidates((
             document.select("div.movieplay iframe").flatMap { frame ->

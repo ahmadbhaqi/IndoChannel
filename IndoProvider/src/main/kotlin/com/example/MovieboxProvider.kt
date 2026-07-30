@@ -102,18 +102,17 @@ class MovieboxProvider : MainAPI() {
         val plot = MovieMetadataParser.meaningfulDescription(subject.description)
 
         return if (type == TvType.TvSeries) {
-            val episodes = detail.resource?.seasons.orEmpty().flatMap { season ->
-                movieboxEpisodeNumbers(season.allEp, season.maxEp).map { episode ->
+            val episodes = movieboxEpisodeCoordinates(detail.resource?.seasons)
+                .map { (season, episode) ->
                     newEpisode(
-                        MovieboxLoadData(id, season.season, episode, detailPath).toJson()
+                        MovieboxLoadData(id, season, episode, detailPath).toJson()
                     ) {
-                        this.season = season.season
+                        this.season = season
                         this.episode = episode
                         name = "Episode $episode"
                         posterUrl = poster
                     }
                 }
-            }
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                 posterUrl = poster
                 this.year = year
@@ -250,7 +249,7 @@ class MovieboxProvider : MainAPI() {
         null
     }
 
-    private inline fun <reified T> ProviderHttpResult.parse(): T? =
+    private inline fun <reified T : Any> ProviderHttpResult.parse(): T? =
         body.takeUnless(ProviderHtmlParser::isNonContentPage)
             ?.let { runCatching { parseJson<T>(it) }.getOrNull() }
 
@@ -393,17 +392,40 @@ internal object MovieboxApi {
         URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
 }
 
+private const val MOVIEBOX_MAX_SEASONS = 100
+private const val MOVIEBOX_MAX_EPISODES_PER_SEASON = 2_000
+private const val MOVIEBOX_MAX_TOTAL_EPISODES = 5_000
+
 internal fun movieboxEpisodeNumbers(raw: String?, maxEpisode: Int?): List<Int> {
     val declared = raw.orEmpty()
         .splitToSequence(',')
-        .take(10_000)
+        .take(MOVIEBOX_MAX_EPISODES_PER_SEASON)
         .mapNotNull { it.trim().toIntOrNull() }
-        .filter { it in 1..10_000 }
+        .filter { it in 1..MOVIEBOX_MAX_EPISODES_PER_SEASON }
         .toList()
     return declared.distinct().sorted().ifEmpty {
-        maxEpisode?.takeIf { it in 1..10_000 }?.let { (1..it).toList() }.orEmpty()
+        maxEpisode
+            ?.takeIf { it > 0 }
+            ?.coerceAtMost(MOVIEBOX_MAX_EPISODES_PER_SEASON)
+            ?.let { (1..it).toList() }
+            .orEmpty()
     }
 }
+
+internal fun movieboxEpisodeCoordinates(
+    seasons: List<MovieboxDetailResponse.Season>?
+): List<Pair<Int?, Int>> = seasons.orEmpty()
+    .asSequence()
+    .take(MOVIEBOX_MAX_SEASONS)
+    .filter { season -> season.season == null || season.season in 0..10_000 }
+    .flatMap { season ->
+        movieboxEpisodeNumbers(season.allEp, season.maxEp)
+            .asSequence()
+            .map { episode -> season.season to episode }
+    }
+    .distinct()
+    .take(MOVIEBOX_MAX_TOTAL_EPISODES)
+    .toList()
 
 internal suspend fun movieboxSubtitleFile(language: String?, rawUrl: String?): SubtitleFile? {
     val url = rawUrl?.takeIf(::isSafeRemoteHttpUrl) ?: return null

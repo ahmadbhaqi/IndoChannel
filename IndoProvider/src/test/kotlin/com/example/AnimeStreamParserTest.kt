@@ -97,6 +97,85 @@ class AnimeStreamParserTest {
     }
 
     @Test
+    fun `playable inline urls read FileDon Inertia media and fall back while HLS transcodes`() {
+        val html =
+            """
+            <div
+              id="app"
+              data-page="{&quot;component&quot;:&quot;public/embed&quot;,&quot;props&quot;:{&quot;media&quot;:{&quot;hls_url&quot;:&quot;&quot;},&quot;url&quot;:&quot;https://r2.example.test/current/movie.mp4?signature=fixture&quot;}}"
+            ></div>
+            """.trimIndent()
+
+        assertEquals(
+            listOf("https://r2.example.test/current/movie.mp4?signature=fixture"),
+            InlineDataParser.playableInlineUrls(
+                html,
+                "https://filedon.co/embed/current"
+            )
+        )
+    }
+
+    @Test
+    fun `FileDon Inertia parser requires its exact host root component and schema`() {
+        val validData =
+            "{&quot;component&quot;:&quot;public/embed&quot;," +
+                "&quot;props&quot;:{&quot;media&quot;:{&quot;hls_url&quot;:&quot;&quot;}," +
+                "&quot;url&quot;:&quot;https://r2.example.test/current/movie.mp4&quot;}}"
+        val valid = """<div id="app" data-page="$validData"></div>"""
+
+        assertEquals(
+            emptyList(),
+            InlineDataParser.playableInlineUrls(
+                valid,
+                "https://attacker.example/embed/current"
+            )
+        )
+        assertEquals(
+            emptyList(),
+            InlineDataParser.playableInlineUrls(
+                valid.replace("id=\"app\"", "id=\"decoy\""),
+                "https://filedon.co/embed/current"
+            )
+        )
+        assertEquals(
+            emptyList(),
+            InlineDataParser.playableInlineUrls(
+                valid.replace("public/embed", "admin/embed-decoy"),
+                "https://filedon.co/embed/current"
+            )
+        )
+        assertEquals(
+            emptyList(),
+            InlineDataParser.playableInlineUrls(
+                valid.replace(
+                    "&quot;url&quot;",
+                    "&quot;file&quot;"
+                ),
+                "https://filedon.co/embed/current"
+            )
+        )
+    }
+
+    @Test
+    fun `playable inline fallback is input and source bounded`() {
+        val sources = (1..60).joinToString(",") { index ->
+            """{file:"https://cdn.example.test/$index.mp4",type:"video/mp4"}"""
+        }
+
+        assertEquals(
+            48,
+            InlineDataParser.playableInlineUrls("sources:[$sources]").size
+        )
+        assertEquals(
+            emptyList(),
+            InlineDataParser.playableInlineUrls(
+                " ".repeat(1_000_001) +
+                    """{file:"https://cdn.example.test/late.mp4",type:"video/mp4"}"""
+            )
+        )
+    }
+
+    @Test
     fun `blogger bootstrap and rpc response yield playable video`() {
         val bootstrap = InlineDataParser.bloggerBootstrap(
             """window.WIZ_global_data={"FdrFJe":"-12345","cfb2h":"boq_build_20260709"};"""
