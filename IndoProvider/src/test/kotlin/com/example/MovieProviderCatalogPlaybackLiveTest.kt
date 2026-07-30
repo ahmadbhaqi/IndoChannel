@@ -24,28 +24,33 @@ class MovieProviderCatalogPlaybackLiveTest {
             return@runBlocking
         }
 
-        val failures = mutableListOf<String>()
-        listOf(
-            ProviderCase(DutamovieProvider()),
-            ProviderCase(FilmapikProvider()),
-            ProviderCase(LayarKacaProvider()),
-            ProviderCase(NgefilmProvider()),
-            ProviderCase(PusatfilmProvider()),
-            ProviderCase(KeBioskopProvider())
-        ).forEach { case ->
-            try {
-                verifyCurrentSamples(case)
-            } catch (error: TimeoutCancellationException) {
-                failures += "${case.provider.name}: ${error.message ?: "timed out"}"
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                failures += "${case.provider.name}: ${error.message}"
-            }
+        verifyCases(
+            listOf(
+                ProviderCase(DutamovieProvider()),
+                ProviderCase(FilmapikProvider()),
+                ProviderCase(LayarKacaProvider()),
+                ProviderCase(NgefilmProvider()),
+                ProviderCase(PusatfilmProvider()),
+                ProviderCase(KeBioskopProvider())
+            )
+        )
+    }
+
+    @Test
+    fun `reported series providers resolve every current catalog sample`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
         }
-        assertTrue(
-            failures.isEmpty(),
-            "Current catalog playback failures:\n${failures.joinToString("\n")}"
+
+        verifyCases(
+            listOf(
+                ProviderCase(DutamovieProvider(), categoryName = "TV Series"),
+                ProviderCase(FilmapikProvider(), categoryName = "K-Drama"),
+                ProviderCase(KitanontonProvider(), categoryName = "Series"),
+                ProviderCase(NgefilmProvider(), categoryName = "TV Series"),
+                ProviderCase(PusatfilmProvider(), categoryName = "TV Series")
+            )
         )
     }
 
@@ -59,8 +64,7 @@ class MovieProviderCatalogPlaybackLiveTest {
         verifyCurrentSamples(
             ProviderCase(
                 provider = KitanontonProvider(),
-                sampleSize = 3,
-                requireAll = true
+                sampleSize = 3
             )
         )
     }
@@ -77,8 +81,7 @@ class MovieProviderCatalogPlaybackLiveTest {
                 ProviderCase(
                     provider = KitanontonProvider(),
                     categoryName = category,
-                    sampleSize = 6,
-                    requireAll = true
+                    sampleSize = 6
                 )
             )
         }
@@ -95,9 +98,27 @@ class MovieProviderCatalogPlaybackLiveTest {
             ProviderCase(
                 provider = IndoxxiProvider(),
                 categoryName = "Indonesia",
-                sampleSize = 6,
-                requireAll = true
+                sampleSize = 6
             )
+        )
+    }
+
+    private suspend fun verifyCases(cases: List<ProviderCase>) {
+        val failures = mutableListOf<String>()
+        cases.forEach { case ->
+            try {
+                verifyCurrentSamples(case)
+            } catch (error: TimeoutCancellationException) {
+                failures += "${case.provider.name}: ${error.message ?: "timed out"}"
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                failures += "${case.provider.name}: ${error.message}"
+            }
+        }
+        assertTrue(
+            failures.isEmpty(),
+            "Current catalog playback failures:\n${failures.joinToString("\n")}"
         )
     }
 
@@ -130,7 +151,9 @@ class MovieProviderCatalogPlaybackLiveTest {
                     val detail = case.provider.load(item.url)
                     val playbackData = (detail as? TvSeriesLoadResponse)
                         ?.episodes
-                        ?.firstOrNull()
+                        ?.maxByOrNull { episode ->
+                            (episode.season ?: 0) * 10_000 + (episode.episode ?: 0)
+                        }
                         ?.data
                         ?: item.url
                     case.provider.loadLinks(playbackData, false, subtitles::add, links::add)
@@ -148,22 +171,24 @@ class MovieProviderCatalogPlaybackLiveTest {
                 "${case.provider.name} sample=${item.name} url=${item.url} loaded=$loaded " +
                     "links=${links.map { it.url }} failure=${failure?.message}"
             )
-            loaded && links.isNotEmpty()
+            item.name to (loaded && links.isNotEmpty())
         }
 
-        val required = if (case.requireAll) outcomes.size else (outcomes.size + 1) / 2
-        val successes = outcomes.count { it }
+        val successes = outcomes.count { it.second }
+        val failedSamples = outcomes
+            .filterNot { it.second }
+            .joinToString { it.first }
         assertTrue(
-            successes >= required,
+            successes == outcomes.size,
             "${case.provider.name} emitted links for only $successes/${catalog.size} " +
-                "current catalog samples; required $required"
+                "current catalog samples; every sample is required. " +
+                "Failed samples: $failedSamples"
         )
     }
 
     private data class ProviderCase(
         val provider: MainAPI,
         val categoryName: String? = null,
-        val sampleSize: Int = 3,
-        val requireAll: Boolean = false
+        val sampleSize: Int = 3
     )
 }

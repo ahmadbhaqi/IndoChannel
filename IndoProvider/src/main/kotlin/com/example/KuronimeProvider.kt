@@ -171,6 +171,24 @@ open class KuronimeProvider : MainAPI() {
         val html = fetch.text
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
 
+        val downloadCandidates = ProviderHtmlParser.downloadCandidateUrls(document, fetch.url)
+            .sortedBy { candidate ->
+                if (pixeldrainDirectMediaUrl(candidate) != null) 0 else 1
+            }
+            .map { candidate ->
+                PlayerResolutionCandidate(candidate, fetch.url)
+            }
+        if (
+            downloadCandidates.isNotEmpty() &&
+            resolver.resolveFirstVerified(
+                downloadCandidates,
+                maxConcurrency = 3,
+                tierTimeoutMs = DOWNLOAD_FAST_PATH_TIMEOUT_MS
+            )
+        ) {
+            return true
+        }
+
         InlineDataParser.kuronimeSourceId(html)?.let { sourceId ->
             try {
                 val response = app.post(
@@ -219,6 +237,7 @@ open class KuronimeProvider : MainAPI() {
     }
 
     private companion object {
+        const val DOWNLOAD_FAST_PATH_TIMEOUT_MS = 20_000L
         const val KUROPLAYER_ORIGIN = "https://player.animeku.org"
         const val KUROPLAYER_REFERER = "$KUROPLAYER_ORIGIN/"
     }

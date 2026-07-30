@@ -12,6 +12,42 @@ import kotlin.test.assertTrue
 
 class ProviderLiveDiagnosticTest {
     @Test
+    fun `pusatfilm Con City keeps a playable mirror fallback`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val page = "https://v4.pusatfilm21info.com/con-city-2026/"
+        val document = withTimeout(45_000) { app.get(page, timeout = 30L).document }
+        val iframes = document
+            .select("div.gmr-embed-responsive iframe, div.movieplay iframe, iframe")
+            .mapNotNull { ProviderHtmlParser.firstIframeSource(it) }
+        val mirrors = iframes.flatMap { iframe ->
+            runCatching {
+                KotakDataFrameParser.urls(
+                    app.get(iframe, referer = page, timeout = 30L).text
+                )
+            }.getOrDefault(emptyList())
+        }
+        val links = mutableListOf<ExtractorLink>()
+        val loaded = withTimeout(120_000) {
+            PusatfilmProvider().loadLinks(page, false, {}, links::add)
+        }
+
+        println(
+            "Pusatfilm Con City iframes=${iframes.map { it.safeHost() }} " +
+                "mirrors=${mirrors.map { it.safeHost() }} " +
+                "loaded=$loaded links=${links.map { it.url.safeHost() }}"
+        )
+        assertTrue(
+            loaded && links.isNotEmpty(),
+            "Pusatfilm Con City did not resolve any collected mirror: " +
+                mirrors.map { it.safeHost() }
+        )
+    }
+
+    @Test
     fun `layarkaca Backrooms keeps a referer aware Strcloud fallback`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
             org.junit.Assume.assumeTrue(false)

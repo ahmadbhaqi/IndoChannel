@@ -30,7 +30,8 @@ internal object KotakDataFrameParser {
         val decoded = decodeBase64Compat(payload)
             ?.takeIf { it.size <= MAX_DECODED_SIZE && it.all(::isPrintableAscii) }
             ?: return null
-        val url = decoded.toString(Charsets.US_ASCII).trim()
+        val rawUrl = decoded.toString(Charsets.US_ASCII).trim()
+        val url = if (rawUrl.startsWith("//")) "https:$rawUrl" else rawUrl
         return url.takeIf(::isSafeRemoteHttpUrl)
     }
 

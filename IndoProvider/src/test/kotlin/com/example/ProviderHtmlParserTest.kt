@@ -270,6 +270,32 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `downloadCandidateUrls accepts Tsuki download rows`() {
+        val document = Jsoup.parse(
+            """
+            <div class="soraurlx">
+              <strong>360p</strong>
+              <a href="https://gofile.io/d/current">Gofile</a>
+              <a href="https://pixeldrain.com/u/current-file">Pixeldrain</a>
+              <a href="https://acefile.co/f/untrusted">Acefile</a>
+            </div>
+            """.trimIndent(),
+            "https://anime.example/episode/current/"
+        )
+
+        assertEquals(
+            listOf(
+                "https://gofile.io/d/current",
+                "https://pixeldrain.com/u/current-file"
+            ),
+            ProviderHtmlParser.downloadCandidateUrls(
+                document,
+                "https://anime.example/episode/current/"
+            )
+        )
+    }
+
+    @Test
     fun `cached movie URLs survive known provider domain rotations`() {
         val cases = listOf(
             Triple("https://comblank.com/movie/", "https://filmbioskop21.lk21.in.net", setOf("comblank.com")),
@@ -721,6 +747,92 @@ class ProviderHtmlParserTest {
             extractorRequests
         )
         assertEquals("https://cdn.example/master.m3u8", links.single().url)
+    }
+
+    @Test
+    fun `resolution session converts Pixeldrain shares to direct media`() = runBlocking {
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = ZoronimeProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { _, _ -> "<html></html>" },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { it },
+            directLinkFactory = { source, name, url, referer, quality, type, headers ->
+                directExtractorLink(source, name, url, referer, quality, type, headers)
+            }
+        )
+
+        assertTrue(
+            session.resolve(
+                "https://pixeldrain.com/u/8dFvxgp1",
+                "https://zoronime.live/episode/current/"
+            )
+        )
+        assertEquals(
+            "https://pixeldrain.com/api/file/8dFvxgp1",
+            links.single().url
+        )
+        assertEquals(ExtractorLinkType.VIDEO, links.single().type)
+    }
+
+    @Test
+    fun `Pixeldrain direct conversion rejects URL shape escapes`() {
+        assertEquals(
+            "https://pixeldrain.com/api/file/current-file",
+            pixeldrainDirectMediaUrl("https://www.pixeldrain.com/u/current-file")
+        )
+        listOf(
+            "http://pixeldrain.com/u/current-file",
+            "https://user@pixeldrain.com/u/current-file",
+            "https://pixeldrain.com:8443/u/current-file",
+            "https://cdn.pixeldrain.com/u/current-file",
+            "https://pixeldrain.com/l/current-file",
+            "https://pixeldrain.com/api/file/current-file",
+            "https://pixeldrain.com/u/x",
+            "https://pixeldrain.com/unrelated/current-file"
+        ).forEach { url ->
+            assertNull(pixeldrainDirectMediaUrl(url), url)
+        }
+    }
+
+    @Test
+    fun `bounded candidate tier preserves session budget for primary fallback`() = runBlocking {
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = ZoronimeProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { _, _ ->
+                delay(250)
+                "<html></html>"
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { it },
+            candidateTimeoutMs = 500L,
+            sessionTimeoutMs = 2_000L
+        )
+
+        assertFalse(
+            session.resolveFirstVerified(
+                listOf(
+                    PlayerResolutionCandidate(
+                        "https://slow.example/embed/current",
+                        "https://zoronime.live/episode/current/"
+                    )
+                ),
+                maxConcurrency = 1,
+                tierTimeoutMs = 50L
+            )
+        )
+        assertTrue(
+            session.resolve(
+                "https://cdn.example/healthy.mp4",
+                "https://zoronime.live/episode/current/"
+            )
+        )
+        assertEquals("https://cdn.example/healthy.mp4", links.single().url)
     }
 
     @Test

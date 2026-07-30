@@ -46,7 +46,8 @@ internal object ProviderHtmlParser {
     private const val MAX_DOWNLOAD_CANDIDATES = 8
     private const val downloadListLinkSelector =
         ".gmr-download-list a[href], .gmr-download-wrap a[href], .gmr-download a[href], " +
-            ".download-list a[href], .download-links a[href], #download a[href], #downloads a[href]"
+            ".download-list a[href], .download-links a[href], .soraurlx a[href], " +
+            "#download a[href], #downloads a[href]"
     private val mediaMetaSelectors = listOf(
         "meta[property=og:video:url]",
         "meta[property=og:video:secure_url]",

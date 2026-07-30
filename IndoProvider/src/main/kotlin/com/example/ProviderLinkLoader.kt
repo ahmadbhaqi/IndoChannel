@@ -273,7 +273,24 @@ internal class LinkResolutionSession(
 
     suspend fun resolveFirstVerified(
         candidates: List<PlayerResolutionCandidate>,
-        maxConcurrency: Int = 3
+        maxConcurrency: Int = 3,
+        tierTimeoutMs: Long? = null
+    ): Boolean {
+        val timeoutMs = tierTimeoutMs
+            ?.coerceAtLeast(1L)
+            ?.let { minOf(it, remainingBudgetMs().coerceAtLeast(1L)) }
+        return if (timeoutMs == null) {
+            resolveFirstVerifiedWithinSession(candidates, maxConcurrency)
+        } else {
+            withTimeoutOrNull(timeoutMs) {
+                resolveFirstVerifiedWithinSession(candidates, maxConcurrency)
+            } ?: loaded
+        }
+    }
+
+    private suspend fun resolveFirstVerifiedWithinSession(
+        candidates: List<PlayerResolutionCandidate>,
+        maxConcurrency: Int
     ): Boolean = mirrorRaceMutex.withLock {
         supervisorScope {
             if (loaded) return@supervisorScope true
@@ -373,6 +390,45 @@ internal class LinkResolutionSession(
             }
 
             val host = URI(url).host.orEmpty().lowercase()
+            pixeldrainDirectMediaUrl(url)?.let { direct ->
+                val beforeAdapter = emittedLinks.size
+                emitDirect(direct, url, ExtractorLinkType.VIDEO)
+                if (emittedLinks.size > beforeAdapter) return
+            }
+
+            if (FilmapikPlayerParser.isEfekPlayerUrl(url)) {
+                val html = pageFetcher(url, referer)
+                cachedHtml = html
+                if (ProviderHtmlParser.isNonContentPage(html)) return
+                val firstAttemptLinks = mutableListOf<ExtractorLink>()
+                val storageRetryLinks = mutableListOf<ExtractorLink>()
+                for (source in FilmapikPlayerParser.sources(html, url).take(8)) {
+                    for (mediaUrl in FilmapikPlayerParser.mediaUrlCandidates(source.url)) {
+                        val link = directLinkFactory(
+                            api.name,
+                            "${api.name} ${source.label}",
+                            mediaUrl,
+                            url,
+                            source.quality,
+                            ExtractorLinkType.VIDEO,
+                            mapOf("Referer" to url)
+                        )
+                        firstAttemptLinks += link
+                        if (FilmapikPlayerParser.isEfekStorageUrl(mediaUrl)) {
+                            storageRetryLinks += link
+                        }
+                    }
+                }
+                val beforeAdapter = emittedLinks.size
+                emitVerifiedBatch(firstAttemptLinks)
+                if (emittedLinks.size == beforeAdapter) {
+                    emitVerifiedBatch(storageRetryLinks)
+                }
+                // Efek is a player shell. Generic extraction cannot recover
+                // more after its bounded source candidates fail verification.
+                return
+            }
+
             ContentXPlayerParser.apiUrl(url, referer)?.let { apiUrl ->
                 val encrypted = pageFetcher(apiUrl, url)
                 ContentXPlayerParser.playback(encrypted, url)?.let { playback ->
@@ -1604,6 +1660,26 @@ internal fun publicIpHttpFallback(url: String): String? {
         !isPublicIpv4(host)
     ) return null
     return "http:${url.substringAfter(':')}".takeIf(::isSafeRemoteHttpUrl)
+}
+
+internal fun pixeldrainDirectMediaUrl(url: String): String? {
+    val uri = runCatching { URI(url) }.getOrNull() ?: return null
+    val host = uri.host
+        ?.lowercase()
+        ?.removePrefix("www.")
+        ?: return null
+    if (
+        !uri.scheme.equals("https", ignoreCase = true) ||
+        host != "pixeldrain.com" ||
+        uri.userInfo != null ||
+        uri.port !in setOf(-1, 443)
+    ) return null
+    val fileId = Regex("^/u/([A-Za-z0-9_-]{2,128})/?$")
+        .matchEntire(uri.path.orEmpty())
+        ?.groupValues
+        ?.getOrNull(1)
+        ?: return null
+    return "https://pixeldrain.com/api/file/$fileId"
 }
 
 internal fun juicyCodesPlayerPageHeaders(url: String): Map<String, String> {

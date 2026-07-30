@@ -1,10 +1,12 @@
 package com.example
 
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 
 class FilmapikPlayerParserTest {
@@ -48,17 +50,21 @@ class FilmapikPlayerParserTest {
     }
 
     @Test
-    fun `slow Efek player is deferred until regular and download fallbacks`() {
+    fun `regular player leads but Efek primary stays ahead of download fallbacks`() {
         assertEquals(
             listOf(
                 "https://abyssplayer.com/embed/healthy",
-                "https://bysebuho.com/download/backup",
-                "https://v2.efek.stream/v/slow"
+                "https://fiilmapik.strp2p.site/#current",
+                "https://v2.efek.stream/v/current",
+                "https://vidmoly.net/embed/regular-third",
+                "https://bysebuho.com/download/backup"
             ),
             FilmapikPlayerParser.orderedPlayerCandidates(
                 primary = listOf(
-                    "https://v2.efek.stream/v/slow",
-                    "https://abyssplayer.com/embed/healthy"
+                    "https://v2.efek.stream/v/current",
+                    "https://abyssplayer.com/embed/healthy",
+                    "https://fiilmapik.strp2p.site/#current",
+                    "https://vidmoly.net/embed/regular-third"
                 ),
                 fallback = listOf(
                     "https://bysebuho.com/download/backup",
@@ -67,6 +73,180 @@ class FilmapikPlayerParserTest {
                 pageUrl = "https://filmapik.college/example/play"
             )
         )
+    }
+
+    @Test
+    fun `raced Filmapik direct candidates retain browser origin`() = runBlocking {
+        val referer = "https://filmapik.college/example/play"
+        val candidates = FilmapikPlayerParser.resolutionCandidates(
+            listOf("https://cdn.example/healthy.mp4"),
+            referer
+        )
+        val links = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = FilmapikProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            mediaLinkProbe = { it }
+        )
+
+        assertTrue(candidates.single().inline)
+        assertTrue(session.resolveFirstVerified(candidates, maxConcurrency = 1))
+        assertEquals("https://filmapik.college", links.single().headers["Origin"])
+    }
+
+    @Test
+    fun `resolution session treats extensionless Efek streams as media`() = runBlocking {
+        val playerUrl = "https://v2.efek.stream/v/current"
+        val links = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = FilmapikProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                assertEquals(playerUrl, url)
+                """
+                    <script>
+                      const sources = [
+                        {'label':'720p','type':'video/mp4',
+                         'file':'/stream/720/current/__001'}
+                      ];
+                    </script>
+                """.trimIndent()
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { link ->
+                link.takeIf { it.url.startsWith("https://s2.efek.stream/") }
+            },
+            candidateTimeoutMs = 500L,
+            sessionTimeoutMs = 2_000L
+        )
+
+        assertTrue(session.resolve(playerUrl, "https://filmapik.college/example/play"))
+        assertEquals(
+            "https://s2.efek.stream/stream/720/current/__001",
+            links.single().url
+        )
+    }
+
+    @Test
+    fun `Efek storage retry starts only after the first attempt fails`() = runBlocking {
+        val playerUrl = "https://v2.efek.stream/v/current"
+        val links = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        val storageCalls = AtomicInteger()
+        val activeStorageProbes = AtomicInteger()
+        val maxActiveStorageProbes = AtomicInteger()
+        val session = LinkResolutionSession(
+            api = FilmapikProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { _, _ ->
+                """
+                    <script>
+                      const sources = [
+                        {'label':'720p','type':'video/mp4',
+                         'file':'/stream/720/current/__001'}
+                      ];
+                    </script>
+                """.trimIndent()
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { link ->
+                if (!link.url.startsWith("https://s2.efek.stream/")) {
+                    null
+                } else {
+                    val call = storageCalls.incrementAndGet()
+                    val active = activeStorageProbes.incrementAndGet()
+                    maxActiveStorageProbes.updateAndGet { current -> maxOf(current, active) }
+                    delay(50)
+                    activeStorageProbes.decrementAndGet()
+                    link.takeIf { call == 2 }
+                }
+            },
+            candidateTimeoutMs = 1_000L,
+            sessionTimeoutMs = 3_000L
+        )
+
+        assertTrue(session.resolve(playerUrl, "https://filmapik.college/example/play"))
+        assertEquals(2, storageCalls.get())
+        assertEquals(1, maxActiveStorageProbes.get())
+        assertEquals(
+            "https://s2.efek.stream/stream/720/current/__001",
+            links.single().url
+        )
+    }
+
+    @Test
+    fun `slow Efek storage probe cannot block its healthy player sibling`() = runBlocking {
+        val playerUrl = "https://v2.efek.stream/v/current"
+        val links = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = FilmapikProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { _, _ ->
+                """
+                    <script>
+                      const sources = [
+                        {'label':'720p','type':'video/mp4',
+                         'file':'/stream/720/current/__001'}
+                      ];
+                    </script>
+                """.trimIndent()
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { link ->
+                if (link.url.startsWith("https://s2.efek.stream/")) {
+                    delay(1_500)
+                    null
+                } else {
+                    link
+                }
+            },
+            candidateTimeoutMs = 500L,
+            sessionTimeoutMs = 3_000L
+        )
+
+        assertTrue(session.resolve(playerUrl, "https://filmapik.college/example/play"))
+        assertEquals(
+            "https://v2.efek.stream/stream/720/current/__001",
+            links.single().url
+        )
+    }
+
+    @Test
+    fun `stalled Efek candidate cannot block a healthy raced download`() = runBlocking {
+        val links = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = FilmapikProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { _, _ ->
+                delay(500)
+                "<html></html>"
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { it },
+            candidateTimeoutMs = 100L,
+            sessionTimeoutMs = 1_000L
+        )
+
+        assertTrue(
+            session.resolveFirstVerified(
+                listOf(
+                    PlayerResolutionCandidate(
+                        "https://v2.efek.stream/v/dead",
+                        "https://filmapik.college/example/play"
+                    ),
+                    PlayerResolutionCandidate(
+                        "https://cdn.example/healthy.mp4",
+                        "https://filmapik.college/example/play"
+                    )
+                ),
+                maxConcurrency = 2
+            )
+        )
+        assertEquals("https://cdn.example/healthy.mp4", links.single().url)
     }
 
     @Test

@@ -11,6 +11,9 @@ import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
 
+private const val FILMAPIK_CANDIDATE_TIMEOUT_MS = 45_000L
+private const val FILMAPIK_MEDIA_PROBE_TIMEOUT_SECONDS = 22L
+
 class FilmapikProvider : MainAPI() {
     override var mainUrl = "https://filmapik.college"
     override var name = "Filmapik"
@@ -158,10 +161,10 @@ class FilmapikProvider : MainAPI() {
             this,
             subtitleCallback,
             callback,
-            candidateTimeoutMs = 25_000L,
+            candidateTimeoutMs = FILMAPIK_CANDIDATE_TIMEOUT_MS,
+            mediaProbeTimeoutSeconds = FILMAPIK_MEDIA_PROBE_TIMEOUT_SECONDS,
             sessionTimeoutMs = 75_000L
         )
-        val directUrls = mutableSetOf<String>()
         val pages = listOfNotNull(
             FilmapikPlayerParser.playPageUrl(canonicalData),
             canonicalData
@@ -190,9 +193,11 @@ class FilmapikProvider : MainAPI() {
                     downloads,
                     pageUrl
                 )
-                for (raw in candidates) {
-                    if (!resolver.canContinue || resolver.loaded) break
-                    resolvePlayer(raw, pageUrl, resolver, directUrls)
+                if (candidates.isNotEmpty()) {
+                    resolver.resolveFirstVerified(
+                        FilmapikPlayerParser.resolutionCandidates(candidates, pageUrl),
+                        maxConcurrency = 3
+                    )
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -200,52 +205,6 @@ class FilmapikProvider : MainAPI() {
             }
         }
         return resolver.loaded
-    }
-
-    private suspend fun resolvePlayer(
-        raw: String?,
-        referer: String,
-        resolver: LinkResolutionSession,
-        directUrls: MutableSet<String>
-    ) {
-        if (resolver.loaded || !resolver.canContinue) return
-        val playerUrl = ProviderHtmlParser.absoluteUrl(raw, referer) ?: return
-        if (!FilmapikPlayerParser.isEfekPlayerUrl(playerUrl)) {
-            resolver.resolveInline(playerUrl, referer)
-            return
-        }
-
-        try {
-            val html = resolver.withinBudget {
-                app.get(
-                    playerUrl,
-                    referer = referer,
-                    timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
-                ).text
-            } ?: return
-            for (source in FilmapikPlayerParser.sources(html, playerUrl)) {
-                for (mediaUrl in FilmapikPlayerParser.mediaUrlCandidates(source.url)) {
-                    if (resolver.loaded || !resolver.canContinue) break
-                    if (!directUrls.add(mediaUrl)) continue
-                    val attempts = if (FilmapikPlayerParser.isEfekStorageUrl(mediaUrl)) 2 else 1
-                    repeat(attempts) {
-                        if (resolver.loaded || !resolver.canContinue) return@repeat
-                        resolver.emitResolved(
-                            newExtractorLink(name, "$name ${source.label}", mediaUrl, ExtractorLinkType.VIDEO) {
-                                this.referer = playerUrl
-                                quality = source.quality
-                                headers = mapOf("Referer" to playerUrl)
-                            }
-                        )
-                        if (resolver.loaded) return
-                    }
-                }
-            }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Exception) {
-            // A dead Efek player must not suppress a later server button.
-        }
     }
 
     data class FilmapikSearchItem(
@@ -385,7 +344,10 @@ internal object FilmapikPlayerParser {
             ?.equals("s", ignoreCase = true) == true
     }
 
-    /** Dead Efek shards are common, so preserve every fallback ahead of them. */
+    /**
+     * The caller races three candidates at a time. Keep up to two regular
+     * primaries first, then place one Efek primary in that initial race window.
+     */
     fun orderedPlayerCandidates(
         primary: List<String>,
         fallback: List<String>,
@@ -397,7 +359,23 @@ internal object FilmapikPlayerParser {
             .distinct()
         val (efekPlayers, regularPlayers) = primaryUrls.partition(::isEfekPlayerUrl)
         val (efekFallbacks, regularFallbacks) = fallbackUrls.partition(::isEfekPlayerUrl)
-        return (regularPlayers + regularFallbacks + efekPlayers + efekFallbacks).distinct()
+        val primaryRaceOrder = regularPlayers.take(2) +
+            efekPlayers.take(1) +
+            regularPlayers.drop(2) +
+            efekPlayers.drop(1)
+        return (primaryRaceOrder + regularFallbacks + efekFallbacks).distinct()
+    }
+
+    fun resolutionCandidates(
+        candidates: List<String>,
+        pageUrl: String
+    ): List<PlayerResolutionCandidate> {
+        return candidates
+            .mapNotNull { candidate -> ProviderHtmlParser.absoluteUrl(candidate, pageUrl) }
+            .distinct()
+            .map { candidate ->
+                PlayerResolutionCandidate(candidate, pageUrl, inline = true)
+            }
     }
 
     /**

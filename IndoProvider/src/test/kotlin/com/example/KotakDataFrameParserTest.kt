@@ -29,6 +29,21 @@ class KotakDataFrameParserTest {
     }
 
     @Test
+    fun `normalizes protocol relative Kotakajaib mirrors`() {
+        val html = """
+            <button class="server-item"
+                data-frame="${encoded("//gdriveplayer.to/embed2.php?link=current")}">
+                GDRIVE
+            </button>
+        """.trimIndent()
+
+        assertEquals(
+            listOf("https://gdriveplayer.to/embed2.php?link=current"),
+            KotakDataFrameParser.urls(html)
+        )
+    }
+
+    @Test
     fun `rejects malformed relative and local destinations`() {
         val candidates = listOf(
             "not base64!",
