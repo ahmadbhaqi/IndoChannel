@@ -305,9 +305,14 @@ class ProviderDomainTest {
             File("IndoProvider/build.gradle.kts")
         ).first { file -> file.exists() && file.readText().contains("cloudstream") }
 
+        val pluginVersion = Regex("""(?m)^version\s*=\s*(\d+)\s*$""")
+            .find(moduleBuild.readText())
+            ?.groupValues
+            ?.get(1)
+            ?.toIntOrNull()
         assertTrue(
-            Regex("""(?m)^version\s*=\s*17\s*$""").containsMatchIn(moduleBuild.readText()),
-            "Cloudstream must see the provider expansion as a new plugin release"
+            pluginVersion != null && pluginVersion >= 17,
+            "Cloudstream must see the provider expansion as plugin release 17 or newer"
         )
     }
 

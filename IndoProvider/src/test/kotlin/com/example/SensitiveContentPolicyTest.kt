@@ -38,7 +38,6 @@ class SensitiveContentPolicyTest {
         listOf(
             "Hentai Anime",
             "Erotic Thriller",
-            "Ecchi Romance",
             "/genre/hentai-anime/",
             "NSFW"
         ).forEach { category ->
@@ -46,6 +45,47 @@ class SensitiveContentPolicyTest {
                 SensitiveContentPolicy.isBlocked(
                     title = "Neutral Looking Title",
                     url = "https://provider.example/neutral-looking-title/",
+                    categories = listOf(category)
+                ),
+                category
+            )
+        }
+    }
+
+    @Test
+    fun `allows ecchi taxonomy unless an explicit marker is also present`() {
+        listOf(
+            "Ecchi",
+            "Ecchi Romance",
+            "/genre/ecchi/",
+            "Anime, Ecchi, Comedy",
+            "Ecchi 18+",
+            "18+",
+            "NC-17"
+        ).forEach { category ->
+            assertFalse(
+                SensitiveContentPolicy.isBlocked(
+                    title = "Ordinary Anime",
+                    url = "https://provider.example/ordinary-anime/",
+                    categories = listOf(category)
+                ),
+                category
+            )
+        }
+
+        listOf(
+            "Ecchi Hentai",
+            "Ecchi NSFW",
+            "Ecchi Adult",
+            "18+ Hentai",
+            "Japanese AV",
+            "/genre/jav/",
+            "Porn"
+        ).forEach { category ->
+            assertTrue(
+                SensitiveContentPolicy.isBlocked(
+                    title = "Ordinary Anime",
+                    url = "https://provider.example/ordinary-anime/",
                     categories = listOf(category)
                 ),
                 category
@@ -62,6 +102,34 @@ class SensitiveContentPolicyTest {
                 categories = listOf("Trending")
             )
         )
+        assertTrue(
+            SensitiveContentPolicy.isBlocked(
+                title = "Hentai Academy Episode 1",
+                url = "https://provider.example/hentai-academy-episode-1/",
+                categories = emptyList()
+            )
+        )
+        assertTrue(
+            SensitiveContentPolicy.isBlocked(
+                title = "The Hentai Prince Porn Parody",
+                url = "https://provider.example/the-hentai-prince-porn-parody/",
+                categories = listOf("Comedy")
+            )
+        )
+        listOf(
+            "NSFW Special",
+            "Erotic Private Story",
+            "Film Semi Jepang"
+        ).forEach { title ->
+            assertTrue(
+                SensitiveContentPolicy.isBlocked(
+                    title = title,
+                    url = "https://provider.example/${title.lowercase().replace(' ', '-')}/",
+                    categories = emptyList()
+                ),
+                title
+            )
+        }
     }
 
     @Test
@@ -72,7 +140,8 @@ class SensitiveContentPolicyTest {
             "xXx: Return of Xander Cage",
             "Semi-Pro",
             "Adult Beginners",
-            "Sanger Things"
+            "Sanger Things",
+            "Violent Night 18+"
         ).forEach { title ->
             assertFalse(
                 SensitiveContentPolicy.isBlocked(
@@ -102,6 +171,28 @@ class SensitiveContentPolicyTest {
                 title = "Solo Leveling",
                 url = "https://provider.example/solo-leveling/",
                 categories = listOf("/genre/adult-cast/")
+            )
+        )
+        listOf(
+            "Young Adult",
+            "Adult Animation",
+            "Adult Comedy",
+            "Adult Swim"
+        ).forEach { category ->
+            assertFalse(
+                SensitiveContentPolicy.isBlocked(
+                    title = "Ordinary Animation",
+                    url = "https://provider.example/ordinary-animation/",
+                    categories = listOf(category)
+                ),
+                category
+            )
+        }
+        assertTrue(
+            SensitiveContentPolicy.isBlocked(
+                title = "Ordinary Animation",
+                url = "https://provider.example/ordinary-animation/",
+                categories = listOf("Young Adult / Adult")
             )
         )
         assertFalse(

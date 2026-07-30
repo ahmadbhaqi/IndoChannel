@@ -6,30 +6,37 @@ import java.text.Normalizer
 import java.util.Locale
 
 /**
- * Conservative, provider-independent SFW gate.
+ * Conservative, provider-independent explicit-content gate.
  *
  * Ambiguous words are intentionally not title signals. Strong taxonomy
  * metadata may block an item by itself, while title/slug filtering is limited
- * to explicit Indonesian terms that do not occur in ordinary movie names.
+ * to explicit terms with narrow exceptions for known non-explicit titles.
  */
 internal object SensitiveContentPolicy {
-    private val strongCategoryPhrases = listOf(
+    private val explicitCategoryPhrases = listOf(
         Regex("""\bfilm\s+semi\b"""),
         Regex("""\bsemi\s+(?:filipina|jepang|korea|barat|thailand)\b"""),
-        Regex("""\b18\s*(?:plus|\+)\b"""),
-        Regex("""\bnc\s*17\b""")
+        Regex("""\bjapanese\s+av\b""")
     )
-    private val unambiguousCategoryToken = Regex(
-        """\b(?:nsfw|hentai|ecchi|smut|erotic|erotica|erotis|bokep|pornografi|sex)\b"""
+    private val explicitCategoryToken = Regex(
+        """\b(?:nsfw|hentai|smut|erotic|erotica|erotis|bokep|porn|porno|pornografi|pornography|pornographic|sex|jav)\b"""
     )
     private val adultCategoryToken = Regex("""\badult\b""")
     private val allowedAdultCategoryPhrases = listOf(
+        Regex("""\byoung\s+adult\b"""),
         Regex("""\badult\s+cast\b"""),
         Regex("""\badult\s+life\b"""),
-        Regex("""\badult\s+beginners?\b""")
+        Regex("""\badult\s+beginners?\b"""),
+        Regex("""\badult\s+animation\b"""),
+        Regex("""\badult\s+comedy\b"""),
+        Regex("""\badult\s+swim\b""")
     )
     private val explicitTitleOrSlug = Regex(
-        """\b(?:bokep|pornografi|porno|sange|sangean|sangenya|tobrut|ngewe|ngentot)\b"""
+        """\b(?:nsfw|hentai|smut|erotic|erotica|erotis|jav|bokep|porn|pornografi|porno|sange|sangean|sangenya|tobrut|ngewe|ngentot)\b"""
+    )
+    private val allowedExplicitWordTitlePhrases = listOf(
+        Regex("""\bthe\s+hentai\s+prince(?:\s+and\s+the\s+stony\s+cat)?\b"""),
+        Regex("""\bhentai\s+ouji\s+to\s+warawanai\s+neko\b""")
     )
 
     fun isBlocked(
@@ -39,12 +46,9 @@ internal object SensitiveContentPolicy {
     ): Boolean {
         if (categories.any { category ->
                 val normalized = normalize(category)
-                unambiguousCategoryToken.containsMatchIn(normalized) ||
-                    (
-                        adultCategoryToken.containsMatchIn(normalized) &&
-                            allowedAdultCategoryPhrases.none { it.containsMatchIn(normalized) }
-                        ) ||
-                    strongCategoryPhrases.any { it.containsMatchIn(normalized) }
+                explicitCategoryToken.containsMatchIn(normalized) ||
+                    containsBlockedAdultCategory(normalized) ||
+                    explicitCategoryPhrases.any { it.containsMatchIn(normalized) }
             }
         ) {
             return true
@@ -52,8 +56,24 @@ internal object SensitiveContentPolicy {
         return sequenceOf(title, decodeUrl(url))
             .filterNotNull()
             .map(::normalize)
-            .any(explicitTitleOrSlug::containsMatchIn)
+            .map(::removeAllowedExplicitWordTitlePhrases)
+            .any { normalized ->
+                explicitTitleOrSlug.containsMatchIn(normalized) ||
+                    explicitCategoryPhrases.any { it.containsMatchIn(normalized) }
+            }
     }
+
+    private fun containsBlockedAdultCategory(value: String): Boolean {
+        val withoutAllowedPhrases = allowedAdultCategoryPhrases.fold(value) { filtered, allowedPhrase ->
+            allowedPhrase.replace(filtered, " ")
+        }
+        return adultCategoryToken.containsMatchIn(withoutAllowedPhrases)
+    }
+
+    private fun removeAllowedExplicitWordTitlePhrases(value: String): String =
+        allowedExplicitWordTitlePhrases.fold(value) { filtered, allowedPhrase ->
+            allowedPhrase.replace(filtered, " ")
+        }
 
     private fun decodeUrl(value: String?): String? = value?.let {
         runCatching { URLDecoder.decode(it, Charsets.UTF_8.name()) }.getOrDefault(it)

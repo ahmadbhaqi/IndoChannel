@@ -129,7 +129,12 @@ class ProviderExpansionTest {
     @Test
     fun `provider repairs bump the plugin release`() {
         val moduleBuild = File(projectRoot, "IndoProvider/build.gradle.kts").readText()
-        assertTrue(Regex("""(?m)^version\s*=\s*17\s*$""").containsMatchIn(moduleBuild))
+        val pluginVersion = Regex("""(?m)^version\s*=\s*(\d+)\s*$""")
+            .find(moduleBuild)
+            ?.groupValues
+            ?.get(1)
+            ?.toIntOrNull()
+        assertTrue(pluginVersion != null && pluginVersion >= 17)
     }
 
     @Test
