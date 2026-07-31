@@ -14,6 +14,7 @@ import com.lagradost.nicehttp.RequestBodyTypes
 import java.net.URI
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 
@@ -55,6 +56,14 @@ class MovieboxProvider : MainAPI() {
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
     override suspend fun search(query: String): List<SearchResponse> {
+        return resolveMovieboxSearchCandidates(
+            query = query,
+            remoteSearch = { fetchSearchItems(query) },
+            homepageFallback = { fetchHomeItems() }
+        ).mapNotNull(::toSearchResponse)
+    }
+
+    private suspend fun fetchSearchItems(query: String): List<MovieboxItem> {
         val authorization = fetchAuthorization(query) ?: return emptyList()
         val body = mapOf(
             "keyword" to query,
@@ -68,7 +77,15 @@ class MovieboxProvider : MainAPI() {
             MovieboxApi.apiHeaders + ("Authorization" to authorization),
             MOVIEBOX_JSON_BODY_LIMIT_BYTES
         )?.parse<MovieboxSearchResponse>()
-        return response?.availableItems().orEmpty().mapNotNull(::toSearchResponse)
+        return response?.availableItems().orEmpty()
+    }
+
+    private suspend fun fetchHomeItems(): List<MovieboxItem> {
+        return getApi(
+            MovieboxApi.homeUrl(mainUrl),
+            MovieboxApi.apiHeaders,
+            MOVIEBOX_HOME_BODY_LIMIT_BYTES
+        )?.parse<MovieboxHomeResponse>()?.availableItems().orEmpty()
     }
 
     override suspend fun load(url: String): LoadResponse? {
@@ -405,6 +422,66 @@ internal object MovieboxApi {
 private const val MOVIEBOX_MAX_SEASONS = 100
 private const val MOVIEBOX_MAX_EPISODES_PER_SEASON = 2_000
 private const val MOVIEBOX_MAX_TOTAL_EPISODES = 5_000
+private const val MOVIEBOX_SEARCH_ATTEMPTS = 2
+private const val MOVIEBOX_SEARCH_ATTEMPT_TIMEOUT_MS = 30_000L
+private const val MOVIEBOX_SEARCH_RESULT_LIMIT = 30
+
+internal suspend fun resolveMovieboxSearchCandidates(
+    query: String,
+    remoteSearch: suspend () -> List<MovieboxItem>,
+    homepageFallback: suspend () -> List<MovieboxItem>
+): List<MovieboxItem> {
+    repeat(MOVIEBOX_SEARCH_ATTEMPTS) {
+        val candidates = try {
+            withTimeoutOrNull(MOVIEBOX_SEARCH_ATTEMPT_TIMEOUT_MS) {
+                remoteSearch()
+            }.orEmpty()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            emptyList()
+        }.filter(::isUsableMovieboxSearchItem)
+            .distinctBy { it.subjectId }
+            .take(MOVIEBOX_SEARCH_RESULT_LIMIT)
+
+        if (candidates.isNotEmpty()) return candidates
+    }
+
+    val queryTokens = movieboxSearchTokens(query)
+    if (queryTokens.isEmpty()) return emptyList()
+    val homepageItems = try {
+        withTimeoutOrNull(MOVIEBOX_SEARCH_ATTEMPT_TIMEOUT_MS) {
+            homepageFallback()
+        }.orEmpty()
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        emptyList()
+    }
+    return homepageItems.asSequence()
+        .filter(::isUsableMovieboxSearchItem)
+        .filter { item ->
+            val titleTokens = movieboxSearchTokens(item.title.orEmpty()).toSet()
+            queryTokens.all(titleTokens::contains)
+        }
+        .distinctBy { it.subjectId }
+        .take(MOVIEBOX_SEARCH_RESULT_LIMIT)
+        .toList()
+}
+
+private fun isUsableMovieboxSearchItem(item: MovieboxItem): Boolean =
+    item.hasResource == true &&
+        item.subjectId?.let(MovieboxApi::isValidSubjectId) == true &&
+        item.detailPath?.let(MovieboxApi::isValidDetailPath) == true &&
+        !item.title.isNullOrBlank()
+
+private fun movieboxSearchTokens(raw: String): List<String> =
+    Regex("""[\p{L}\p{N}]+""")
+        .findAll(raw.lowercase())
+        .map { it.value }
+        .filter { it.isNotBlank() }
+        .take(12)
+        .toList()
 
 internal fun movieboxEpisodeNumbers(raw: String?, maxEpisode: Int?): List<Int> {
     val declared = raw.orEmpty()

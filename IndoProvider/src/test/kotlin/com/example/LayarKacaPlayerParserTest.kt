@@ -1,11 +1,14 @@
 package com.example
 
+import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.jsoup.Jsoup
 
@@ -175,6 +178,290 @@ class LayarKacaPlayerParserTest {
             ),
             LayarKacaPlayerParser.pageMediaUrls(document, playerUrl)
         )
+    }
+
+    @Test
+    fun `fallback request extracts exact series coordinates from a stale episode page`() {
+        val document = Jsoup.parse(
+            """
+            <h1 class="entry-title">
+              Supergirl Season 6 Episode 1 - 20 Subtitle Indonesia
+            </h1>
+            <span class="year">2026</span>
+            """.trimIndent()
+        )
+
+        assertEquals(
+            NomatFallbackRequest(
+                title = "Supergirl",
+                year = null,
+                season = 6,
+                episode = 9
+            ),
+            LayarKacaPlayerParser.fallbackRequest(
+                document,
+                "https://tv.nontonfilm.red/eps/supergirl-season-6-episode-9/"
+            )
+        )
+    }
+
+    @Test
+    fun `fallback request keeps the requested series title across a wrong title redirect`() {
+        val document = Jsoup.parse(
+            """<h1 class="entry-title">The Flash Season 6 Episode 9</h1>"""
+        )
+
+        assertEquals(
+            NomatFallbackRequest(
+                title = "Supergirl",
+                year = null,
+                season = 6,
+                episode = 9
+            ),
+            LayarKacaPlayerParser.fallbackRequest(
+                document,
+                "https://tv.nontonfilm.red/eps/supergirl-season-6-episode-9/"
+            )
+        )
+    }
+
+    @Test
+    fun `fallback request survives an episode page without title markup`() {
+        assertEquals(
+            NomatFallbackRequest(
+                title = "Supergirl",
+                year = null,
+                season = 6,
+                episode = 9
+            ),
+            LayarKacaPlayerParser.fallbackRequest(
+                Jsoup.parse("<html><body></body></html>"),
+                "https://tv.nontonfilm.red/eps/supergirl-season-6-episode-9/"
+            )
+        )
+    }
+
+    @Test
+    fun `episode playback keeps the requested coordinate across a misleading redirect`() {
+        val requested =
+            "https://tv.nontonfilm.red/eps/supergirl-season-6-episode-9/"
+        val redirected =
+            "https://tv.nontonfilm.red/eps/supergirl-season-6-episode-1/"
+
+        assertEquals(
+            requested,
+            LayarKacaPlayerParser.playbackPageUrl(requested, redirected)
+        )
+        assertEquals(
+            "https://tv.nontonfilm.red/movie/current/",
+            LayarKacaPlayerParser.playbackPageUrl(
+                "https://tv.nontonfilm.red/movie/legacy/",
+                "https://tv.nontonfilm.red/movie/current/"
+            )
+        )
+    }
+
+    @Test
+    fun `primary playback rejects redirects or documents for another episode`() {
+        val requested =
+            "https://tv.nontonfilm.red/eps/supergirl-season-6-episode-9/"
+        val redirected =
+            "https://tv.nontonfilm.red/eps/supergirl-season-6-episode-1/"
+        val wrongDocument = Jsoup.parse(
+            """<h1 class="entry-title">Supergirl Season 6 Episode 1 - 20</h1>"""
+        )
+        val correctDocument = Jsoup.parse(
+            """<h1 class="entry-title">Supergirl Season 6 Episode 9</h1>"""
+        )
+
+        assertFalse(
+            LayarKacaPlayerParser.isPrimaryPlaybackCoordinateSafe(
+                requested,
+                redirected,
+                wrongDocument
+            )
+        )
+        assertFalse(
+            LayarKacaPlayerParser.isPrimaryPlaybackCoordinateSafe(
+                requested,
+                requested,
+                wrongDocument
+            )
+        )
+        assertFalse(
+            LayarKacaPlayerParser.isPrimaryPlaybackCoordinateSafe(
+                requested,
+                "https://tv.nontonfilm.red/watch/current/",
+                Jsoup.parse(
+                    """<h1 class="entry-title">Supergirl Episode 9</h1>"""
+                )
+            )
+        )
+        assertFalse(
+            LayarKacaPlayerParser.isPrimaryPlaybackCoordinateSafe(
+                requested,
+                "https://tv.nontonfilm.red/eps/the-flash-season-6-episode-9/",
+                Jsoup.parse(
+                    """<h1 class="entry-title">The Flash Season 6 Episode 9</h1>"""
+                )
+            )
+        )
+        assertFalse(
+            LayarKacaPlayerParser.isPrimaryPlaybackCoordinateSafe(
+                requested,
+                requested,
+                Jsoup.parse("""<h1 class="entry-title">The Flash</h1>""")
+            )
+        )
+        assertTrue(
+            LayarKacaPlayerParser.isPrimaryPlaybackCoordinateSafe(
+                requested,
+                requested,
+                correctDocument
+            )
+        )
+        assertTrue(
+            LayarKacaPlayerParser.isPrimaryPlaybackCoordinateSafe(
+                "https://tv.nontonfilm.red/movie/current/",
+                "https://tv.nontonfilm.red/movie/current/",
+                Jsoup.parse("""<h1 class="entry-title">Current Movie (2026)</h1>""")
+            )
+        )
+    }
+
+    @Test
+    fun `numeric only episode labels remain bounded and playable`() {
+        assertEquals(
+            LayarKacaEpisodeCoordinate(season = null, episode = 9),
+            LayarKacaPlayerParser.episodeCoordinate(
+                "https://tv.nontonfilm.red/eps/special/",
+                "9"
+            )
+        )
+        assertNull(
+            LayarKacaPlayerParser.episodeCoordinate(
+                "https://tv.nontonfilm.red/eps/special/",
+                "10001"
+            )
+        )
+    }
+
+    @Test
+    fun `requested episode is injected first when the redirected page omits it`() {
+        val requested =
+            "https://tv.nontonfilm.red/eps/supergirl-season-6-episode-9/"
+        val candidates = listOf(
+            "https://tv.nontonfilm.red/eps/supergirl-season-6-episode-1/" to "Episode 1",
+            "https://tv.nontonfilm.red/eps/supergirl-season-6-episode-2/" to "Episode 2"
+        )
+
+        assertEquals(
+            listOf(
+                LayarKacaEpisodeCandidate(
+                    url = requested,
+                    label = "Episode 9",
+                    season = 6,
+                    episode = 9
+                ),
+                LayarKacaEpisodeCandidate(
+                    url = candidates[0].first,
+                    label = "Episode 1",
+                    season = 6,
+                    episode = 1
+                ),
+                LayarKacaEpisodeCandidate(
+                    url = candidates[1].first,
+                    label = "Episode 2",
+                    season = 6,
+                    episode = 2
+                )
+            ),
+            LayarKacaPlayerParser.orderedEpisodeCandidates(requested, candidates)
+        )
+    }
+
+    @Test
+    fun `fallback episode selection requires one exact season and episode`() {
+        val provider = LayarKacaProvider()
+        val request = NomatFallbackRequest(
+            title = "Supergirl",
+            year = 2015,
+            season = 6,
+            episode = 9
+        )
+        val episodes = listOf(
+            provider.newEpisode("https://fallback.example/season-5-episode-9") {
+                season = 5
+                episode = 9
+            },
+            provider.newEpisode("https://fallback.example/season-6-episode-9") {
+                season = 6
+                episode = 9
+            }
+        )
+
+        assertEquals(
+            "https://fallback.example/season-6-episode-9",
+            LayarKacaPlayerParser.fallbackEpisodeData(
+                request = request,
+                candidateTitle = "Supergirl (2015)",
+                candidateYear = 2015,
+                episodes = episodes
+            )
+        )
+        assertNull(
+            LayarKacaPlayerParser.fallbackEpisodeData(
+                request = request,
+                candidateTitle = "Supergirl 2",
+                candidateYear = 2015,
+                episodes = episodes
+            )
+        )
+        assertNull(
+            LayarKacaPlayerParser.fallbackEpisodeData(
+                request = request,
+                candidateTitle = "Supergirl",
+                candidateYear = 2015,
+                episodes = episodes + episodes.last()
+            )
+        )
+    }
+
+    @Test
+    fun `fallback playback retries until a provider actually emits a link`() = runBlocking {
+        var attempts = 0
+        val emitted = mutableListOf<String>()
+
+        val loaded = retryFallbackPlayback(
+            maxAttempts = 2,
+            callback = emitted::add
+        ) { callback ->
+            attempts += 1
+            if (attempts == 1) {
+                false
+            } else {
+                callback("verified-link")
+                true
+            }
+        }
+
+        assertTrue(loaded)
+        assertEquals(2, attempts)
+        assertEquals(listOf("verified-link"), emitted)
+    }
+
+    @Test
+    fun `fallback budget cancels the whole provider chain`() = runBlocking {
+        var finished = false
+
+        val loaded = withPlaybackFallbackBudget(timeoutMs = 25) {
+            delay(250)
+            finished = true
+            true
+        }
+
+        assertFalse(loaded)
+        assertFalse(finished)
     }
 
     @Test

@@ -38,6 +38,9 @@ jobs:
           - name: Anime catalog and playback
             slug: anime
             test_class: com.example.AnimeProviderLiveTest
+          - name: CloudStream tester parity
+            slug: cloudstream-tester-parity
+            test_class: com.example.CloudstreamTesterParityLiveTest
 
     steps:
       - name: Checkout source

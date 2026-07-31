@@ -76,7 +76,8 @@ class GithubActionsRuntimeTest {
             "ProviderExpansionLiveTest",
             "MovieProviderCatalogPlaybackLiveTest",
             "IdlixProviderLiveTest",
-            "AnimeProviderLiveTest"
+            "AnimeProviderLiveTest",
+            "CloudstreamTesterParityLiveTest"
         )
         assertTrue(
             scheduledClasses.containsAll(requiredClasses),

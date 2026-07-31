@@ -658,6 +658,28 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `toPlayableUrl upgrades only legacy dood embeds to the active playmogo extractor`() {
+        val api = LayarKacaProvider()
+
+        assertEquals(
+            "https://playmogo.com/e/current-id?token=abc",
+            api.toPlayableUrl("https://dood.la/e/current-id?token=abc")
+        )
+        assertEquals(
+            "https://playmogo.com/e/a%2Fb?token=a%2Fb",
+            api.toPlayableUrl("https://dood.la/e/a%2Fb?token=a%2Fb")
+        )
+        assertEquals(
+            "https://dood.la/watch/current-id",
+            api.toPlayableUrl("https://dood.la/watch/current-id")
+        )
+        assertEquals(
+            "https://dood.la.evil.example/e/current-id",
+            api.toPlayableUrl("https://dood.la.evil.example/e/current-id")
+        )
+    }
+
+    @Test
     fun `toPlayableUrl rejects explicit non HTTP schemes`() {
         val api = RebahinProvider()
 

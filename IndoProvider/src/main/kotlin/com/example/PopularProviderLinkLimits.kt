@@ -49,6 +49,9 @@ internal object PopularProviderLinkLimits {
                     }
                     return NodeFilter.FilterResult.CONTINUE
                 }
+
+                override fun tail(node: Node, depth: Int): NodeFilter.FilterResult =
+                    NodeFilter.FilterResult.CONTINUE
             },
             document
         )
@@ -77,6 +80,9 @@ internal object PopularProviderLinkLimits {
                         NodeFilter.FilterResult.CONTINUE
                     }
                 }
+
+                override fun tail(node: Node, depth: Int): NodeFilter.FilterResult =
+                    NodeFilter.FilterResult.CONTINUE
             },
             document
         )

@@ -137,5 +137,17 @@ class PencuriNomatPlaybackRegressionTest {
         assertFalse(NomatParser.isExactFallbackMatch(request, "Awarapan 2", 2007))
         assertFalse(NomatParser.isExactFallbackMatch(request, "Awarapan", 2025))
         assertFalse(NomatParser.isExactFallbackMatch(request, "Awarapan", null))
+        assertTrue(
+            NomatParser.isExactFallbackMatch(
+                NomatFallbackRequest(
+                    title = "Supergirl",
+                    year = null,
+                    season = 6,
+                    episode = 9
+                ),
+                "Nonton Supergirl (2015)",
+                2015
+            )
+        )
     }
 }

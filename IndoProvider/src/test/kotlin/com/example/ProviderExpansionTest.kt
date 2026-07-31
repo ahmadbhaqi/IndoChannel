@@ -157,6 +157,76 @@ class ProviderExpansionTest {
     }
 
     @Test
+    fun `moviebox search retries a transient empty response before falling back`() = runBlocking {
+        val expected = MovieboxItem(
+            subjectId = "42",
+            subjectType = 1,
+            title = "The Dawn",
+            detailPath = "the-dawn-AbCdEf12345",
+            hasResource = true
+        )
+        var remoteAttempts = 0
+        var homepageAttempts = 0
+
+        val result = resolveMovieboxSearchCandidates(
+            query = "The",
+            remoteSearch = {
+                remoteAttempts += 1
+                if (remoteAttempts == 1) emptyList() else listOf(expected)
+            },
+            homepageFallback = {
+                homepageAttempts += 1
+                emptyList()
+            }
+        )
+
+        assertEquals(listOf(expected), result)
+        assertEquals(2, remoteAttempts)
+        assertEquals(0, homepageAttempts)
+    }
+
+    @Test
+    fun `moviebox search uses only matching playable homepage items after repeated failure`() =
+        runBlocking {
+            val matching = MovieboxItem(
+                subjectId = "42",
+                subjectType = 1,
+                title = "Dawn of Justice",
+                detailPath = "dawn-of-justice-AbCdEf12345",
+                hasResource = true
+            )
+            val unrelated = matching.copy(
+                subjectId = "43",
+                title = "Night Patrol",
+                detailPath = "night-patrol-AbCdEf12345"
+            )
+            val unavailable = matching.copy(
+                subjectId = "44",
+                title = "Dawn Preview",
+                detailPath = "dawn-preview-AbCdEf12345",
+                hasResource = false
+            )
+            var remoteAttempts = 0
+            var homepageAttempts = 0
+
+            val result = resolveMovieboxSearchCandidates(
+                query = "Dawn",
+                remoteSearch = {
+                    remoteAttempts += 1
+                    error("temporary upstream failure")
+                },
+                homepageFallback = {
+                    homepageAttempts += 1
+                    listOf(unrelated, unavailable, matching)
+                }
+            )
+
+            assertEquals(listOf(matching), result)
+            assertEquals(2, remoteAttempts)
+            assertEquals(1, homepageAttempts)
+        }
+
+    @Test
     fun `nomat decodes bounded base64 player buttons`() {
         val url = "https://player.example/embed/nomat"
         val encoded = Base64.getEncoder().encodeToString(url.toByteArray())
@@ -542,6 +612,27 @@ class ProviderExpansionTest {
         ).selectFirst("div.product__item")!!
 
         assertEquals("Example Anime", KuramanimeParser.catalogAnchor(card)?.text())
+    }
+
+    @Test
+    fun `bounded node filters declare tail for host jsoup abi compatibility`() {
+        val filterClasses = listOf(
+            "com.example.PopularProviderLinkLimits\$playerElements\$1",
+            "com.example.PopularProviderLinkLimits\$scopedMediaUrls\$1"
+        ).map { className -> Class.forName(className) }
+
+        filterClasses.forEach { filterClass ->
+            assertTrue(
+                filterClass.declaredMethods.any { method ->
+                    method.name == "tail" &&
+                        method.parameterTypes.contentEquals(
+                            arrayOf(org.jsoup.nodes.Node::class.java, Int::class.javaPrimitiveType)
+                        )
+                },
+                "${filterClass.name} must implement NodeFilter.tail instead of relying on " +
+                    "the compile-time Jsoup default method"
+            )
+        }
     }
 
     @Test

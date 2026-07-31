@@ -1752,6 +1752,38 @@ internal fun MainAPI.toPlayableUrl(raw: String?): String? {
         else -> fixUrl(value)
     }
     return resolved.takeIf(::isSafeRemoteHttpUrl)
+        ?.let(::extractorCompatiblePlaybackUrl)
+}
+
+internal fun extractorCompatiblePlaybackUrl(url: String): String {
+    return runCatching {
+        val uri = URI(url)
+        val host = uri.host.orEmpty().lowercase().trimEnd('.')
+        val path = uri.rawPath.orEmpty()
+        val isLegacyDoodEmbed =
+            uri.userInfo == null &&
+                uri.port in setOf(-1, 443) &&
+                (host == "dood.la" || host.endsWith(".dood.la")) &&
+                path.startsWith("/e/") &&
+                path.removePrefix("/e/").isNotBlank() &&
+                path.length <= 2_048
+        if (!isLegacyDoodEmbed) {
+            url
+        } else {
+            buildString {
+                append("https://playmogo.com")
+                append(path)
+                uri.rawQuery?.let { query ->
+                    append('?')
+                    append(query)
+                }
+                uri.rawFragment?.let { fragment ->
+                    append('#')
+                    append(fragment)
+                }
+            }.takeIf(::isSafeRemoteHttpUrl) ?: url
+        }
+    }.getOrDefault(url)
 }
 
 internal fun isSafeRemoteHttpUrl(url: String): Boolean {
