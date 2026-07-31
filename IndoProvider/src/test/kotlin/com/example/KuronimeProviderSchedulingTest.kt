@@ -112,4 +112,65 @@ class KuronimeProviderSchedulingTest {
 
         assertEquals(listOf("kuro:$kuro"), attempts)
     }
+
+    @Test
+    fun `media scheduler prioritizes Blogger before DOM ordered generic mirrors`() = runBlocking {
+        val attempts = mutableListOf<String>()
+        val generic = "https://dead.example/embed/first"
+        val blogger = "https://www.blogger.com/video.g?token=current"
+
+        val loaded = KuronimeMediaSourceScheduler.resolve(
+            candidates = listOf(generic, blogger),
+            isBlogger = { it == blogger },
+            resolveBlogger = {
+                attempts += "blogger:$it"
+                true
+            },
+            resolveGenericBatch = {
+                attempts += "generic:${it.joinToString()}"
+                false
+            }
+        )
+
+        assertTrue(loaded)
+        assertEquals(listOf("blogger:$blogger"), attempts)
+    }
+
+    @Test
+    fun `timed out Blogger source is not immediately retried generically`() = runBlocking {
+        val generic = "https://healthy.example/embed/second"
+        val blogger = "https://www.blogger.com/video.g?token=slow"
+        var genericBatch = emptyList<String>()
+
+        KuronimeMediaSourceScheduler.resolve(
+            candidates = listOf(blogger, generic),
+            isBlogger = { it == blogger },
+            resolveBlogger = { null },
+            resolveGenericBatch = {
+                genericBatch = it
+                false
+            }
+        )
+
+        assertEquals(listOf(generic), genericBatch)
+    }
+
+    @Test
+    fun `definitively failed Blogger source joins bounded generic batch`() = runBlocking {
+        val generic = "https://healthy.example/embed/second"
+        val blogger = "https://www.blogger.com/video.g?token=unsupported"
+        var genericBatch = emptyList<String>()
+
+        KuronimeMediaSourceScheduler.resolve(
+            candidates = listOf(generic, blogger),
+            isBlogger = { it == blogger },
+            resolveBlogger = { false },
+            resolveGenericBatch = {
+                genericBatch = it
+                true
+            }
+        )
+
+        assertEquals(listOf(blogger, generic), genericBatch)
+    }
 }

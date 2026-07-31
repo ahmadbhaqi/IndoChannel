@@ -10,6 +10,29 @@ import kotlin.test.assertTrue
 
 class KitanontonPlayerParserTest {
     @Test
+    fun `detail metadata prefers the content title over the site header`() {
+        val document = Jsoup.parse(
+            """
+            <header><h1>KITA NONTON - Streaming Film</h1></header>
+            <h1>Nonton West Series Supergirl Season6 Sub Indo</h1>
+            <h3 itemprop="name" content="Supergirl: Season 6 (2021)">
+              Supergirl: Season 6 (2021)
+              <span itemprop="ratingValue">6.2</span>
+            </h3>
+            <meta itemprop="datePublished" content="2021-03-30">
+            """.trimIndent()
+        )
+
+        assertEquals(
+            KitanontonDetailMetadata(
+                title = "Supergirl: Season 6 (2021)",
+                year = 2021
+            ),
+            KitanontonPlayerParser.detailMetadata(document)
+        )
+    }
+
+    @Test
     fun `orders decoded Abyss media before unsigned IP mirrors`() {
         val juicy = "https://178.211.139.171/embed/code"
         val unknown = "https://unknown.example/embed/code"

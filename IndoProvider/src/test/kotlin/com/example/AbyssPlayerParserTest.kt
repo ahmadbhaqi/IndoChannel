@@ -12,6 +12,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.delay
@@ -270,6 +271,36 @@ class AbyssPlayerParserTest {
         assertTrue("https://video.example/full-1080.mp4" in probes)
         assertTrue("https://video.example/full-720.mp4" in probes)
         assertEquals(listOf("https://video.example/full-720.mp4"), links.map { it.url })
+    }
+
+    @Test
+    fun `parallel Abyss probes stop emitting after callback failure`() = runBlocking {
+        val media = """
+            {"mp4":{"sources":[
+              {"label":"1080p","size":100,"partSize":100,"url":"https://video.example","path":"full-1080.mp4"},
+              {"label":"720p","size":100,"partSize":100,"url":"https://video.example","path":"full-720.mp4"}
+            ]}}
+        """.trimIndent()
+        val playerUrl = "https://abyssplayer.com/current-video"
+        val playerPage = abyssPage(media)
+        var callbackCalls = 0
+        val session = LinkResolutionSession(
+            api = KitanontonProvider(),
+            subtitleCallback = {},
+            callback = {
+                callbackCalls++
+                throw AssertionError("consumer rejected link")
+            },
+            pageFetcher = { _, _ -> playerPage },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { it }
+        )
+
+        assertFailsWith<AssertionError> {
+            session.resolve(playerUrl, "https://kitanonton2.surf/movie/current/")
+        }
+        assertEquals(1, callbackCalls)
+        assertFalse(session.loaded)
     }
 
     @Test

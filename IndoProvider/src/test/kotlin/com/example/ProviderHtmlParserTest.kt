@@ -1424,6 +1424,93 @@ class ProviderHtmlParserTest {
     }
 
     @Test
+    fun `bounded mirror scheduler propagates callback failure and stays unloaded`() = runBlocking {
+        val media = "https://cdn.example/current.mp4"
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = { throw AssertionError("consumer rejected link") },
+            pageFetcher = { _, _ -> error("direct media must not fetch a player page") },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { it },
+            directLinkFactory = { source, name, url, referer, quality, type, headers ->
+                directExtractorLink(source, name, url, referer, quality, type, headers)
+            }
+        )
+
+        assertFailsWith<AssertionError> {
+            session.resolveFirstVerified(
+                candidates = listOf(PlayerResolutionCandidate(media, null)),
+                maxConcurrency = 1
+            )
+        }
+        assertFalse(session.loaded)
+    }
+
+    @Test
+    fun `bounded mirror scheduler keeps healthy sibling after linkage error`() = runBlocking {
+        val brokenPlayer = "https://broken-player.example/embed/current"
+        val healthyPlayer = "https://healthy-player.example/embed/current"
+        val media = "https://cdn.example/current.mp4"
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                if (url == brokenPlayer) {
+                    throw AbstractMethodError("stale optional mirror adapter")
+                }
+                """<source src="$media">"""
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { it },
+            directLinkFactory = { source, name, url, referer, quality, type, headers ->
+                directExtractorLink(source, name, url, referer, quality, type, headers)
+            }
+        )
+
+        assertTrue(
+            session.resolveFirstVerified(
+                candidates = listOf(
+                    PlayerResolutionCandidate(brokenPlayer, null),
+                    PlayerResolutionCandidate(healthyPlayer, null)
+                ),
+                maxConcurrency = 2
+            )
+        )
+        assertEquals(listOf(media), links.map { it.url })
+    }
+
+    @Test
+    fun `serial resolver keeps healthy sibling after linkage error`() = runBlocking {
+        val brokenPlayer = "https://broken-player.example/embed/current"
+        val healthyPlayer = "https://healthy-player.example/embed/current"
+        val media = "https://cdn.example/current.mp4"
+        val links = mutableListOf<ExtractorLink>()
+        val session = LinkResolutionSession(
+            api = RebahinProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                if (url == brokenPlayer) {
+                    throw AbstractMethodError("stale optional mirror adapter")
+                }
+                """<source src="$media">"""
+            },
+            extractorLoader = { _, _, _, _ -> false },
+            mediaLinkProbe = { it },
+            directLinkFactory = { source, name, url, referer, quality, type, headers ->
+                directExtractorLink(source, name, url, referer, quality, type, headers)
+            }
+        )
+
+        assertFalse(session.resolve(brokenPlayer, null))
+        assertTrue(session.resolve(healthyPlayer, null))
+        assertEquals(listOf(media), links.map { it.url })
+    }
+
+    @Test
     fun `mirror scheduler returns after the first verified source inside a multi source winner`() = runBlocking {
         val winnerPlayer = "https://winner-player.example/embed/current"
         val stalledPlayer = "https://stalled-player.example/embed/current"

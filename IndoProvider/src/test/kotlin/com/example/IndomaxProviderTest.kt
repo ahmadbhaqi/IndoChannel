@@ -1,5 +1,15 @@
 package com.example
 
+import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.MovieLoadResponse
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.newMovieLoadResponse
+import com.lagradost.cloudstream3.newTvSeriesLoadResponse
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -9,6 +19,44 @@ import kotlinx.coroutines.runBlocking
 import org.jsoup.Jsoup
 
 class IndomaxProviderTest {
+    @Test
+    fun `nonempty primary catalog is interleaved with distinct healthy fallbacks`() {
+        assertEquals(
+            listOf(
+                "primary-stale|same",
+                "idlix-series|idlix",
+                "filmapik-series|filmapik"
+            ),
+            interleaveIndomaxCatalogGroups(
+                primary = listOf("primary-stale|same"),
+                fallbackGroups = listOf(
+                    listOf(
+                        "filmapik-duplicate|same",
+                        "filmapik-series|filmapik"
+                    ),
+                    listOf("idlix-series|idlix")
+                ),
+                maxResults = 8,
+                keySelector = { value -> value.substringAfter('|') }
+            )
+        )
+    }
+
+    @Test
+    fun `catalog fallback interleaves providers so one stale source cannot starve the rest`() {
+        assertEquals(
+            listOf("filmapik-1", "pusatfilm-1", "kitanonton-1", "filmapik-2", "kitanonton-2"),
+            interleaveFallbackResults(
+                groups = listOf(
+                    listOf("filmapik-1", "filmapik-2", "filmapik-3"),
+                    listOf("pusatfilm-1"),
+                    listOf("kitanonton-1", "kitanonton-2")
+                ),
+                maxResults = 5
+            )
+        )
+    }
+
     @Test
     fun `healthy primary player skips alternate tab preflight`() = runBlocking {
         val primary = PlayerResolutionCandidate(
@@ -140,6 +188,82 @@ class IndomaxProviderTest {
     }
 
     @Test
+    fun `external fallback result delegates detail and playback to its owner`() = runBlocking {
+        val fallback = RecordingIndomaxFallback()
+        val provider = IndomaxProvider { listOf(fallback) }
+        val resultUrl = "https://fallback.example/movie/current"
+
+        val detail = provider.load(resultUrl) as MovieLoadResponse
+        val links = mutableListOf<ExtractorLink>()
+        val loaded = provider.loadLinks(detail.dataUrl, false, {}, links::add)
+
+        assertEquals("Fallback Movie", detail.name)
+        assertTrue(loaded)
+        assertEquals(listOf(resultUrl), fallback.loadCalls)
+        assertEquals(listOf(resultUrl), fallback.linkCalls)
+        assertEquals(listOf("https://cdn.example/fallback.mp4"), links.map { it.url })
+    }
+
+    @Test
+    fun `delegated catalog skips an empty series shell and tries the next owner`() = runBlocking {
+        val stale = EmptySeriesIndomaxFallback()
+        val healthy = RecordingIndomaxFallback()
+        val provider = IndomaxProvider { listOf(stale, healthy) }
+        val resultUrl = "https://fallback.example/movie/current"
+
+        val detail = provider.load(resultUrl)
+
+        assertTrue(detail is MovieLoadResponse)
+        assertEquals("Fallback Movie", detail.name)
+        assertEquals(listOf(resultUrl), stale.loadCalls)
+        assertEquals(listOf(resultUrl), healthy.loadCalls)
+    }
+
+    @Test
+    fun `provider retains a public no argument constructor for CloudStream`() {
+        assertEquals(
+            "Indomax",
+            IndomaxProvider::class.java.getDeclaredConstructor().newInstance().name
+        )
+    }
+
+    @Test
+    fun `series fixture omits view-all self link before the first real episode`() {
+        val detailUrl =
+            "https://akses10.indomax21.xyz/tv/the-insipid-princes-furtive-grab-for-the-throne-2026/"
+        val document = Jsoup.parse(
+            """
+                <div class="gmr-listseries">
+                  <a href="$detailUrl">Lihat Semua Episode</a>
+                  <a href="/eps/the-insipid-princes-furtive-grab-for-the-throne-season-1-episode-1/"
+                     title="Episode 1">Episode 1</a>
+                  <a href="/eps/the-insipid-princes-furtive-grab-for-the-throne-season-1-episode-1/"
+                     title="Episode 1 duplicate">Episode 1 duplicate</a>
+                  <a href="/eps/the-insipid-princes-furtive-grab-for-the-throne-season-1-episode-2/"
+                     title="Episode 2">Episode 2</a>
+                </div>
+            """.trimIndent(),
+            detailUrl
+        )
+
+        assertEquals(
+            listOf(
+                IndomaxEpisodeItem(
+                    url = "https://akses10.indomax21.xyz/eps/" +
+                        "the-insipid-princes-furtive-grab-for-the-throne-season-1-episode-1/",
+                    label = "Episode 1"
+                ),
+                IndomaxEpisodeItem(
+                    url = "https://akses10.indomax21.xyz/eps/" +
+                        "the-insipid-princes-furtive-grab-for-the-throne-season-1-episode-2/",
+                    label = "Episode 2"
+                )
+            ),
+            IndomaxParser.episodeItems(document, detailUrl)
+        )
+    }
+
+    @Test
     fun `catalog drops sexual cards while keeping nonsexual mature and ecchi titles`() {
         val pageUrl = "https://akses8.indomax21.xyz/category/box-office/"
         val document = Jsoup.parse(
@@ -186,6 +310,58 @@ class IndomaxProviderTest {
             listOf("Violent Night 18+", "Ecchi Comedy"),
             IndomaxParser.catalogItems(document, pageUrl).map { it.title }
         )
+    }
+
+    private class RecordingIndomaxFallback : MainAPI() {
+        override var mainUrl = "https://fallback.example"
+        override var name = "Fallback"
+        override var lang = "id"
+        override val supportedTypes = setOf(TvType.Movie)
+        val loadCalls = mutableListOf<String>()
+        val linkCalls = mutableListOf<String>()
+
+        override suspend fun load(url: String): LoadResponse? {
+            loadCalls += url
+            if (url != "$mainUrl/movie/current") return null
+            return newMovieLoadResponse("Fallback Movie", url, TvType.Movie, url)
+        }
+
+        override suspend fun loadLinks(
+            data: String,
+            isCasting: Boolean,
+            subtitleCallback: (SubtitleFile) -> Unit,
+            callback: (ExtractorLink) -> Unit
+        ): Boolean {
+            linkCalls += data
+            if (data != "$mainUrl/movie/current") return false
+            callback(
+                newExtractorLink(
+                    name,
+                    name,
+                    "https://cdn.example/fallback.mp4",
+                    ExtractorLinkType.VIDEO
+                )
+            )
+            return true
+        }
+    }
+
+    private class EmptySeriesIndomaxFallback : MainAPI() {
+        override var mainUrl = "https://fallback.example"
+        override var name = "Empty Series"
+        override var lang = "id"
+        override val supportedTypes = setOf(TvType.TvSeries)
+        val loadCalls = mutableListOf<String>()
+
+        override suspend fun load(url: String): LoadResponse? {
+            loadCalls += url
+            return newTvSeriesLoadResponse(
+                "Supergirl",
+                url,
+                TvType.TvSeries,
+                emptyList()
+            )
+        }
     }
 
     @Test

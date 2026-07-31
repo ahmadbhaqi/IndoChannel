@@ -168,8 +168,61 @@ open class KuronimeProvider : MainAPI() {
             document.infoItem("Genre")?.select("a")?.map { it.text() }.orEmpty()
         }
         if (SensitiveContentPolicy.isBlocked(pageTitle, fetch.url, categories = pageTags)) return false
+        AnimeCrossProviderFallback.request(pageTitle, fetch.url)?.let { request ->
+            if (
+                AnimeCrossProviderFallback.resolve(
+                    request = request,
+                    isCasting = isCasting,
+                    subtitleCallback = subtitleCallback,
+                    callback = callback
+                )
+            ) return true
+        }
         val html = fetch.text
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        val bloggerResolver = BloggerVideoResolver(name, resolver::emitResolved)
+
+        suspend fun resolveCandidate(raw: String?, pageReferer: String): Boolean {
+            val candidate = ProviderHtmlParser.absoluteUrl(raw, pageReferer) ?: return false
+            if (InlineDataParser.bloggerToken(candidate) != null) {
+                when (
+                    resolver.withinBudget(BLOGGER_FAST_PATH_TIMEOUT_MS) {
+                        bloggerResolver.resolve(candidate, pageReferer)
+                    }
+                ) {
+                    true -> return true
+                    null -> return false
+                    false -> Unit
+                }
+            }
+            return resolver.resolve(candidate, pageReferer)
+        }
+
+        val mediaCandidates = ProviderHtmlParser.mediaSources(document)
+            .mapNotNull { source -> ProviderHtmlParser.absoluteUrl(source, fetch.url) }
+            .distinct()
+        val mediaLoaded = KuronimeMediaSourceScheduler.resolve(
+            candidates = mediaCandidates,
+            isBlogger = { candidate -> InlineDataParser.bloggerToken(candidate) != null },
+            resolveBlogger = { candidate ->
+                resolver.withinBudget(BLOGGER_FAST_PATH_TIMEOUT_MS) {
+                    bloggerResolver.resolve(candidate, fetch.url)
+                }
+            },
+            resolveGenericBatch = { candidates ->
+                candidates.isNotEmpty() &&
+                    resolver.resolveFirstVerified(
+                        candidates.map { candidate ->
+                            PlayerResolutionCandidate(candidate, fetch.url)
+                        },
+                        maxConcurrency = 3,
+                        tierTimeoutMs = MEDIA_SOURCE_TIER_TIMEOUT_MS
+                    )
+            }
+        )
+        if (mediaLoaded || resolver.loaded) {
+            return true
+        }
 
         val downloadCandidates = ProviderHtmlParser.downloadCandidateUrls(document, fetch.url)
             .sortedBy { candidate ->
@@ -206,20 +259,16 @@ open class KuronimeProvider : MainAPI() {
                 KuronimeSourceScheduler.resolve(
                     candidates = apiUrls,
                     resolveKuroplayer = { raw -> emitKuroplayerLink(raw, resolver) },
-                    resolveGeneric = { raw -> resolver.resolve(raw, fetch.url) }
+                    resolveGeneric = { raw -> resolveCandidate(raw, fetch.url) }
                 )
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {}
         }
 
-        ProviderHtmlParser.mediaSources(document).forEach { src ->
-            resolver.resolve(src, "$mainUrl/")
-        }
-
         document.select("div.video-nav a[href], #linksDDLContainer a[href]").forEach { link ->
             val src = ProviderHtmlParser.absoluteUrl(link.attr("href"), fetch.url)
-            resolver.resolve(src, fetch.url)
+            resolveCandidate(src, fetch.url)
         }
 
         document.select("select.mirror > option[value]").forEach { option ->
@@ -228,7 +277,7 @@ open class KuronimeProvider : MainAPI() {
                 val iframe = org.jsoup.Jsoup.parse(decoded).selectFirst("iframe")?.let {
                     ProviderHtmlParser.firstIframeSource(it)
                 }
-                resolver.resolve(iframe, "$mainUrl/")
+                resolveCandidate(iframe, fetch.url)
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {}
@@ -237,6 +286,8 @@ open class KuronimeProvider : MainAPI() {
     }
 
     private companion object {
+        const val BLOGGER_FAST_PATH_TIMEOUT_MS = 15_000L
+        const val MEDIA_SOURCE_TIER_TIMEOUT_MS = 25_000L
         const val DOWNLOAD_FAST_PATH_TIMEOUT_MS = 20_000L
         const val KUROPLAYER_ORIGIN = "https://player.animeku.org"
         const val KUROPLAYER_REFERER = "$KUROPLAYER_ORIGIN/"
@@ -270,5 +321,28 @@ internal object KuronimeSourceScheduler {
             java.net.URI(raw).host.orEmpty().endsWith(".kuroplayer.xyz", ignoreCase = true)
         }.getOrDefault(false)
         return isKuroplayer && directMediaType(raw) == ExtractorLinkType.M3U8
+    }
+}
+
+internal object KuronimeMediaSourceScheduler {
+    internal suspend fun resolve(
+        candidates: List<String>,
+        isBlogger: (String) -> Boolean,
+        resolveBlogger: suspend (String) -> Boolean?,
+        resolveGenericBatch: suspend (List<String>) -> Boolean
+    ): Boolean {
+        val uniqueCandidates = candidates.distinct()
+        val bloggerCandidates = uniqueCandidates.filter(isBlogger)
+        val genericCandidates = mutableListOf<String>()
+
+        bloggerCandidates.forEach { candidate ->
+            when (resolveBlogger(candidate)) {
+                true -> return true
+                false -> genericCandidates += candidate
+                null -> Unit
+            }
+        }
+        genericCandidates += uniqueCandidates.filterNot(isBlogger)
+        return genericCandidates.isNotEmpty() && resolveGenericBatch(genericCandidates)
     }
 }

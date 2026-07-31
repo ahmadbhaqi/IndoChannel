@@ -28,6 +28,7 @@ import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -42,7 +43,16 @@ internal suspend fun resolveIndomaxPlayerPhases(
     return fallbacks.isNotEmpty() && resolveBatch(fallbacks)
 }
 
-class IndomaxProvider : MainAPI() {
+class IndomaxProvider(
+    private val fallbackProviderFactory: () -> List<MainAPI> = {
+        listOf(
+            FilmapikProvider(),
+            IdlixProvider(),
+            PusatfilmProvider(),
+            KitanontonProvider()
+        )
+    }
+) : MainAPI() {
     override var mainUrl = "https://idmxl.ink"
     override var name = "Indomax"
     override var lang = "id"
@@ -73,32 +83,59 @@ class IndomaxProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val path = request.data.format(page.coerceAtLeast(1))
-        val fetch = getProviderPage("$mainUrl/$path")
-            ?: return newHomePageResponse(request.name, emptyList())
-        if (
-            fetch.code !in 200..299 ||
-            ProviderHtmlParser.isNonContentPage(fetch.body)
-        ) return newHomePageResponse(request.name, emptyList())
-
-        val document = Jsoup.parse(fetch.body, fetch.url)
-        return newHomePageResponse(
-            request.name,
-            IndomaxParser.catalogItems(document, fetch.url).map { it.toSearchResult() }
-        )
+        val primaryItems = getProviderPage("$mainUrl/$path")
+            ?.takeIf { fetch ->
+                fetch.code in 200..299 &&
+                    !ProviderHtmlParser.isNonContentPage(fetch.body)
+            }
+            ?.let { fetch ->
+                IndomaxParser.catalogItems(
+                    Jsoup.parse(fetch.body, fetch.url),
+                    fetch.url
+                ).map { item -> item.toSearchResult() }
+            }
+            .orEmpty()
+        if (primaryItems.isNotEmpty()) {
+            return newHomePageResponse(request.name, primaryItems)
+        }
+        return loadFallbackMainPage(page, request)
     }
 
-    override suspend fun search(query: String): List<SearchResponse> {
+    override suspend fun search(query: String): List<SearchResponse> = coroutineScope {
         val encoded = URLEncoder.encode(query, Charsets.UTF_8.name()).replace("+", "%20")
-        val fetch = getProviderPage(
-            "$mainUrl/?s=$encoded&post_type[]=post&post_type[]=tv"
-        ) ?: return emptyList()
-        if (
-            fetch.code !in 200..299 ||
-            ProviderHtmlParser.isNonContentPage(fetch.body)
-        ) return emptyList()
+        val primary = async {
+            getProviderPage(
+                "$mainUrl/?s=$encoded&post_type[]=post&post_type[]=tv"
+            )?.takeIf { fetch ->
+                fetch.code in 200..299 &&
+                    !ProviderHtmlParser.isNonContentPage(fetch.body)
+            }?.let { fetch ->
+                IndomaxParser.catalogItems(
+                    Jsoup.parse(fetch.body, fetch.url),
+                    fetch.url
+                ).map { item -> item.toSearchResult() }
+            }.orEmpty()
+        }
+        val fallbackGroups = fallbackProviders().map { provider ->
+            async {
+                withTimeoutOrNull(INDOMAX_CATALOG_PROVIDER_TIMEOUT_MS) {
+                    try {
+                        provider.search(query).orEmpty()
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+                }.orEmpty()
+            }
+        }
 
-        val document = Jsoup.parse(fetch.body, fetch.url)
-        return IndomaxParser.catalogItems(document, fetch.url).map { it.toSearchResult() }
+        interleaveIndomaxCatalogGroups(
+            primary = primary.await(),
+            fallbackGroups = fallbackGroups.awaitAll(),
+            maxResults = INDOMAX_MAX_CATALOG_FALLBACK_RESULTS,
+            keySelector = { result -> result.url }
+        )
     }
 
     private fun IndomaxCatalogItem.toSearchResult(): SearchResponse {
@@ -116,18 +153,28 @@ class IndomaxProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val requestUrl = IndomaxParser.providerPageUrl(url, mainUrl) ?: return null
-        val fetch = getProviderPage(requestUrl) ?: return null
+        val requestUrl = IndomaxParser.providerPageUrl(url, mainUrl)
+            ?: return loadDelegatedDetail(url)
+        val urlFallbackRequests = PencurimovieParser.fallbackRequests(
+            Jsoup.parse(""),
+            requestUrl
+        )
+        val fetch = getProviderPage(requestUrl)
+            ?: return loadFallbackDetail(urlFallbackRequests)
         if (
             fetch.code !in 200..299 ||
             ProviderHtmlParser.isNonContentPage(fetch.body)
-        ) return null
+        ) return loadFallbackDetail(urlFallbackRequests)
 
         val canonicalUrl = fetch.url
         val document = Jsoup.parse(fetch.body, canonicalUrl)
+        val fallbackRequests = (
+            PencurimovieParser.fallbackRequests(document, canonicalUrl) +
+                urlFallbackRequests
+            ).distinct()
         val title = MovieMetadataParser.title(
             document.selectFirst("h1.entry-title")?.text()
-        ) ?: return null
+        ) ?: return loadFallbackDetail(fallbackRequests)
         val poster = document.selectFirst("meta[property=og:image]")
             ?.attr("content")
             ?.let { ProviderHtmlParser.absoluteUrl(it, canonicalUrl) }
@@ -167,25 +214,19 @@ class IndomaxProvider : MainAPI() {
             document.select("article.item.col-md-20, article.item").toDocument(canonicalUrl),
             canonicalUrl
         ).map { it.toSearchResult() }
-        val episodeLinks = document.select(
-            "div.vid-episodes a[href], div.gmr-listseries a[href]"
-        )
+        val episodeItems = IndomaxParser.episodeItems(document, canonicalUrl)
         val isSeries = canonicalUrl.contains("/tv/", ignoreCase = true) ||
-            episodeLinks.isNotEmpty()
+            episodeItems.isNotEmpty()
+        if (isSeries && episodeItems.isEmpty()) {
+            return loadFallbackDetail(fallbackRequests)
+        }
 
         return if (isSeries) {
-            val episodes = episodeLinks.mapNotNull { link ->
-                val href = IndomaxParser.providerPageUrl(link.attr("href"), canonicalUrl)
-                    ?: return@mapNotNull null
-                val rawLabel = link.attr("title").takeIf { it.isNotBlank() }
-                    ?: link.text()
-                val label = rawLabel
-                    .replace(Regex("""(?i)^permalink\s+ke\s+"""), "")
-                    .trim()
-                val (_, episodeNumber) = PopularProviderEpisodeParser.position(label)
-                newEpisode(href) {
+            val episodes = episodeItems.map { item ->
+                val (_, episodeNumber) = PopularProviderEpisodeParser.position(item.label)
+                newEpisode(item.url) {
                     episode = episodeNumber
-                    name = episodeNumber?.let { "Episode $it" } ?: label
+                    name = episodeNumber?.let { "Episode $it" } ?: item.label
                     posterUrl = poster
                 }
             }
@@ -221,15 +262,39 @@ class IndomaxProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val requestUrl = IndomaxParser.providerPageUrl(data, mainUrl) ?: return false
-        val fetch = getProviderPage(requestUrl) ?: return false
+        val requestUrl = IndomaxParser.providerPageUrl(data, mainUrl)
+            ?: return loadDelegatedLinks(
+                data,
+                isCasting,
+                subtitleCallback,
+                callback
+            )
+        val urlFallbackRequests = PencurimovieParser.fallbackRequests(
+            Jsoup.parse(""),
+            requestUrl
+        )
+        val fetch = getProviderPage(requestUrl) ?: return loadFallback(
+            urlFallbackRequests,
+            isCasting,
+            subtitleCallback,
+            callback
+        )
         if (
             fetch.code !in 200..299 ||
             ProviderHtmlParser.isNonContentPage(fetch.body)
-        ) return false
+        ) return loadFallback(
+            urlFallbackRequests,
+            isCasting,
+            subtitleCallback,
+            callback
+        )
 
         val pageUrl = fetch.url
         val document = Jsoup.parse(fetch.body, pageUrl)
+        val fallbackRequests = (
+            PencurimovieParser.fallbackRequests(document, pageUrl) +
+                urlFallbackRequests
+            ).distinct()
         val resolver = LinkResolutionSession(
             api = this,
             subtitleCallback = subtitleCallback,
@@ -278,7 +343,193 @@ class IndomaxProvider : MainAPI() {
             },
             resolveBatch = resolver::resolveFirstVerified
         )
-        return resolved && resolver.loaded
+        if (resolved && resolver.loaded) return true
+        return loadFallback(
+            fallbackRequests,
+            isCasting,
+            subtitleCallback,
+            callback
+        )
+    }
+
+    private suspend fun loadFallbackMainPage(
+        page: Int,
+        request: MainPageRequest
+    ): HomePageResponse {
+        val items = withTimeoutOrNull(INDOMAX_CATALOG_FALLBACK_TIMEOUT_MS) {
+            firstNonEmptyFallback(fallbackProviders()) { provider ->
+                val categoryNames = fallbackCategoryNames(request.name)
+                val fallbackPage = provider.mainPage.firstOrNull { candidate ->
+                    categoryNames.any { name ->
+                        name.equals(candidate.name, ignoreCase = true)
+                    }
+                } ?: provider.mainPage.firstOrNull()
+                    ?: return@firstNonEmptyFallback emptyList()
+                provider.getMainPage(
+                    page,
+                    MainPageRequest(
+                        fallbackPage.name,
+                        fallbackPage.data,
+                        fallbackPage.horizontalImages
+                    )
+                )?.items?.flatMap { homeList -> homeList.list }.orEmpty()
+            }
+        }.orEmpty()
+        return newHomePageResponse(request.name, items)
+    }
+
+    private suspend fun loadDelegatedDetail(url: String): LoadResponse? =
+        withTimeoutOrNull(INDOMAX_CATALOG_FALLBACK_TIMEOUT_MS) {
+            firstNonEmptyFallback(fallbackProviders()) { provider ->
+                listOfNotNull(provider.load(url)).filter(::isUsableFallbackDetail)
+            }.firstOrNull()
+        }
+
+    private fun isUsableFallbackDetail(detail: LoadResponse): Boolean = when (detail) {
+        is com.lagradost.cloudstream3.TvSeriesLoadResponse ->
+            detail.episodes.any { episode -> episode.data.isNotBlank() }
+
+        else -> true
+    }
+
+    private suspend fun loadFallbackDetail(
+        requests: List<NomatFallbackRequest>
+    ): LoadResponse? = withTimeoutOrNull(INDOMAX_CATALOG_FALLBACK_TIMEOUT_MS) {
+        for (request in requests) {
+            for (provider in fallbackProviders()) {
+                try {
+                    val exactResults = provider.search(request.title).orEmpty()
+                        .asSequence()
+                        .filter {
+                            NomatParser.isPotentialFallbackTitle(request, it.name)
+                        }
+                        .distinctBy { result -> result.url }
+                        .take(INDOMAX_MAX_FALLBACK_RESULTS)
+                        .toList()
+                    for (result in exactResults) {
+                        val detail = provider.load(result.url) ?: continue
+                        val exactDetail = when (detail) {
+                            is MovieLoadResponse ->
+                                request.season == null &&
+                                    request.episode == null &&
+                                    NomatParser.isExactFallbackMatch(
+                                        request,
+                                        detail.name,
+                                        detail.year
+                                    )
+
+                            is com.lagradost.cloudstream3.TvSeriesLoadResponse ->
+                                LayarKacaPlayerParser.fallbackSeriesMatchesRequest(
+                                    request,
+                                    detail.name,
+                                    detail.year,
+                                    detail.episodes
+                                )
+
+                            else -> false
+                        }
+                        if (exactDetail) return@withTimeoutOrNull detail
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    // A failed fallback must not hide the next exact provider.
+                }
+            }
+        }
+        null
+    }
+
+    private suspend fun loadDelegatedLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean = withPlaybackFallbackBudget(INDOMAX_PLAYBACK_FALLBACK_TIMEOUT_MS) {
+        loadFirstEmittingFallback(
+            candidates = fallbackProviders(),
+            callback = callback
+        ) { provider, fallbackCallback ->
+            provider.loadLinks(
+                data,
+                isCasting,
+                subtitleCallback,
+                fallbackCallback
+            )
+        }
+    }
+
+    private suspend fun loadFallback(
+        requests: List<NomatFallbackRequest>,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean = withPlaybackFallbackBudget(INDOMAX_PLAYBACK_FALLBACK_TIMEOUT_MS) {
+        for (request in requests) {
+            val loaded = loadFirstEmittingFallback(
+                candidates = fallbackProviders(),
+                callback = callback
+            ) { provider, fallbackCallback ->
+                val exactResults = provider.search(request.title).orEmpty()
+                    .asSequence()
+                    .filter {
+                        NomatParser.isPotentialFallbackTitle(request, it.name)
+                    }
+                    .distinctBy { result -> result.url }
+                    .take(INDOMAX_MAX_FALLBACK_RESULTS)
+                    .toList()
+                for (result in exactResults) {
+                    val detail = provider.load(result.url) ?: continue
+                    val playbackData = when (detail) {
+                        is MovieLoadResponse -> detail.dataUrl.takeIf {
+                            request.season == null &&
+                                request.episode == null &&
+                                NomatParser.isExactFallbackMatch(
+                                    request,
+                                    detail.name,
+                                    detail.year
+                                )
+                        }
+
+                        is com.lagradost.cloudstream3.TvSeriesLoadResponse ->
+                            PencurimovieParser.fallbackEpisodeData(
+                                request,
+                                detail.name,
+                                detail.year,
+                                detail.episodes
+                            )
+
+                        else -> null
+                    } ?: continue
+                    if (
+                        provider.loadLinks(
+                            playbackData,
+                            isCasting,
+                            subtitleCallback,
+                            fallbackCallback
+                        )
+                    ) return@loadFirstEmittingFallback true
+                }
+                false
+            }
+            if (loaded) return@withPlaybackFallbackBudget true
+        }
+        false
+    }
+
+    private fun fallbackProviders(): List<MainAPI> = fallbackProviderFactory()
+
+    private fun fallbackCategoryNames(requestedName: String): Set<String> = when {
+        requestedName.equals("Box Office", ignoreCase = true) ->
+            setOf(requestedName, "Terbaru", "Beranda")
+
+        requestedName.equals("TV Series", ignoreCase = true) ->
+            setOf(requestedName, "Serial TV")
+
+        requestedName.equals("Animation", ignoreCase = true) ->
+            setOf(requestedName, "Animasi")
+
+        else -> setOf(requestedName)
     }
 
     private suspend fun getProviderPage(url: String): ProviderHttpResult? = try {
@@ -319,6 +570,11 @@ class IndomaxProvider : MainAPI() {
     }
 
     private companion object {
+        const val INDOMAX_CATALOG_FALLBACK_TIMEOUT_MS = 60_000L
+        const val INDOMAX_CATALOG_PROVIDER_TIMEOUT_MS = 20_000L
+        const val INDOMAX_PLAYBACK_FALLBACK_TIMEOUT_MS = 90_000L
+        const val INDOMAX_MAX_FALLBACK_RESULTS = 8
+        const val INDOMAX_MAX_CATALOG_FALLBACK_RESULTS = 24
         const val INDOMAX_PROVIDER_PAGE_LIMIT_BYTES = 2_000_000
         const val INDOMAX_PLAYER_API_LIMIT_BYTES = 4_000_000
         val YEAR_REGEX = Regex("""\b(?:19|20)\d{2}\b""")
@@ -336,6 +592,44 @@ internal data class IndomaxCatalogItem(
     val rating: Double?,
     val isSeries: Boolean
 )
+
+internal data class IndomaxEpisodeItem(
+    val url: String,
+    val label: String
+)
+
+internal fun <T> interleaveFallbackResults(
+    groups: List<List<T>>,
+    maxResults: Int
+): List<T> = interleaveIndomaxCatalogGroups(
+    primary = emptyList(),
+    fallbackGroups = groups,
+    maxResults = maxResults,
+    keySelector = { value -> value }
+)
+
+internal fun <T, Key> interleaveIndomaxCatalogGroups(
+    primary: List<T>,
+    fallbackGroups: List<List<T>>,
+    maxResults: Int,
+    keySelector: (T) -> Key
+): List<T> {
+    val limit = maxResults.coerceAtLeast(0)
+    if (limit == 0) return emptyList()
+    val groups = listOf(primary) + fallbackGroups
+    val seen = hashSetOf<Key>()
+    return buildList {
+        var index = 0
+        while (size < limit && groups.any { index < it.size }) {
+            groups.forEach { group ->
+                val value = group.getOrNull(index) ?: return@forEach
+                if (seen.add(keySelector(value))) add(value)
+                if (size >= limit) return@buildList
+            }
+            index++
+        }
+    }
+}
 
 internal object IndomaxParser {
     const val MAX_PLAYER_PAGES = 4
@@ -401,6 +695,32 @@ internal object IndomaxParser {
                 isSeries = episodeCount != null ||
                     url.contains("/tv/", ignoreCase = true)
             )
+        }.distinctBy { it.url }
+    }
+
+    fun episodeItems(document: Document, canonicalUrl: String): List<IndomaxEpisodeItem> {
+        val canonicalPage = providerPageUrl(canonicalUrl, canonicalUrl)
+            ?.substringBefore('?')
+            ?.trimEnd('/')
+            ?: return emptyList()
+        return document.select(
+            "div.vid-episodes a[href], div.gmr-listseries a[href]"
+        ).mapNotNull { link ->
+            val url = providerPageUrl(link.attr("href"), canonicalUrl)
+                ?: return@mapNotNull null
+            val label = link.attr("title")
+                .takeIf { it.isNotBlank() }
+                ?.trim()
+                ?: link.text().trim()
+            val normalizedLabel = label
+                .replace(Regex("""(?i)^permalink\s+ke\s+"""), "")
+                .trim()
+            if (
+                normalizedLabel.contains("Lihat Semua Episode", ignoreCase = true) ||
+                normalizedLabel.contains("View All Episodes", ignoreCase = true) ||
+                url.substringBefore('?').trimEnd('/') == canonicalPage
+            ) return@mapNotNull null
+            IndomaxEpisodeItem(url, normalizedLabel)
         }.distinctBy { it.url }
     }
 

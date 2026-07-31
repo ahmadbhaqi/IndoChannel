@@ -120,10 +120,19 @@ class ProviderExpansionTest {
             assertEquals(
                 1,
                 Regex("""\bLinkResolutionSession\s*\(""").findAll(provider).count(),
-                "$fileName must create one shared resolution session"
+                "$fileName must keep its resolver session count bounded"
             )
             assertFalse(provider.contains("private var directUrl"), "$fileName must not share redirect state")
         }
+
+        val publicCatalogFallback = source("PublicCatalogFallbackResolver.kt")
+        assertEquals(
+            1,
+            Regex("""\bLinkResolutionSession\s*\(""")
+                .findAll(publicCatalogFallback)
+                .count(),
+            "the shared public catalog fallback must own exactly one bounded session"
+        )
     }
 
     @Test
@@ -134,7 +143,7 @@ class ProviderExpansionTest {
             ?.groupValues
             ?.get(1)
             ?.toIntOrNull()
-        assertTrue(pluginVersion != null && pluginVersion >= 17)
+        assertTrue(pluginVersion != null && pluginVersion >= 24)
     }
 
     @Test

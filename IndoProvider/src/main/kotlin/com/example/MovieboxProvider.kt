@@ -18,7 +18,11 @@ import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 
-class MovieboxProvider : MainAPI() {
+class MovieboxProvider(
+    private val fallbackProviderFactory: () -> List<MainAPI> = {
+        listOf(PusatfilmProvider(), KitanontonProvider(), FilmapikProvider())
+    }
+) : MainAPI() {
     override var mainUrl = "https://h5-api.aoneroom.com"
     override var name = "Moviebox"
     override var lang = "id"
@@ -89,40 +93,54 @@ class MovieboxProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val request = MovieboxApi.loadData(url) ?: return null
-        val id = request.id ?: return null
+        val request = MovieboxApi.loadData(url) ?: return loadDelegatedDetail(url)
+        val id = request.id ?: return loadFallbackDetail(request)
         val legacyRequest = request.detailPath == null
         val detailUrl = if (legacyRequest) {
             MovieboxApi.legacyDetailUrl(id)
         } else {
-            MovieboxApi.detailUrl(mainUrl, request.detailPath ?: return null)
-        } ?: return null
+            MovieboxApi.detailUrl(
+                mainUrl,
+                request.detailPath ?: return loadFallbackDetail(request)
+            )
+        } ?: return loadFallbackDetail(request)
         val detail = getApi(
             detailUrl,
             if (legacyRequest) MovieboxApi.legacyApiHeaders else MovieboxApi.apiHeaders,
             MOVIEBOX_JSON_BODY_LIMIT_BYTES
-        )?.parse<MovieboxDetailResponse>()?.data ?: return null
-        if (detail.isForbid == true) return null
+        )?.parse<MovieboxDetailResponse>()?.data ?: return loadFallbackDetail(request)
+        if (detail.isForbid == true) return loadFallbackDetail(request)
         val subject = detail.subject?.takeIf {
             if (legacyRequest) it.hasResource != false else it.hasResource == true
-        } ?: return null
+        } ?: return loadFallbackDetail(request)
         val detailPath = subject.detailPath
             ?.takeIf(MovieboxApi::isValidDetailPath)
             ?: request.detailPath
-            ?: return null
-        val title = subject.title?.trim()?.takeIf { it.isNotBlank() } ?: return null
+            ?: return loadFallbackDetail(request)
+        val title = subject.title?.trim()?.takeIf { it.isNotBlank() }
+            ?: request.title
+            ?: return loadFallbackDetail(request)
         val type = if (subject.subjectType == 2) TvType.TvSeries else TvType.Movie
         val poster = subject.cover?.url
-        val year = subject.releaseDate?.substringBefore('-')?.toIntOrNull()
+        val year = subject.releaseDate?.substringBefore('-')?.toIntOrNull() ?: request.year
         val tags = subject.genre?.split(',')?.map(String::trim)?.filter(String::isNotBlank)
         val score = Score.from10(subject.imdbRatingValue?.toDoubleOrNull())
         val plot = MovieMetadataParser.meaningfulDescription(subject.description)
+        val enrichedRequest = request.copy(
+            detailPath = detailPath,
+            title = title,
+            year = year,
+            subjectType = subject.subjectType ?: request.subjectType
+        )
 
         return if (type == TvType.TvSeries) {
             val episodes = movieboxEpisodeCoordinates(detail.resource?.seasons)
                 .map { (season, episode) ->
                     newEpisode(
-                        MovieboxLoadData(id, season, episode, detailPath).toJson()
+                        enrichedRequest.copy(
+                            season = season,
+                            episode = episode
+                        ).toJson()
                     ) {
                         this.season = season
                         this.episode = episode
@@ -130,6 +148,9 @@ class MovieboxProvider : MainAPI() {
                         posterUrl = poster
                     }
                 }
+            if (episodes.isEmpty()) {
+                loadFallbackDetail(enrichedRequest)?.let { return it }
+            }
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                 posterUrl = poster
                 this.year = year
@@ -143,7 +164,7 @@ class MovieboxProvider : MainAPI() {
                 title,
                 url,
                 TvType.Movie,
-                MovieboxLoadData(id, detailPath = detailPath).toJson()
+                enrichedRequest.copy(season = null, episode = null).toJson()
             ) {
                 posterUrl = poster
                 this.year = year
@@ -161,24 +182,26 @@ class MovieboxProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val media = runCatching { parseJson<MovieboxLoadData>(data) }.getOrNull()
-            ?: return false
-        val id = media.id ?: return false
-        val detailPath = media.detailPath ?: return false
+        val media = MovieboxApi.loadData(data)
+            ?: return loadDelegatedLinks(data, isCasting, subtitleCallback, callback)
+        val id = media.id
+            ?: return loadFallback(media, isCasting, subtitleCallback, callback)
+        val detailPath = media.detailPath
+            ?: return loadFallback(media, isCasting, subtitleCallback, callback)
         val downloadUrl = MovieboxApi.downloadUrl(
             mainUrl,
             id,
             media.season ?: 0,
             media.episode ?: 0,
             detailPath
-        ) ?: return false
+        ) ?: return loadFallback(media, isCasting, subtitleCallback, callback)
         val payload = getApi(
             downloadUrl,
             MovieboxApi.apiHeaders,
             MOVIEBOX_JSON_BODY_LIMIT_BYTES
         )?.parse<MovieboxDownloadResponse>()?.data
             ?.takeIf { it.hasResource == true }
-            ?: return false
+            ?: return loadFallback(media, isCasting, subtitleCallback, callback)
 
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
         payload.downloads.orEmpty()
@@ -211,8 +234,171 @@ class MovieboxProvider : MainAPI() {
             .forEach { caption ->
                 movieboxSubtitleFile(caption.languageName, caption.url)?.let(subtitleCallback)
             }
-        return resolver.loaded
+        if (resolver.loaded) return true
+        return loadFallback(media, isCasting, subtitleCallback, callback)
     }
+
+    private suspend fun loadDelegatedDetail(url: String): LoadResponse? =
+        withTimeoutOrNull(MOVIEBOX_CATALOG_FALLBACK_TIMEOUT_MS) {
+            firstNonEmptyFallback(fallbackProviders()) { provider ->
+                listOfNotNull(provider.load(url))
+            }.firstOrNull()
+        }
+
+    private suspend fun loadFallbackDetail(media: MovieboxLoadData): LoadResponse? {
+        val request = media.fallbackRequest() ?: return null
+        return withTimeoutOrNull(MOVIEBOX_CATALOG_FALLBACK_TIMEOUT_MS) {
+            for (provider in fallbackProviders()) {
+                try {
+                    val exactResults = provider.search(request.title).orEmpty()
+                        .asSequence()
+                        .filter {
+                            MovieboxFallbackMatcher.isPotentialTitle(request, it.name)
+                        }
+                        .distinctBy { result -> result.url }
+                        .take(MOVIEBOX_MAX_FALLBACK_RESULTS)
+                        .toList()
+                    for (result in exactResults) {
+                        val detail = provider.load(result.url) ?: continue
+                        if (media.matchesFallbackDetail(request, detail)) {
+                            return@withTimeoutOrNull detail
+                        }
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    // A failed fallback source must not hide the next exact provider.
+                }
+            }
+            null
+        }
+    }
+
+    private suspend fun loadDelegatedLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean = withPlaybackFallbackBudget(MOVIEBOX_PLAYBACK_FALLBACK_TIMEOUT_MS) {
+        loadFirstEmittingFallback(
+            candidates = fallbackProviders(),
+            callback = callback
+        ) { provider, fallbackCallback ->
+            provider.loadLinks(
+                data,
+                isCasting,
+                subtitleCallback,
+                fallbackCallback
+            )
+        }
+    }
+
+    private suspend fun loadFallback(
+        media: MovieboxLoadData,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val request = media.fallbackRequest() ?: return false
+        return withPlaybackFallbackBudget(MOVIEBOX_PLAYBACK_FALLBACK_TIMEOUT_MS) {
+            loadFirstEmittingFallback(
+                candidates = fallbackProviders(),
+                callback = callback
+            ) { provider, fallbackCallback ->
+                val exactResults = provider.search(request.title).orEmpty()
+                    .asSequence()
+                    .filter {
+                        MovieboxFallbackMatcher.isPotentialTitle(request, it.name)
+                    }
+                    .distinctBy { result -> result.url }
+                    .take(MOVIEBOX_MAX_FALLBACK_RESULTS)
+                    .toList()
+                for (result in exactResults) {
+                    val detail = provider.load(result.url) ?: continue
+                    val playbackData = when (detail) {
+                        is MovieLoadResponse -> detail.dataUrl.takeIf {
+                            MovieboxFallbackMatcher.acceptsMovie(
+                                media,
+                                request,
+                                detail.name,
+                                detail.year
+                            )
+                        }
+
+                        is TvSeriesLoadResponse -> {
+                            if (media.subjectType != null && media.subjectType != 2) {
+                                null
+                            } else {
+                                MovieboxFallbackMatcher.episodeData(
+                                    request = request,
+                                    candidateTitle = detail.name,
+                                    candidateYear = detail.year,
+                                    episodes = detail.episodes
+                                )
+                            }
+                        }
+
+                        else -> null
+                    } ?: continue
+                    if (
+                        provider.loadLinks(
+                            playbackData,
+                            isCasting,
+                            subtitleCallback,
+                            fallbackCallback
+                        )
+                    ) return@loadFirstEmittingFallback true
+                }
+                false
+            }
+        }
+    }
+
+    private fun MovieboxLoadData.fallbackRequest(): NomatFallbackRequest? {
+        val normalizedTitle = MovieMetadataParser.title(title)
+            ?.let { value ->
+                year?.let { releaseYear ->
+                    value.replace(
+                        Regex("""\s*[\[(]\Q$releaseYear\E[\])]\s*$"""),
+                        ""
+                    ).trim()
+                } ?: value
+            }
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        return NomatFallbackRequest(
+            title = normalizedTitle,
+            year = year,
+            season = season,
+            episode = episode
+        )
+    }
+
+    private fun MovieboxLoadData.matchesFallbackDetail(
+        request: NomatFallbackRequest,
+        detail: LoadResponse
+    ): Boolean = when (detail) {
+        is MovieLoadResponse ->
+            MovieboxFallbackMatcher.acceptsMovie(
+                this,
+                request,
+                detail.name,
+                detail.year
+            )
+
+        is TvSeriesLoadResponse ->
+            (subjectType == null || subjectType == 2) &&
+                MovieboxFallbackMatcher.seriesMatchesRequest(
+                    request,
+                    detail.name,
+                    detail.year,
+                    detail.episodes
+                )
+
+        else -> false
+    }
+
+    private fun fallbackProviders(): List<MainAPI> = fallbackProviderFactory()
 
     private suspend fun fetchAuthorization(query: String): String? {
         val body = mapOf(
@@ -275,7 +461,14 @@ class MovieboxProvider : MainAPI() {
         val detailPath = item.detailPath?.takeIf(MovieboxApi::isValidDetailPath) ?: return null
         val title = item.title?.trim()?.takeIf { it.isNotBlank() } ?: return null
         if (item.hasResource != true) return null
-        val data = MovieboxLoadData(id = id, detailPath = detailPath).toJson()
+        val year = item.releaseDate?.substringBefore('-')?.toIntOrNull()
+        val data = MovieboxLoadData(
+            id = id,
+            detailPath = detailPath,
+            title = title,
+            year = year,
+            subjectType = item.subjectType
+        ).toJson()
         if (
             SensitiveContentPolicy.isBlocked(
                 title = title,
@@ -301,6 +494,9 @@ class MovieboxProvider : MainAPI() {
         const val MOVIEBOX_AUTH_BODY_LIMIT_BYTES = 256_000
         const val MOVIEBOX_JSON_BODY_LIMIT_BYTES = 2_000_000
         const val MOVIEBOX_HOME_BODY_LIMIT_BYTES = 4_000_000
+        const val MOVIEBOX_CATALOG_FALLBACK_TIMEOUT_MS = 60_000L
+        const val MOVIEBOX_PLAYBACK_FALLBACK_TIMEOUT_MS = 90_000L
+        const val MOVIEBOX_MAX_FALLBACK_RESULTS = 8
     }
 }
 
@@ -407,7 +603,29 @@ internal object MovieboxApi {
         val id = decoded.id?.takeIf(::isValidSubjectId) ?: return null
         val detailPath = decoded.detailPath?.takeIf(::isValidDetailPath)
         if (decoded.detailPath != null && detailPath == null) return null
-        return decoded.copy(id = id, detailPath = detailPath)
+        val season = decoded.season?.takeIf { it in 0..10_000 }
+        if (decoded.season != null && season == null) return null
+        val episode = decoded.episode?.takeIf { it in 0..10_000 }
+        if (decoded.episode != null && episode == null) return null
+        val title = decoded.title?.trim()?.takeIf {
+            it.isNotBlank() &&
+                it.length <= 512 &&
+                it.none { character -> character.code < 0x20 || character.code == 0x7f }
+        }
+        if (decoded.title != null && title == null) return null
+        val year = decoded.year?.takeIf { it in 1800..2200 }
+        if (decoded.year != null && year == null) return null
+        val subjectType = decoded.subjectType?.takeIf { it in 0..10 }
+        if (decoded.subjectType != null && subjectType == null) return null
+        return decoded.copy(
+            id = id,
+            season = season,
+            episode = episode,
+            detailPath = detailPath,
+            title = title,
+            year = year,
+            subjectType = subjectType
+        )
     }
 
     fun isValidSubjectId(value: String): Boolean = subjectIdPattern.matches(value)
@@ -417,6 +635,115 @@ internal object MovieboxApi {
 
     private fun encode(value: String): String =
         URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+}
+
+internal object MovieboxFallbackMatcher {
+    private const val MAX_RELEASE_YEAR_DRIFT = 2
+    private val trailingReleaseYearRegex = Regex(
+        """\s*(?:[\[(]\s*((?:19|20)\d{2})\s*[\])]|[-–—|:]\s*((?:19|20)\d{2}))\s*$"""
+    )
+
+    fun isPotentialTitle(request: NomatFallbackRequest, candidateTitle: String): Boolean {
+        if (NomatParser.isPotentialFallbackTitle(request, candidateTitle)) return true
+        val expectedYear = request.year ?: return false
+        val parsedTitle = MovieMetadataParser.title(candidateTitle) ?: return false
+        val yearMatch = trailingReleaseYearRegex.find(parsedTitle) ?: return false
+        val candidateYear = yearMatch.groupValues
+            .drop(1)
+            .firstNotNullOfOrNull(String::toIntOrNull)
+            ?: return false
+        if (kotlin.math.abs(candidateYear - expectedYear) > MAX_RELEASE_YEAR_DRIFT) {
+            return false
+        }
+        val withoutYear = parsedTitle.removeRange(yearMatch.range).trim()
+        return NomatParser.isExactFallbackTitle(request.title, withoutYear)
+    }
+
+    fun acceptsMovie(
+        media: MovieboxLoadData,
+        request: NomatFallbackRequest,
+        candidateTitle: String,
+        candidateYear: Int?
+    ): Boolean {
+        if (!isExactMatch(request, candidateTitle, candidateYear)) return false
+        val provenTypeDrift = media.subjectType == 2 &&
+            hasReleaseYearDrift(request, candidateTitle, candidateYear)
+        if (
+            (request.season != null || request.episode != null) &&
+            !provenTypeDrift
+        ) return false
+        return media.subjectType != 2 || provenTypeDrift
+    }
+
+    fun episodeData(
+        request: NomatFallbackRequest,
+        candidateTitle: String,
+        candidateYear: Int?,
+        episodes: List<Episode>
+    ): String? {
+        if (!isExactMatch(request, candidateTitle, candidateYear)) return null
+        val expectedEpisode = request.episode ?: return null
+        return episodes.filter { episode ->
+            episode.episode == expectedEpisode &&
+                (request.season == null || episode.season == request.season)
+        }.singleOrNull()?.data?.takeIf { it.isNotBlank() }
+    }
+
+    fun seriesMatchesRequest(
+        request: NomatFallbackRequest,
+        candidateTitle: String,
+        candidateYear: Int?,
+        episodes: List<Episode>
+    ): Boolean {
+        if (!isExactMatch(request, candidateTitle, candidateYear)) return false
+        if (request.episode != null) {
+            return episodeData(
+                request,
+                candidateTitle,
+                candidateYear,
+                episodes
+            ) != null
+        }
+        val requestedSeason = request.season
+        return if (requestedSeason == null) {
+            episodes.isNotEmpty()
+        } else {
+            episodes.any { episode ->
+                episode.season == requestedSeason && episode.data.isNotBlank()
+            }
+        }
+    }
+
+    private fun isExactMatch(
+        request: NomatFallbackRequest,
+        candidateTitle: String,
+        candidateYear: Int?
+    ): Boolean {
+        if (!isPotentialTitle(request, candidateTitle)) return false
+        val expectedYear = request.year ?: return true
+        val resolvedYear = candidateYear ?: releaseYearInTitle(candidateTitle)
+        return resolvedYear != null &&
+            kotlin.math.abs(resolvedYear - expectedYear) <= MAX_RELEASE_YEAR_DRIFT
+    }
+
+    private fun hasReleaseYearDrift(
+        request: NomatFallbackRequest,
+        candidateTitle: String,
+        candidateYear: Int?
+    ): Boolean {
+        val expectedYear = request.year ?: return false
+        val resolvedYear = candidateYear ?: releaseYearInTitle(candidateTitle) ?: return false
+        return resolvedYear != expectedYear &&
+            kotlin.math.abs(resolvedYear - expectedYear) <= MAX_RELEASE_YEAR_DRIFT
+    }
+
+    private fun releaseYearInTitle(rawTitle: String): Int? {
+        val parsedTitle = MovieMetadataParser.title(rawTitle) ?: return null
+        return trailingReleaseYearRegex.find(parsedTitle)
+            ?.groupValues
+            ?.drop(1)
+            ?.firstNotNullOfOrNull(String::toIntOrNull)
+    }
 }
 
 private const val MOVIEBOX_MAX_SEASONS = 100
@@ -529,7 +856,10 @@ internal data class MovieboxLoadData(
     val id: String? = null,
     val season: Int? = null,
     val episode: Int? = null,
-    val detailPath: String? = null
+    val detailPath: String? = null,
+    val title: String? = null,
+    val year: Int? = null,
+    val subjectType: Int? = null
 )
 
 @JsonIgnoreProperties(ignoreUnknown = true)

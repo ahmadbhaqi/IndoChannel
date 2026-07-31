@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import java.net.URI
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
 
 class PencurimovieProvider : MainAPI() {
@@ -167,13 +168,33 @@ class PencurimovieProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val requestUrl = providerUrl(data) ?: return false
-        val fetch = getProviderPage(requestUrl) ?: return false
+        val urlFallbackRequests = PencurimovieParser.fallbackRequests(
+            Jsoup.parse(""),
+            requestUrl
+        )
+        val fetch = getProviderPage(requestUrl) ?: return loadFallback(
+            urlFallbackRequests,
+            isCasting,
+            subtitleCallback,
+            callback
+        )
         val pageUrl = fetch.url
         if (
             fetch.code !in 200..299 ||
             ProviderHtmlParser.isNonContentPage(fetch.body)
-        ) return false
+        ) {
+            return loadFallback(
+                urlFallbackRequests,
+                isCasting,
+                subtitleCallback,
+                callback
+            )
+        }
         val document = Jsoup.parse(fetch.body, pageUrl)
+        val fallbackRequests = (
+            PencurimovieParser.fallbackRequests(document, pageUrl) +
+                urlFallbackRequests
+            ).distinct()
         val resolver = LinkResolutionSession(
             this,
             subtitleCallback,
@@ -193,12 +214,99 @@ class PencurimovieProvider : MainAPI() {
                 .take(48)
         )
 
-        for (candidate in candidates) {
-            if (resolver.loaded || !resolver.canContinue) break
-            resolver.resolve(candidate, pageUrl)
-        }
-        return resolver.loaded
+        resolver.resolveFirstVerified(
+            candidates = candidates.map { candidate ->
+                PlayerResolutionCandidate(candidate, pageUrl)
+            },
+            maxConcurrency = 4,
+            tierTimeoutMs = PENCURIMOVIE_PRIMARY_TIMEOUT_MS
+        )
+        if (resolver.loaded) return true
+
+        return loadFallback(
+            fallbackRequests,
+            isCasting,
+            subtitleCallback,
+            callback
+        )
     }
+
+    private suspend fun loadFallback(
+        requests: List<NomatFallbackRequest>,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean = withPlaybackFallbackBudget(PENCURIMOVIE_FALLBACK_TIMEOUT_MS) {
+        val orderedRequests = requests.distinct().sortedWith(
+            compareByDescending<NomatFallbackRequest> { it.year != null }
+                .thenByDescending { it.title.length }
+        )
+        val providerLoaded = withTimeoutOrNull(
+            PENCURIMOVIE_PROVIDER_FALLBACK_TIMEOUT_MS
+        ) {
+            for (request in orderedRequests) {
+                val loaded = loadFirstEmittingFallback(
+                    candidates = fallbackProviders(),
+                    callback = callback
+                ) { provider, fallbackCallback ->
+                    val exactResults = provider.search(request.title).orEmpty()
+                        .asSequence()
+                        .filter {
+                            NomatParser.isPotentialFallbackTitle(request, it.name)
+                        }
+                        .distinctBy { it.url }
+                        .take(PENCURIMOVIE_MAX_FALLBACK_RESULTS)
+                        .toList()
+                    for (result in exactResults) {
+                        val detail = provider.load(result.url) ?: continue
+                        val playbackData = when (detail) {
+                            is MovieLoadResponse -> detail.dataUrl.takeIf {
+                                request.season == null &&
+                                    request.episode == null &&
+                                    NomatParser.isExactFallbackMatch(
+                                        request,
+                                        detail.name,
+                                        detail.year
+                                    )
+                            }
+
+                            is TvSeriesLoadResponse ->
+                                PencurimovieParser.fallbackEpisodeData(
+                                    request = request,
+                                    candidateTitle = detail.name,
+                                    candidateYear = detail.year,
+                                    episodes = detail.episodes
+                                )
+
+                            else -> null
+                        } ?: continue
+                        if (
+                            provider.loadLinks(
+                                playbackData,
+                                isCasting,
+                                subtitleCallback,
+                                fallbackCallback
+                            )
+                        ) return@loadFirstEmittingFallback true
+                    }
+                    false
+                }
+                if (loaded) return@withTimeoutOrNull true
+            }
+            false
+        } == true
+        if (providerLoaded) return@withPlaybackFallbackBudget true
+
+        loadExactPublicCatalogFallback(
+            safeHttp = safeHttp,
+            requests = orderedRequests,
+            subtitleCallback = subtitleCallback,
+            callback = callback
+        )
+    }
+
+    private fun fallbackProviders(): List<MainAPI> =
+        listOf(FilmapikProvider(), PusatfilmProvider(), KitanontonProvider())
 
     private suspend fun getProviderPage(url: String): ProviderHttpResult? = try {
         safeHttp.get(
@@ -220,14 +328,38 @@ class PencurimovieProvider : MainAPI() {
 
     private fun networkProviderUrl(raw: String?): String? =
         ProviderHtmlParser.preserveProviderPageUrl(raw, mainUrl, ownedHosts)
+
+    private companion object {
+        const val PENCURIMOVIE_PRIMARY_TIMEOUT_MS = 35_000L
+        const val PENCURIMOVIE_FALLBACK_TIMEOUT_MS = 90_000L
+        const val PENCURIMOVIE_PROVIDER_FALLBACK_TIMEOUT_MS = 55_000L
+        const val PENCURIMOVIE_MAX_FALLBACK_RESULTS = 8
+    }
 }
 
 internal object PencurimovieParser {
+    private val playmogoAliases = setOf(
+        "dsvplay.com",
+        "ds2play.com",
+        "doodstream.com"
+    )
+    private val yearRegex = Regex("""\b(?:19|20)\d{2}\b""")
+    private val parenthesizedYearSuffixRegex =
+        Regex("""\s*[\[(](?:19|20)\d{2}[\])]\s*$""")
+    private val trailingYearRegex = Regex("""(?:^|\s)((?:19|20)\d{2})$""")
+    private val seasonSuffixRegex =
+        Regex("""(?i)\s+\bseason\s*[-:]?\s*\d+\b.*$""")
+    private val episodeSuffixRegex =
+        Regex("""(?i)\s+\b(?:episode|eps?\.?)\s*[-:]?\s*\d+\b.*$""")
+    private val languageEditionTagRegex = Regex(
+        """(?i)\s*[\[(]\s*(?:(?:malay|indonesian?|english|hindi|tamil|telugu|thai|mandarin|cantonese)\s*(?:dub(?:bed)?|audio|sub(?:title)?)|dual\s+audio)\s*[\])]\s*"""
+    )
+
     fun extractorCompatibleUrl(raw: String?): String? {
         val value = raw?.trim()?.takeIf(::isSafeRemoteHttpUrl) ?: return null
         val uri = runCatching { URI(value) }.getOrNull() ?: return null
         val host = uri.host.orEmpty().lowercase().removePrefix("www.")
-        if (host != "dsvplay.com") return value
+        if (host !in playmogoAliases) return value
 
         return buildString {
             append("https://playmogo.com")
@@ -255,6 +387,131 @@ internal object PencurimovieParser {
                 mirrorIndex++
             }
         }
+    }
+
+    fun fallbackRequest(
+        document: org.jsoup.nodes.Document,
+        pageUrl: String? = null
+    ): NomatFallbackRequest? = fallbackRequests(document, pageUrl).firstOrNull()
+
+    fun fallbackRequests(
+        document: org.jsoup.nodes.Document,
+        pageUrl: String? = null
+    ): List<NomatFallbackRequest> {
+        val documentRequest = documentFallbackRequest(document, pageUrl)
+        val urlRequests = pageUrl?.let(::urlFallbackRequests).orEmpty()
+        return (listOfNotNull(documentRequest) + urlRequests).distinct()
+    }
+
+    private fun documentFallbackRequest(
+        document: org.jsoup.nodes.Document,
+        pageUrl: String?
+    ): NomatFallbackRequest? {
+        val rawTitle = document.selectFirst("div.mvic-desc h3, h1.entry-title")
+            ?.text()
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        val parsedTitle = MovieMetadataParser.title(rawTitle) ?: return null
+        val releaseYear = document.select("div.mvic-info p:contains(Release) a")
+            .firstNotNullOfOrNull { element ->
+                yearRegex.find(element.text())?.value?.toIntOrNull()
+            }
+        val coordinateText = buildString {
+            append(parsedTitle)
+            pageUrl?.let { url ->
+                append(' ')
+                append(
+                    runCatching { URI(url).path.orEmpty() }
+                        .getOrDefault("")
+                        .replace('-', ' ')
+                )
+            }
+        }
+        val (season, episode) = PopularProviderEpisodeParser.position(coordinateText)
+        val title = cleanTitle(parsedTitle, releaseYear)
+            ?: return null
+        val year = releaseYear
+            ?: parenthesizedYearSuffixRegex.find(parsedTitle)
+                ?.let { match -> yearRegex.find(match.value) }
+                ?.value
+                ?.toIntOrNull()
+        return NomatFallbackRequest(title, year, season, episode)
+    }
+
+    private fun urlFallbackRequests(pageUrl: String): List<NomatFallbackRequest> {
+        val slug = runCatching { URI(pageUrl).path.orEmpty() }
+            .getOrNull()
+            ?.trim('/')
+            ?.substringAfterLast('/')
+            ?.takeIf {
+                it.isNotBlank() &&
+                    it.lowercase() !in setOf(
+                        "movies",
+                        "series",
+                        "most-rating",
+                        "top-imdb"
+                    )
+            }
+            ?: return emptyList()
+        val rawTitle = slug.split('-')
+            .filter { it.isNotBlank() }
+            .joinToString(" ") { word ->
+                word.replaceFirstChar { character -> character.titlecase() }
+            }
+        val parsedTitle = MovieMetadataParser.title(rawTitle) ?: return emptyList()
+        val (season, episode) = PopularProviderEpisodeParser.position(parsedTitle)
+        val preservedTitle = cleanTitle(parsedTitle, null) ?: return emptyList()
+        val preserved = NomatFallbackRequest(
+            title = preservedTitle,
+            year = null,
+            season = season,
+            episode = episode
+        )
+        val trailingYear = trailingYearRegex.find(preservedTitle)
+            ?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val interpretedAsYear = trailingYear?.let { year ->
+            cleanTitle(preservedTitle, year)?.let { title ->
+                if (title == preservedTitle) {
+                    null
+                } else {
+                    NomatFallbackRequest(title, year, season, episode)
+                }
+            }
+        }
+        return listOfNotNull(preserved, interpretedAsYear).distinct()
+    }
+
+    private fun cleanTitle(raw: String, releaseYear: Int?): String? {
+        val cleaned = raw
+            .replace(seasonSuffixRegex, "")
+            .replace(episodeSuffixRegex, "")
+            .replace(parenthesizedYearSuffixRegex, "")
+            .replace(languageEditionTagRegex, " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+        val withoutReleaseYear = releaseYear?.let { year ->
+            cleaned.replace(Regex("""\s+\Q$year\E\s*$"""), "")
+                .trim()
+                .takeIf { it.isNotBlank() }
+        } ?: cleaned
+        return withoutReleaseYear.takeIf { it.isNotBlank() }
+    }
+
+    fun fallbackEpisodeData(
+        request: NomatFallbackRequest,
+        candidateTitle: String,
+        candidateYear: Int?,
+        episodes: List<Episode>
+    ): String? {
+        if (!NomatParser.isExactFallbackMatch(request, candidateTitle, candidateYear)) {
+            return null
+        }
+        val expectedEpisode = request.episode ?: return null
+        return episodes.filter { episode ->
+            episode.episode == expectedEpisode &&
+                (request.season == null || episode.season == request.season)
+        }.singleOrNull()?.data?.takeIf { it.isNotBlank() }
     }
 
     private fun mirrorFamily(url: String): String {

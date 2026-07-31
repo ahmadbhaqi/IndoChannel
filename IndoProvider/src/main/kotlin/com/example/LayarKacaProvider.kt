@@ -31,17 +31,63 @@ class LayarKacaProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val items = app.get(request.data + page).document
-            .select("article.item-infinite, article.item, div.ml-item")
-            .mapNotNull { it.toSearchResult() }
-        return newHomePageResponse(request.name, items)
+        val items = try {
+            app.get(
+                request.data + page,
+                timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+            ).document
+                .select("article.item-infinite, article.item, div.ml-item")
+                .mapNotNull { it.toSearchResult() }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            emptyList()
+        }
+        if (items.isNotEmpty()) {
+            return newHomePageResponse(request.name, items)
+        }
+
+        val fallbackItems = withTimeoutOrNull(LAYARKACA_CATALOG_FALLBACK_TIMEOUT_MS) {
+            firstNonEmptyFallback(fallbackProviders()) { provider ->
+                val fallbackNames = fallbackCategoryNames(request.name)
+                val fallbackPage = provider.mainPage.firstOrNull { candidate ->
+                    fallbackNames.any { it.equals(candidate.name, ignoreCase = true) }
+                } ?: provider.mainPage.firstOrNull()
+                    ?: return@firstNonEmptyFallback emptyList()
+                provider.getMainPage(
+                    page,
+                    MainPageRequest(
+                        fallbackPage.name,
+                        fallbackPage.data,
+                        fallbackPage.horizontalImages
+                    )
+                )?.items?.flatMap { it.list }.orEmpty()
+            }
+        }.orEmpty()
+        return newHomePageResponse(request.name, fallbackItems)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, Charsets.UTF_8.name())
-        return app.get("$mainUrl/?s=$encodedQuery").document
-            .select("article.item-infinite, article.item, div.ml-item")
-            .mapNotNull { it.toSearchResult() }
+        val primaryResults = try {
+            app.get(
+                "$mainUrl/?s=$encodedQuery",
+                timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+            ).document
+                .select("article.item-infinite, article.item, div.ml-item")
+                .mapNotNull { it.toSearchResult() }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            emptyList()
+        }
+        if (primaryResults.isNotEmpty()) return primaryResults
+
+        return withTimeoutOrNull(LAYARKACA_CATALOG_FALLBACK_TIMEOUT_MS) {
+            firstNonEmptyFallback(fallbackProviders()) { provider ->
+                provider.search(query).orEmpty()
+            }
+        }.orEmpty()
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
@@ -67,13 +113,37 @@ class LayarKacaProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val requestUrl = providerUrl(url) ?: return null
-        val fetch = app.get(requestUrl)
+        val requestUrl = providerUrl(url)
+            ?: return firstNonEmptyFallback(fallbackProviders()) { provider ->
+                listOfNotNull(provider.load(url))
+            }.firstOrNull()
+        val urlFallbackRequests = LayarKacaPlayerParser.fallbackRequests(
+            Jsoup.parse(""),
+            requestUrl
+        )
+        val fetch = try {
+            app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            return loadFallbackDetail(urlFallbackRequests)
+        }
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.text)
+        ) {
+            return loadFallbackDetail(urlFallbackRequests)
+        }
         val document = fetch.document
-        val canonicalUrl = providerUrl(fetch.url) ?: return null
+        val fallbackRequests = (
+            LayarKacaPlayerParser.fallbackRequests(document, requestUrl) +
+                urlFallbackRequests
+            ).distinct()
+        val canonicalUrl = providerUrl(fetch.url)
+            ?: return loadFallbackDetail(fallbackRequests)
         val title = MovieMetadataParser.title(
             document.selectFirst("h1.entry-title, h3[itemprop=name]")?.text()
-        ) ?: return null
+        ) ?: return loadFallbackDetail(fallbackRequests)
         val poster = fixUrlNull(
             ProviderHtmlParser.imageSource(
                 document.selectFirst("img.thumbnail, figure.pull-left > img, img.img-thumbnail")
@@ -149,11 +219,76 @@ class LayarKacaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val requestUrl = providerUrl(data) ?: return false
-        val fetch = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
+        val requestUrl = providerUrl(data)
+        if (requestUrl == null) {
+            val delegatedRequests = LayarKacaPlayerParser.fallbackRequests(
+                Jsoup.parse(""),
+                data
+            )
+            return withPlaybackFallbackBudget(LAYARKACA_FALLBACK_TIMEOUT_MS) {
+                val delegatedLoaded = loadFirstEmittingFallback(
+                    candidates = fallbackProviders(),
+                    callback = callback
+                ) { provider, fallbackCallback ->
+                    provider.loadLinks(
+                        data,
+                        isCasting,
+                        subtitleCallback,
+                        fallbackCallback
+                    )
+                }
+                if (delegatedLoaded) {
+                    true
+                } else {
+                    delegatedRequests.any { request ->
+                        loadFallbackWithinBudget(
+                            request = request,
+                            isCasting = isCasting,
+                            subtitleCallback = subtitleCallback,
+                            callback = callback
+                        )
+                    }
+                }
+            }
+        }
+        val urlFallbackRequests = LayarKacaPlayerParser.fallbackRequests(
+            Jsoup.parse(""),
+            requestUrl
+        )
+        val fetch = try {
+            app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            return loadFallback(
+                urlFallbackRequests,
+                isCasting,
+                subtitleCallback,
+                callback
+            )
+        }
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.text)
+        ) {
+            return loadFallback(
+                urlFallbackRequests,
+                isCasting,
+                subtitleCallback,
+                callback
+            )
+        }
         val document = fetch.document
-        val canonicalUrl = providerUrl(fetch.url) ?: return false
-        val fallbackRequest = LayarKacaPlayerParser.fallbackRequest(document, requestUrl)
+        val fallbackRequests = (
+            LayarKacaPlayerParser.fallbackRequests(document, requestUrl) +
+                urlFallbackRequests
+            ).distinct()
+        val canonicalUrl = providerUrl(fetch.url) ?: return loadFallback(
+            fallbackRequests,
+            isCasting,
+            subtitleCallback,
+            callback
+        )
         if (
             !LayarKacaPlayerParser.isPrimaryPlaybackCoordinateSafe(
                 requestUrl,
@@ -161,14 +296,12 @@ class LayarKacaProvider : MainAPI() {
                 document
             )
         ) {
-            return fallbackRequest?.let { request ->
-                loadFallback(
-                    request = request,
-                    isCasting = isCasting,
-                    subtitleCallback = subtitleCallback,
-                    callback = callback
-                )
-            } ?: false
+            return loadFallback(
+                requests = fallbackRequests,
+                isCasting = isCasting,
+                subtitleCallback = subtitleCallback,
+                callback = callback
+            )
         }
         val resolver = LinkResolutionSession(
             this,
@@ -268,9 +401,9 @@ class LayarKacaProvider : MainAPI() {
             )
         }
 
-        if (resolver.loaded || fallbackRequest == null) return resolver.loaded
+        if (resolver.loaded || fallbackRequests.isEmpty()) return resolver.loaded
         return loadFallback(
-            request = fallbackRequest,
+            requests = fallbackRequests,
             isCasting = isCasting,
             subtitleCallback = subtitleCallback,
             callback = callback
@@ -278,17 +411,72 @@ class LayarKacaProvider : MainAPI() {
     }
 
     private suspend fun loadFallback(
-        request: NomatFallbackRequest,
+        requests: List<NomatFallbackRequest>,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean = withPlaybackFallbackBudget(LAYARKACA_FALLBACK_TIMEOUT_MS) {
-        loadFallbackWithinBudget(
-            request = request,
-            isCasting = isCasting,
-            subtitleCallback = subtitleCallback,
-            callback = callback
-        )
+        requests.any { request ->
+            loadFallbackWithinBudget(
+                request = request,
+                isCasting = isCasting,
+                subtitleCallback = subtitleCallback,
+                callback = callback
+            )
+        }
+    }
+
+    private suspend fun loadFallbackDetail(
+        requests: List<NomatFallbackRequest>
+    ): LoadResponse? {
+        if (requests.isEmpty()) return null
+        return withTimeoutOrNull(LAYARKACA_CATALOG_FALLBACK_TIMEOUT_MS) {
+            for (request in requests) {
+                for (provider in fallbackProviders()) {
+                    try {
+                        val exactResults = provider.search(request.title).orEmpty()
+                            .asSequence()
+                            .filter {
+                                NomatParser.isPotentialFallbackTitle(request, it.name)
+                            }
+                            .distinctBy { it.url }
+                            .take(LAYARKACA_MAX_FALLBACK_SEARCH_RESULTS)
+                            .toList()
+                        for (result in exactResults) {
+                            val detail = provider.load(result.url) ?: continue
+                            if (
+                                !NomatParser.isExactFallbackMatch(
+                                    request = request,
+                                    candidateTitle = detail.name,
+                                    candidateYear = detail.year
+                                )
+                            ) continue
+                            val matchesRequestedEpisode = when (detail) {
+                                is MovieLoadResponse ->
+                                    request.season == null && request.episode == null
+                                is TvSeriesLoadResponse ->
+                                    LayarKacaPlayerParser.fallbackSeriesMatchesRequest(
+                                        request = request,
+                                        candidateTitle = detail.name,
+                                        candidateYear = detail.year,
+                                        episodes = detail.episodes
+                                    )
+
+                                else -> false
+                            }
+                            if (matchesRequestedEpisode) {
+                                return@withTimeoutOrNull detail
+                            }
+                        }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        // One failed detail source must not hide the next fallback.
+                    }
+                }
+            }
+            null
+        }
     }
 
     private suspend fun loadFallbackWithinBudget(
@@ -299,10 +487,11 @@ class LayarKacaProvider : MainAPI() {
     ): Boolean {
         val providers = listOf(FilmapikProvider(), PusatfilmProvider())
         for (provider in providers) {
+            var callbackFailure: Throwable? = null
             try {
                 val exactResults = provider.search(request.title).orEmpty()
                     .asSequence()
-                    .filter { NomatParser.isExactFallbackTitle(request.title, it.name) }
+                    .filter { NomatParser.isPotentialFallbackTitle(request, it.name) }
                     .distinctBy { it.url }
                     .take(LAYARKACA_MAX_FALLBACK_SEARCH_RESULTS)
                     .toList()
@@ -310,7 +499,8 @@ class LayarKacaProvider : MainAPI() {
                     val detail = provider.load(result.url) ?: continue
                     val playbackData = when (detail) {
                         is MovieLoadResponse -> detail.dataUrl.takeIf {
-                            request.episode == null &&
+                            request.season == null &&
+                                request.episode == null &&
                                 NomatParser.isExactFallbackMatch(
                                     request,
                                     detail.name,
@@ -331,7 +521,14 @@ class LayarKacaProvider : MainAPI() {
                     if (
                         retryFallbackPlayback(
                             maxAttempts = LAYARKACA_FALLBACK_PLAYBACK_ATTEMPTS,
-                            callback = callback
+                            callback = { link ->
+                                try {
+                                    callback(link)
+                                } catch (error: Throwable) {
+                                    callbackFailure = error
+                                    throw error
+                                }
+                            }
                         ) { attemptCallback ->
                             provider.loadLinks(
                                 playbackData,
@@ -347,6 +544,7 @@ class LayarKacaProvider : MainAPI() {
             } catch (_: Exception) {
                 // One fallback provider must not prevent the next exact match.
             }
+            callbackFailure?.let { throw it }
         }
         return false
     }
@@ -354,10 +552,21 @@ class LayarKacaProvider : MainAPI() {
     private fun providerUrl(raw: String?): String? =
         ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, LAYARKACA_LEGACY_HOSTS)
 
+    private fun fallbackProviders(): List<MainAPI> =
+        listOf(FilmapikProvider(), PusatfilmProvider())
+
+    private fun fallbackCategoryNames(requestedName: String): Set<String> = when {
+        requestedName.equals("Drama Korea", ignoreCase = true) ->
+            setOf(requestedName, "K-Drama")
+
+        else -> setOf(requestedName)
+    }
+
     private companion object {
         const val LAYARKACA_CANDIDATE_TIMEOUT_MS = 18_000L
         const val LAYARKACA_EXTRACTOR_TIMEOUT_MS = 8_000L
         const val LAYARKACA_PRIMARY_SESSION_TIMEOUT_MS = 45_000L
+        const val LAYARKACA_CATALOG_FALLBACK_TIMEOUT_MS = 60_000L
         const val LAYARKACA_FALLBACK_TIMEOUT_MS = 90_000L
         const val LAYARKACA_MAX_FALLBACK_SEARCH_RESULTS = 8
         const val LAYARKACA_FALLBACK_PLAYBACK_ATTEMPTS = 2
@@ -371,6 +580,52 @@ internal suspend fun withPlaybackFallbackBudget(
     block()
 } ?: false
 
+internal suspend fun <Candidate, Result> firstNonEmptyFallback(
+    candidates: Iterable<Candidate>,
+    attempt: suspend (Candidate) -> List<Result>
+): List<Result> {
+    for (candidate in candidates) {
+        try {
+            val results = attempt(candidate)
+            if (results.isNotEmpty()) return results
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            // A failed catalog source must not hide the next bounded fallback.
+        }
+    }
+    return emptyList()
+}
+
+internal suspend fun <Candidate, Result> loadFirstEmittingFallback(
+    candidates: Iterable<Candidate>,
+    callback: (Result) -> Unit,
+    attempt: suspend (Candidate, (Result) -> Unit) -> Boolean
+): Boolean {
+    for (candidate in candidates) {
+        var emitted = false
+        var callbackFailure: Throwable? = null
+        try {
+            attempt(candidate) { result ->
+                try {
+                    callback(result)
+                    emitted = true
+                } catch (error: Throwable) {
+                    callbackFailure = error
+                    throw error
+                }
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            // A failed playback source must not hide the next bounded fallback.
+        }
+        callbackFailure?.let { throw it }
+        if (emitted) return true
+    }
+    return false
+}
+
 internal suspend fun <T> retryFallbackPlayback(
     maxAttempts: Int,
     callback: (T) -> Unit,
@@ -378,16 +633,23 @@ internal suspend fun <T> retryFallbackPlayback(
 ): Boolean {
     repeat(maxAttempts.coerceIn(1, 3)) {
         var emitted = false
+        var callbackFailure: Throwable? = null
         try {
             load { value ->
-                emitted = true
-                callback(value)
+                try {
+                    callback(value)
+                    emitted = true
+                } catch (error: Throwable) {
+                    callbackFailure = error
+                    throw error
+                }
             }
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
             // A transient resolver failure is retried within the strict attempt bound.
         }
+        callbackFailure?.let { throw it }
         if (emitted) return true
     }
     return false
@@ -412,14 +674,21 @@ internal data class LayarKacaEpisodeCandidate(
 
 internal object LayarKacaPlayerParser {
     private val fallbackYearRegex = Regex("""\b(?:19|20)\d{2}\b""")
+    private val fallbackParenthesizedYearSuffixRegex =
+        Regex("""\s*[\[(](?:19|20)\d{2}[\])]\s*$""")
+    private val fallbackTrailingYearRegex = Regex("""(?:^|\s)((?:19|20)\d{2})$""")
     private val fallbackSeasonRegex = Regex("""(?i)\bseason\s*[-:]?\s*(\d+)\b""")
     private val fallbackEpisodeRegex =
         Regex("""(?i)\b(?:episode|eps?\.?)\s*[-:]?\s*(\d+)\b""")
     private val fallbackEpisodePathRegex =
         Regex("""(?i)([^/]+?)-season-(\d+)-episode-(\d+)/?$""")
+    private val fallbackDetailPathRegex =
+        Regex("""(?i)/(?:movie|tv)/([^/?#]+)/?$""")
     private val fallbackSeriesSuffixRegex = Regex(
         """(?i)\bseason\s*[-:]?\s*\d+\b.*$"""
     )
+    private val fallbackWatchPrefixRegex =
+        Regex("""(?i)^nonton(?:\s+film)?\s+""")
 
     fun ajaxRequests(document: Document): List<MuviproAjaxRequest> =
         ProviderHtmlParser.muviproAjaxRequests(document)
@@ -516,21 +785,26 @@ internal object LayarKacaPlayerParser {
         return requestedCandidates + parsed.filterNot { it in matches }
     }
 
-    fun fallbackRequest(document: Document, pageUrl: String? = null): NomatFallbackRequest? {
+    fun fallbackRequest(document: Document, pageUrl: String? = null): NomatFallbackRequest? =
+        fallbackRequests(document, pageUrl).firstOrNull()
+
+    fun fallbackRequests(document: Document, pageUrl: String? = null): List<NomatFallbackRequest> {
         val urlCoordinate = pageUrl?.let { episodeCoordinate(it, "") }
         val urlTitle = pageUrl?.let(::episodeTitle)
         if (urlCoordinate != null && urlTitle != null) {
-            return NomatFallbackRequest(
-                title = urlTitle,
-                year = null,
-                season = urlCoordinate.season,
-                episode = urlCoordinate.episode
+            return listOf(
+                NomatFallbackRequest(
+                    title = urlTitle,
+                    year = null,
+                    season = urlCoordinate.season,
+                    episode = urlCoordinate.episode
+                )
             )
         }
 
-        val rawTitle = pageTitle(document) ?: return null
-        val parsedTitle = MovieMetadataParser.title(rawTitle) ?: return null
-        val title = fallbackTitle(parsedTitle) ?: return null
+        val urlDetailRequests = pageUrl?.let(::detailFallbackRequests).orEmpty()
+        val rawTitle = pageTitle(document) ?: return urlDetailRequests
+        val parsedTitle = MovieMetadataParser.title(rawTitle) ?: return urlDetailRequests
         val coordinate = episodeCoordinate("", parsedTitle)
         val season = coordinate?.season
         val episode = coordinate?.episode
@@ -540,9 +814,52 @@ internal object LayarKacaPlayerParser {
             document.select("a[href*=/year/], span.year")
                 .firstNotNullOfOrNull {
                     fallbackYearRegex.find(it.text())?.value?.toIntOrNull()
-                } ?: fallbackYearRegex.find(parsedTitle)?.value?.toIntOrNull()
+                } ?: fallbackParenthesizedYearSuffixRegex.find(parsedTitle)
+                    ?.let { match -> fallbackYearRegex.find(match.value) }
+                    ?.value
+                    ?.toIntOrNull()
         }
-        return NomatFallbackRequest(title, year, season, episode)
+        val title = fallbackTitle(parsedTitle, year) ?: return urlDetailRequests
+        return (
+            listOf(NomatFallbackRequest(title, year, season, episode)) +
+                urlDetailRequests
+            ).distinct()
+    }
+
+    private fun detailFallbackRequests(url: String): List<NomatFallbackRequest> {
+        val slug = runCatching { URI(url).path.orEmpty() }.getOrNull()
+            ?.let(fallbackDetailPathRegex::find)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?: return emptyList()
+        val rawTitle = slug.split('-')
+            .filter { it.isNotBlank() }
+            .joinToString(" ") { word ->
+                word.replaceFirstChar { character -> character.titlecase() }
+            }
+        val season = fallbackSeasonRegex.find(rawTitle)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+        if (season != null) {
+            return listOfNotNull(
+                fallbackTitle(rawTitle)?.let { title ->
+                    NomatFallbackRequest(title, null, season, null)
+                }
+            )
+        }
+
+        val preserved = fallbackTitle(rawTitle)?.let { title ->
+            NomatFallbackRequest(title, null)
+        }
+        val trailingYear = fallbackTrailingYearRegex.find(rawTitle)
+            ?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val interpretedAsYear = trailingYear?.let { year ->
+            fallbackTitle(rawTitle, year)?.let { title ->
+                if (title == preserved?.title) null else NomatFallbackRequest(title, year)
+            }
+        }
+        return listOfNotNull(preserved, interpretedAsYear).distinct()
     }
 
     private fun pageTitle(document: Document): String? = document.selectFirst(
@@ -563,16 +880,24 @@ internal object LayarKacaPlayerParser {
             .takeIf { it.isNotBlank() }
     }
 
-    private fun fallbackTitle(raw: String): String? = raw
-        .replace(fallbackSeriesSuffixRegex, " ")
-        .replace(fallbackSeasonRegex, " ")
-        .replace(fallbackEpisodeRegex, " ")
-        .replace(fallbackYearRegex, " ")
-        .replace(Regex("""(?i)\b(?:subtitle\s+indonesia|sub\s*indo)\b.*$"""), "")
-        .replace(Regex("""[()\[\]]"""), " ")
-        .replace(Regex("""\s+"""), " ")
-        .trim(' ', '-', ':', '|')
-        .takeIf { it.isNotBlank() }
+    private fun fallbackTitle(raw: String, releaseYear: Int? = null): String? {
+        val cleaned = raw
+            .replace(fallbackWatchPrefixRegex, "")
+            .replace(fallbackSeriesSuffixRegex, " ")
+            .replace(fallbackSeasonRegex, " ")
+            .replace(fallbackEpisodeRegex, " ")
+            .replace(fallbackParenthesizedYearSuffixRegex, " ")
+            .replace(Regex("""(?i)\b(?:subtitle\s+indonesia|sub\s*indo)\b.*$"""), "")
+            .replace(Regex("""[()\[\]]"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim(' ', '-', ':', '|')
+        val withoutReleaseYear = releaseYear?.let { year ->
+            cleaned.replace(Regex("""\s+\Q$year\E\s*$"""), "")
+                .trim()
+                .takeIf { it.isNotBlank() }
+        } ?: cleaned
+        return withoutReleaseYear.takeIf { it.isNotBlank() }
+    }
 
     fun fallbackEpisodeData(
         request: NomatFallbackRequest,
@@ -588,6 +913,33 @@ internal object LayarKacaPlayerParser {
             episode.episode == expectedEpisode &&
                 (request.season == null || episode.season == request.season)
         }.singleOrNull()?.data?.takeIf { it.isNotBlank() }
+    }
+
+    fun fallbackSeriesMatchesRequest(
+        request: NomatFallbackRequest,
+        candidateTitle: String,
+        candidateYear: Int?,
+        episodes: List<Episode>
+    ): Boolean {
+        if (!NomatParser.isExactFallbackMatch(request, candidateTitle, candidateYear)) {
+            return false
+        }
+        if (request.episode != null) {
+            return fallbackEpisodeData(
+                request = request,
+                candidateTitle = candidateTitle,
+                candidateYear = candidateYear,
+                episodes = episodes
+            ) != null
+        }
+        val requestedSeason = request.season
+        return if (requestedSeason == null) {
+            episodes.isNotEmpty()
+        } else {
+            episodes.any { episode ->
+                episode.season == requestedSeason && episode.data.isNotBlank()
+            }
+        }
     }
 
     fun isEpisodeLink(url: String, label: String, detailUrl: String): Boolean {

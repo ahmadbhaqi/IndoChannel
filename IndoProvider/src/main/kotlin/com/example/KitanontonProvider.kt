@@ -81,10 +81,8 @@ class KitanontonProvider : MainAPI() {
         val detailUrl = normalizePageUrl(url) ?: return null
         val fetch = fetchProviderPage(detailUrl) ?: return null
         val document = fetch.document
-        val titleElement = document.selectFirst("h1, h3[itemprop=name], meta[property=og:title]")
-        val title = MovieMetadataParser.title(
-            titleElement?.let { if (it.tagName() == "meta") it.attr("content") else it.text() }
-        ) ?: return null
+        val metadata = KitanontonPlayerParser.detailMetadata(document) ?: return null
+        val title = metadata.title
         val poster = document.selectFirst("meta[property=og:image]")
             ?.attr("content")
             ?.takeIf { it.isNotBlank() }
@@ -101,7 +99,7 @@ class KitanontonProvider : MainAPI() {
                 "[itemprop=description] p"
             )
         )
-        val year = Regex("""\b(19|20)\d{2}\b""").find(title)?.value?.toIntOrNull()
+        val year = metadata.year
         val tags = document.select("a[href*='/genre/']")
             .map { it.text().trim() }
             .filter { it.isNotBlank() }
@@ -311,6 +309,11 @@ internal data class KitanontonWatchEpisode(
     val mirrors: List<String>
 )
 
+internal data class KitanontonDetailMetadata(
+    val title: String,
+    val year: Int?
+)
+
 internal data class KitanontonEpisodeRequest(
     val detailUrl: String,
     val watchUrl: String,
@@ -324,6 +327,40 @@ internal object KitanontonPlayerParser {
         """\b(?:episode|eps?|e)\s*\.?\s*(\d+)\b""",
         RegexOption.IGNORE_CASE
     )
+    private val detailYearRegex = Regex("""\b(?:19|20)\d{2}\b""")
+    private val detailTitleSelectors = listOf(
+        "h3[itemprop=name]",
+        "h1[itemprop=name]",
+        "ol.breadcrumb li.active h1",
+        ".breadcrumb li.active h1",
+        "meta[property=og:title]",
+        "h1.entry-title",
+        "h1"
+    )
+
+    fun detailMetadata(document: Document): KitanontonDetailMetadata? {
+        val rawTitle = detailTitleSelectors.firstNotNullOfOrNull { selector ->
+            document.selectFirst(selector)?.let { element ->
+                element.attr("content").trim().takeIf { it.isNotBlank() }
+                    ?: element.text().trim().takeIf { it.isNotBlank() }
+            }
+        } ?: return null
+        val title = MovieMetadataParser.title(rawTitle) ?: return null
+        val year = detailYearRegex.find(title)?.value?.toIntOrNull()
+            ?: document.select(
+                "[itemprop=datePublished], a[href*='/release-year/'], " +
+                    "meta[property=article:published_time]"
+            ).firstNotNullOfOrNull { element ->
+                val value = listOf(
+                    element.attr("content"),
+                    element.text(),
+                    element.attr("href")
+                ).joinToString(" ")
+                detailYearRegex.find(value)?.value?.toIntOrNull()
+            }
+
+        return KitanontonDetailMetadata(title, year)
+    }
 
     fun watchPageUrl(document: Document, detailUrl: String): String? {
         val canonicalDetailUrl = ProviderHtmlParser.normalizeProviderPageUrl(

@@ -75,6 +75,11 @@ class GithubActionsRuntimeTest {
             """setRepo(System.getenv("GITHUB_REPOSITORY")""" in rootBuildScript,
             "plugins.json must derive its raw GitHub artifact URL from the current repository"
         )
+        assertTrue(
+            "user/repo" !in rootBuildScript &&
+                "ahmadbhaqi/IndoChannel" in rootBuildScript,
+            "local plugin manifests must fall back to the real raw GitHub repository"
+        )
     }
 
     @Test
@@ -88,7 +93,7 @@ class GithubActionsRuntimeTest {
         assertTrue("schedule:" in workflow)
         assertTrue("RUN_LIVE_PROVIDER_TESTS: 1" in workflow)
         assertTrue("fail-fast: false" in workflow)
-        assertTrue("if: always()" in workflow)
+        assertTrue("actions/upload-artifact" !in workflow)
         assertTrue(
             ("--tests \"" + "$" + "{{ matrix.test_class }}\"") in workflow,
             "provider health must execute each matrix test class"

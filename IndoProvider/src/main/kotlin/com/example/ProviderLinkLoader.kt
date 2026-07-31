@@ -217,6 +217,7 @@ internal class LinkResolutionSession(
     private val playSobatUrlParser: PlaySobatUrlParser = InlineDataParser::playSobatUrls,
     private val playSobatMirrorTimeoutMs: Long = PLAY_SOBAT_MIRROR_TIMEOUT_MS,
     private val mediaProbeTimeoutSeconds: Long = MEDIA_PROBE_TIMEOUT_SECONDS,
+    private val mediaProbeAttempts: Int = 1,
     private val mediaLinkProbe: MediaLinkProbe = { link ->
         probeExtractorLink(link, mediaProbeTimeoutSeconds)
     },
@@ -237,18 +238,25 @@ internal class LinkResolutionSession(
     private val mirrorRaceMutex = Mutex()
     @Volatile
     private var activeRaceWinner: CompletableDeferred<Boolean>? = null
+    @Volatile
+    private var callbackFailure: Throwable? = null
     private val deadlineNanos = System.nanoTime() +
         sessionTimeoutMs.coerceIn(1L, 10 * 60_000L) * 1_000_000L
 
     val loaded: Boolean get() = emittedLinks.isNotEmpty()
     internal val linkCount: Int get() = emittedLinks.size
     internal val canContinue: Boolean
-        get() = System.nanoTime() < deadlineNanos && visitedCandidates.size < maxCandidates
+        get() = callbackFailure == null &&
+            System.nanoTime() < deadlineNanos &&
+            visitedCandidates.size < maxCandidates
 
-    internal suspend fun <T> withinBudget(block: suspend () -> T): T? {
+    internal suspend fun <T> withinBudget(
+        timeoutMs: Long = candidateTimeoutMs,
+        block: suspend () -> T
+    ): T? {
         val remainingMs = remainingBudgetMs()
         if (remainingMs == 0L || visitedCandidates.size >= maxCandidates) return null
-        return withTimeoutOrNull(minOf(candidateTimeoutMs.coerceAtLeast(1L), remainingMs)) {
+        return withTimeoutOrNull(minOf(timeoutMs.coerceAtLeast(1L), remainingMs)) {
             block()
         }
     }
@@ -268,6 +276,7 @@ internal class LinkResolutionSession(
                 candidateDeadlineNanos = candidateDeadlineNanos
             )
         }
+        throwCallbackFailure()
         return emittedLinks.size > before
     }
 
@@ -279,13 +288,15 @@ internal class LinkResolutionSession(
         val timeoutMs = tierTimeoutMs
             ?.coerceAtLeast(1L)
             ?.let { minOf(it, remainingBudgetMs().coerceAtLeast(1L)) }
-        return if (timeoutMs == null) {
+        val result = if (timeoutMs == null) {
             resolveFirstVerifiedWithinSession(candidates, maxConcurrency)
         } else {
             withTimeoutOrNull(timeoutMs) {
                 resolveFirstVerifiedWithinSession(candidates, maxConcurrency)
             } ?: loaded
         }
+        throwCallbackFailure()
+        return result
     }
 
     private suspend fun resolveFirstVerifiedWithinSession(
@@ -310,17 +321,27 @@ internal class LinkResolutionSession(
             activeRaceWinner = winner
             try {
                 val semaphore = Semaphore(maxConcurrency.coerceIn(1, 8))
+                val failures = ConcurrentLinkedQueue<Throwable>()
                 val jobs = pending.map { candidate ->
                     launch {
-                        semaphore.withPermit {
-                            if (winner.isCompleted || !canContinue) return@withPermit
-                            val resolved = if (candidate.inline) {
-                                resolveInline(candidate.url, candidate.referer)
-                            } else {
-                                resolve(candidate.url, candidate.referer)
+                        try {
+                            semaphore.withPermit {
+                                if (winner.isCompleted || !canContinue) return@withPermit
+                                val resolved = if (candidate.inline) {
+                                    resolveInline(candidate.url, candidate.referer)
+                                } else {
+                                    resolve(candidate.url, candidate.referer)
+                                }
+                                if (resolved || loaded) {
+                                    winner.complete(true)
+                                }
                             }
-                            if (resolved || loaded) {
-                                winner.complete(true)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Throwable) {
+                            callbackFailure?.let { failure ->
+                                failures += failure
+                                winner.complete(false)
                             }
                         }
                     }
@@ -330,9 +351,12 @@ internal class LinkResolutionSession(
                     winner.complete(loaded)
                 }
                 val result = winner.await()
-                if (result) jobs.forEach { job -> job.cancel() }
+                if (result || failures.isNotEmpty()) {
+                    jobs.forEach { job -> job.cancel() }
+                }
                 jobs.joinAll()
                 completion.cancel()
+                failures.peek()?.let { throw it }
                 result
             } finally {
                 if (activeRaceWinner === winner) activeRaceWinner = null
@@ -364,6 +388,7 @@ internal class LinkResolutionSession(
                 )
             }
         }
+        throwCallbackFailure()
         return emittedLinks.size > before
     }
 
@@ -948,8 +973,17 @@ internal class LinkResolutionSession(
             }
         } catch (error: CancellationException) {
             throw error
-        } catch (_: Exception) {
-            // Continue with sibling and later candidates.
+        } catch (error: Throwable) {
+            if (callbackFailure === error) throw error
+            // A core ABI failure must remain visible, while an
+            // AbstractMethodError from an optional/stale mirror adapter should
+            // only discard that candidate so a healthy sibling can continue.
+            if (error is LinkageError) {
+                if (error !is AbstractMethodError) throw error
+            } else if (error !is Exception) {
+                throw error
+            }
+            // Optional extractors and stale mirrors must not suppress siblings.
         }
     }
 
@@ -1102,31 +1136,55 @@ internal class LinkResolutionSession(
     private suspend fun emitVerifiedBatch(links: List<ExtractorLink>) = supervisorScope {
         if (links.isEmpty()) return@supervisorScope
         val semaphore = Semaphore(MAX_ABYSS_QUALITY_PROBES)
-        links.forEach { link ->
+        val failures = ConcurrentLinkedQueue<Throwable>()
+        val jobs = links.map { link ->
             launch {
-                semaphore.withPermit {
-                    val verified = verifyMediaLink(link) ?: return@withPermit
-                    emissionMutex.withLock {
-                        emitUnchecked(verified)
+                try {
+                    semaphore.withPermit {
+                        val verified = verifyMediaLink(link) ?: return@withPermit
+                        emissionMutex.withLock {
+                            throwCallbackFailure()
+                            emitUnchecked(verified)
+                        }
                     }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    failures += callbackFailure ?: error
                 }
             }
         }
+        jobs.joinAll()
+        failures.peek()?.let { throw it }
     }
 
     private suspend fun verifyMediaLink(link: ExtractorLink): ExtractorLink? {
         if (System.nanoTime() >= deadlineNanos) return null
         if (!link.hasSafeMediaUrls()) return null
-        val remainingMs = remainingBudgetMs()
-        if (remainingMs == 0L) return null
-        return withTimeoutOrNull(
-            minOf(mediaProbeTimeoutSeconds.coerceIn(1L, 60L) * 1_000L, remainingMs)
-        ) {
-            mediaLinkProbe(link)
+        repeat(mediaProbeAttempts.coerceIn(1, 3)) {
+            val remainingMs = remainingBudgetMs()
+            if (remainingMs == 0L) return null
+            val verified = try {
+                withTimeoutOrNull(
+                    minOf(
+                        mediaProbeTimeoutSeconds.coerceIn(1L, 60L) * 1_000L,
+                        remainingMs
+                    )
+                ) {
+                    mediaLinkProbe(link)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                null
+            }
+            if (verified != null) return verified
         }
+        return null
     }
 
     private suspend fun emitUnchecked(link: ExtractorLink) {
+        throwCallbackFailure()
         if (System.nanoTime() >= deadlineNanos) return
         if (!link.hasSafeMediaUrls()) return
         val key = EmittedLinkKey(
@@ -1135,10 +1193,20 @@ internal class LinkResolutionSession(
             type = link.type,
             headers = link.headers.toMap()
         )
-        if (emittedLinks.add(key)) {
-            callback(link.withSimpleServerName(api.name))
+        if (key !in emittedLinks) {
+            try {
+                callback(link.withSimpleServerName(api.name))
+            } catch (error: Throwable) {
+                callbackFailure = error
+                throw error
+            }
+            emittedLinks.add(key)
             activeRaceWinner?.complete(true)
         }
+    }
+
+    private fun throwCallbackFailure() {
+        callbackFailure?.let { throw it }
     }
 
     private suspend fun emitSubtitle(subtitle: SubtitleFile) {

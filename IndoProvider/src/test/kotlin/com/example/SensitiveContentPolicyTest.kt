@@ -116,6 +116,15 @@ class SensitiveContentPolicyTest {
                 categories = listOf("Comedy")
             )
         )
+        assertTrue(
+            SensitiveContentPolicy.isBlocked(
+                title = "I Was Absorbed In A Family Restaurant Affair With A " +
+                    "Married Woman With Huge Breasts I Met At A Part time Job (2021)",
+                url = "https://provider.example/play/nonton-i-was-absorbed-in-a-family-" +
+                    "restaurant-affair-with-a-married-woman-with-huge-breasts-2021/",
+                categories = emptyList()
+            )
+        )
         listOf(
             "NSFW Special",
             "Erotic Private Story",

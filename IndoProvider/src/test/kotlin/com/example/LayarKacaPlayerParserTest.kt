@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.delay
@@ -242,6 +243,80 @@ class LayarKacaPlayerParserTest {
     }
 
     @Test
+    fun `fallback request derives blocked movie and series details from their urls`() {
+        val blockedDocument = Jsoup.parse("")
+
+        assertEquals(
+            NomatFallbackRequest(
+                title = "The Devils Mouth 2026",
+                year = null
+            ),
+            LayarKacaPlayerParser.fallbackRequest(
+                blockedDocument,
+                "https://tv.nontonfilm.red/movie/the-devils-mouth-2026/"
+            )
+        )
+        assertEquals(
+            listOf(
+                NomatFallbackRequest(title = "Class Of 1984", year = null),
+                NomatFallbackRequest(title = "Class Of", year = 1984)
+            ),
+            LayarKacaPlayerParser.fallbackRequests(
+                blockedDocument,
+                "https://tv.nontonfilm.red/movie/class-of-1984/"
+            )
+        )
+        assertEquals(
+            NomatFallbackRequest(
+                title = "Supergirl",
+                year = null,
+                season = 6,
+                episode = null
+            ),
+            LayarKacaPlayerParser.fallbackRequest(
+                blockedDocument,
+                "https://tv.nontonfilm.red/tv/nonton-film-supergirl-season-6-subtitle-indonesia/"
+            )
+        )
+    }
+
+    @Test
+    fun `blocked movie url does not mistake a numeric title for its release year`() {
+        val blockedDocument = Jsoup.parse("")
+
+        assertEquals(
+            NomatFallbackRequest(
+                title = "Blade Runner 2049",
+                year = null
+            ),
+            LayarKacaPlayerParser.fallbackRequest(
+                blockedDocument,
+                "https://tv.nontonfilm.red/movie/blade-runner-2049/"
+            )
+        )
+        assertEquals(
+            NomatFallbackRequest(
+                title = "1917",
+                year = null
+            ),
+            LayarKacaPlayerParser.fallbackRequest(
+                blockedDocument,
+                "https://tv.nontonfilm.red/movie/1917/"
+            )
+        )
+        assertEquals(
+            listOf(
+                NomatFallbackRequest(title = "Blade Runner 2049", year = null),
+                NomatFallbackRequest(title = "Blade Runner", year = 2049)
+            ),
+            LayarKacaPlayerParser.fallbackRequests(
+                blockedDocument,
+                "https://tv.nontonfilm.red/movie/blade-runner-2049/"
+            )
+        )
+    }
+
+    @Test
     fun `episode playback keeps the requested coordinate across a misleading redirect`() {
         val requested =
             "https://tv.nontonfilm.red/eps/supergirl-season-6-episode-9/"
@@ -428,6 +503,45 @@ class LayarKacaPlayerParserTest {
     }
 
     @Test
+    fun `season-only fallback requires the requested season to exist`() {
+        val provider = LayarKacaProvider()
+        val request = NomatFallbackRequest(
+            title = "Supergirl",
+            year = 2015,
+            season = 6
+        )
+        val seasonFive = listOf(
+            provider.newEpisode("https://fallback.example/season-5-episode-1") {
+                season = 5
+                episode = 1
+            }
+        )
+        val seasonSix = provider.newEpisode(
+            "https://fallback.example/season-6-episode-1"
+        ) {
+            season = 6
+            episode = 1
+        }
+
+        assertFalse(
+            LayarKacaPlayerParser.fallbackSeriesMatchesRequest(
+                request,
+                "Supergirl",
+                2015,
+                seasonFive
+            )
+        )
+        assertTrue(
+            LayarKacaPlayerParser.fallbackSeriesMatchesRequest(
+                request,
+                "Supergirl",
+                2015,
+                seasonFive + seasonSix
+            )
+        )
+    }
+
+    @Test
     fun `fallback playback retries until a provider actually emits a link`() = runBlocking {
         var attempts = 0
         val emitted = mutableListOf<String>()
@@ -451,6 +565,20 @@ class LayarKacaPlayerParserTest {
     }
 
     @Test
+    fun `fallback retry propagates callback failures without reporting success`() = runBlocking {
+        assertFailsWith<IllegalStateException> {
+            retryFallbackPlayback(
+                maxAttempts = 2,
+                callback = { error("consumer rejected link") }
+            ) { callback ->
+                callback("verified-link")
+                true
+            }
+        }
+        Unit
+    }
+
+    @Test
     fun `fallback budget cancels the whole provider chain`() = runBlocking {
         var finished = false
 
@@ -462,6 +590,58 @@ class LayarKacaPlayerParserTest {
 
         assertFalse(loaded)
         assertFalse(finished)
+    }
+
+    @Test
+    fun `catalog fallback skips failed and empty sources`() = runBlocking {
+        val attempts = mutableListOf<String>()
+
+        val results = firstNonEmptyFallback(
+            candidates = listOf("failed", "empty", "working")
+        ) { candidate ->
+            attempts += candidate
+            when (candidate) {
+                "failed" -> error("temporary failure")
+                "empty" -> emptyList()
+                else -> listOf("playable")
+            }
+        }
+
+        assertEquals(listOf("failed", "empty", "working"), attempts)
+        assertEquals(listOf("playable"), results)
+    }
+
+    @Test
+    fun `link fallback requires a provider to emit a link`() = runBlocking {
+        val attempts = mutableListOf<String>()
+        val emitted = mutableListOf<String>()
+
+        val loaded = loadFirstEmittingFallback(
+            candidates = listOf("false-positive", "working"),
+            callback = emitted::add
+        ) { candidate, callback ->
+            attempts += candidate
+            if (candidate == "working") callback("verified-link")
+            true
+        }
+
+        assertTrue(loaded)
+        assertEquals(listOf("false-positive", "working"), attempts)
+        assertEquals(listOf("verified-link"), emitted)
+    }
+
+    @Test
+    fun `link fallback never swallows callback failures`() = runBlocking {
+        assertFailsWith<IllegalStateException> {
+            loadFirstEmittingFallback(
+                candidates = listOf("working"),
+                callback = { error("consumer rejected link") }
+            ) { _, callback ->
+                callback("invalid-link")
+                true
+            }
+        }
+        Unit
     }
 
     @Test

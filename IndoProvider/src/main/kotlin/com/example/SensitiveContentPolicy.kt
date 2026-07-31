@@ -41,7 +41,8 @@ internal object SensitiveContentPolicy {
         """\b(?:nsfw|hentai|smut|erotic|erotica|erotis|jav|bokep|porn|pornografi|porno|sange|sangean|sangenya|tobrut|ngewe|ngentot)\b"""
     )
     private val explicitTitlePhrases = listOf(
-        Regex("""\bsex\s+in\s+public\b""")
+        Regex("""\bsex\s+in\s+public\b"""),
+        Regex("""\bhuge\s+breasts?\b""")
     )
     private val allowedExplicitWordTitlePhrases = listOf(
         Regex("""\bthe\s+hentai\s+prince(?:\s+and\s+the\s+stony\s+cat)?\b"""),

@@ -201,8 +201,18 @@ class NomatProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        if (
+            loadExactPublicCatalogFallback(
+                safeHttp = safeHttp,
+                requests = listOf(request),
+                subtitleCallback = subtitleCallback,
+                callback = callback
+            )
+        ) return true
+
         val providers = listOf(
             FilmapikProvider(),
+            PusatfilmProvider(),
             KitanontonProvider(),
             LayarKacaProvider()
         )
@@ -210,7 +220,7 @@ class NomatProvider : MainAPI() {
             try {
                 val exactResults = provider.search(request.title).orEmpty()
                     .asSequence()
-                    .filter { NomatParser.isExactFallbackTitle(request.title, it.name) }
+                    .filter { NomatParser.isPotentialFallbackTitle(request, it.name) }
                     .distinctBy { it.url }
                     .take(3)
                     .toList()
@@ -221,7 +231,9 @@ class NomatProvider : MainAPI() {
                     }
                     val playbackData = when (detail) {
                         is MovieLoadResponse ->
-                            detail.dataUrl.takeIf { request.episode == null }
+                            detail.dataUrl.takeIf {
+                                request.season == null && request.episode == null
+                            }
 
                         is TvSeriesLoadResponse -> {
                             val matchingEpisodes = detail.episodes.filter { episode ->
@@ -295,6 +307,8 @@ internal object NomatParser {
     private val providerHosts = setOf("nomat.site", "nomat.store", "nomat.asia")
     private val playbackHosts = setOf("nontonhemat.link")
     private val yearRegex = Regex("""\b(?:19|20)\d{2}\b""")
+    private val parenthesizedYearSuffixRegex =
+        Regex("""\s*[\[(](?:19|20)\d{2}[\])]\s*$""")
     private val seasonRegex = Regex("""(?i)\bseason\s*[-:]?\s*(\d+)\b""")
     private val episodeRegex = Regex("""(?i)\b(?:episode|eps?\.?)\s*[-:]?\s*(\d+)\b""")
 
@@ -365,10 +379,13 @@ internal object NomatParser {
         val parsedTitle = MovieMetadataParser.title(rawTitle) ?: return null
         val year = document.select("a[href*='/category/year/']")
             .firstNotNullOfOrNull { yearRegex.find(it.text())?.value?.toIntOrNull() }
-            ?: yearRegex.find(parsedTitle)?.value?.toIntOrNull()
+            ?: parenthesizedYearSuffixRegex.find(parsedTitle)
+                ?.let { match -> yearRegex.find(match.value) }
+                ?.value
+                ?.toIntOrNull()
         val season = seasonRegex.find(parsedTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
         val episode = episodeRegex.find(parsedTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
-        val title = fallbackTitle(parsedTitle)
+        val title = fallbackTitle(parsedTitle, year)
 
         return title?.let {
             NomatFallbackRequest(
@@ -385,12 +402,26 @@ internal object NomatParser {
         return expectedKey.isNotEmpty() && expectedKey == titleKey(candidate)
     }
 
+    fun isPotentialFallbackTitle(
+        request: NomatFallbackRequest,
+        candidate: String
+    ): Boolean {
+        if (isExactFallbackTitle(request.title, candidate)) return true
+        val releaseYear = request.year ?: return false
+        val withoutReleaseYear = candidate.replace(
+            Regex("""(?:\s*[-–—|:]\s*|\s+)\Q$releaseYear\E\s*$"""),
+            ""
+        ).trim()
+        return withoutReleaseYear.isNotBlank() &&
+            isExactFallbackTitle(request.title, withoutReleaseYear)
+    }
+
     fun isExactFallbackMatch(
         request: NomatFallbackRequest,
         candidateTitle: String,
         candidateYear: Int?
     ): Boolean {
-        if (!isExactFallbackTitle(request.title, candidateTitle)) return false
+        if (!isPotentialFallbackTitle(request, candidateTitle)) return false
         return request.year == null || candidateYear == request.year
     }
 
@@ -401,16 +432,23 @@ internal object NomatParser {
             ?: ProviderHtmlParser.firstImageSource(document, "div.video-poster img")
     }
 
-    private fun fallbackTitle(raw: String): String? = raw
+    private fun fallbackTitle(raw: String, releaseYear: Int? = null): String? {
+        val cleaned = raw
         .replace(Regex("""(?i)^nonton(?:\s+film)?\s+"""), "")
         .replace(seasonRegex, " ")
         .replace(episodeRegex, " ")
-        .replace(yearRegex, " ")
+        .replace(parenthesizedYearSuffixRegex, " ")
         .replace(Regex("""(?i)\b(?:subtitle\s+indonesia|sub\s*indo)\b.*$"""), "")
         .replace(Regex("""[()\[\]]"""), " ")
         .replace(Regex("""\s+"""), " ")
         .trim(' ', '-', ':', '|')
-        .takeIf { it.isNotBlank() }
+        val withoutReleaseYear = releaseYear?.let { year ->
+            cleaned.replace(Regex("""\s+\Q$year\E\s*$"""), "")
+                .trim()
+                .takeIf { it.isNotBlank() }
+        } ?: cleaned
+        return withoutReleaseYear.takeIf { it.isNotBlank() }
+    }
 
     private fun titleKey(raw: String): String {
         val normalized = fallbackTitle(MovieMetadataParser.title(raw) ?: raw).orEmpty()
