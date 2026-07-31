@@ -27,7 +27,6 @@ class GithubActionsRuntimeTest {
             "actions/checkout" to 6,
             "actions/setup-java" to 5,
             "android-actions/setup-android" to 4,
-            "actions/upload-artifact" to 6,
             "gradle/actions/setup-gradle" to 6
         )
 
@@ -39,6 +38,43 @@ class GithubActionsRuntimeTest {
                 "$action must use v$minimumMajor or newer, but found ${majors.sorted()}"
             )
         }
+    }
+
+    @Test
+    fun `build workflow publishes only through the raw GitHub builds branch`() {
+        val repositoryRoot = findRepositoryRoot()
+        val workflowPath = repositoryRoot.resolve(".github/workflows/build.yml")
+        val workflow = String(Files.readAllBytes(workflowPath), Charsets.UTF_8)
+        val rootBuildScript = String(
+            Files.readAllBytes(repositoryRoot.resolve("build.gradle.kts")),
+            Charsets.UTF_8
+        )
+
+        assertTrue(
+            "actions/upload-artifact" !in workflow,
+            "build workflow must not upload a duplicate GitHub Actions artifact"
+        )
+        assertTrue(
+            "cp IndoProvider/build/IndoProvider.cs3 ../builds/IndoProvider.cs3" in workflow,
+            "compiled plugin must be copied into the builds branch checkout"
+        )
+        assertTrue(
+            "cp build/plugins.json ../builds/plugins.json" in workflow,
+            "plugin metadata must be copied into the builds branch checkout"
+        )
+        assertTrue(
+            "git push --force" in workflow && "builds" in workflow,
+            "build workflow must publish the generated files to the builds branch"
+        )
+        assertTrue(
+            "https://raw.githubusercontent.com/" in workflow &&
+                "/builds/plugins.json" in workflow,
+            "repo.json must point CloudStream to raw GitHub builds metadata"
+        )
+        assertTrue(
+            """setRepo(System.getenv("GITHUB_REPOSITORY")""" in rootBuildScript,
+            "plugins.json must derive its raw GitHub artifact URL from the current repository"
+        )
     }
 
     @Test
