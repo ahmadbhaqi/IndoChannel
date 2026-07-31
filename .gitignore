@@ -26,4 +26,5 @@ local.properties
 /.cursor/
 /.graphify/
 /graphify-out/
+/artifacts/
 /.superpowers/
