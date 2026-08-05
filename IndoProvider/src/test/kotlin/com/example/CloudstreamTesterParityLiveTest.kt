@@ -12,6 +12,7 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import java.net.URI
+import javax.net.ssl.SSLException
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
 import kotlin.test.Test
@@ -28,6 +29,100 @@ import kotlinx.coroutines.withTimeout
  * homepage -> three title-word searches -> first three results -> first episode -> loadLinks.
  */
 class CloudstreamTesterParityLiveTest {
+    @Test
+    fun `pusatfilm discovery fallback recovers from primary tls failure`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val providerHost = "v4.pusatfilm21info.com"
+        val discoveryHost = "pusatfilm.id"
+        val requestUrl = "https://$providerHost/film-terbaru/page/1/"
+        val normalizer = ProviderUrlNormalizer { candidate ->
+            ProviderHtmlParser.preserveProviderPageUrl(
+                candidate,
+                "https://$providerHost",
+                setOf("v3.pusatfilm21info.com")
+            )
+        }
+        val brokenPrimaryAddresses = SystemProviderDnsResolver.resolve(
+            "dns.adguard-dns.com"
+        )
+        assertTrue(brokenPrimaryAddresses.isNotEmpty())
+        val realFetcher = NiceHttpProviderFetcher(app)
+        val primaryFailure = try {
+            ProviderHttpSafetyClient(
+                fetcher = realFetcher,
+                resolver = ProviderDnsResolver { host ->
+                    if (host == providerHost) {
+                        brokenPrimaryAddresses
+                    } else {
+                        SystemProviderDnsResolver.resolve(host)
+                    }
+                }
+            ).get(
+                url = requestUrl,
+                normalizer = normalizer,
+                timeoutSeconds = 30L
+            )
+            null
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            error
+        }
+        assertTrue(
+            generateSequence(primaryFailure) { error -> error.cause }
+                .any { error -> error is SSLException },
+            "Primary-only pinned route did not fail TLS: ${primaryFailure?.javaClass?.name}"
+        )
+
+        var discoveryAddresses = emptyList<java.net.InetAddress>()
+        val fetchedUrls = mutableListOf<String>()
+        val fetchedAddresses = mutableListOf<List<java.net.InetAddress>>()
+        val resolver = ProviderDnsAliasFallbackResolver(
+            delegate = ProviderDnsResolver { host ->
+                if (host == providerHost) {
+                    brokenPrimaryAddresses
+                } else {
+                    SystemProviderDnsResolver.resolve(host).also { resolved ->
+                        if (host == discoveryHost) discoveryAddresses = resolved
+                    }
+                }
+            },
+            aliases = mapOf(providerHost to discoveryHost)
+        )
+        val response = ProviderHttpSafetyClient(
+            fetcher = ProviderHttpFetcher { request, addresses ->
+                fetchedUrls += request.url
+                fetchedAddresses += addresses
+                realFetcher.fetch(request, addresses)
+            },
+            resolver = resolver
+        ).get(
+            url = requestUrl,
+            normalizer = normalizer,
+            timeoutSeconds = 30L
+        )
+
+        assertTrue(response.code in 200..299)
+        assertTrue(discoveryAddresses.isNotEmpty())
+        assertTrue(fetchedUrls.isNotEmpty())
+        assertTrue(
+            fetchedUrls.all { url -> URI(url).host == providerHost },
+            "Pusatfilm fallback rewrote the original request host: $fetchedUrls"
+        )
+        assertTrue(
+            fetchedAddresses.first().take(discoveryAddresses.size) == discoveryAddresses,
+            "Official discovery addresses were not pinned before primary DNS answers"
+        )
+        assertTrue(
+            response.body.contains("article", ignoreCase = true),
+            "Pusatfilm fallback returned no catalog markup"
+        )
+    }
+
     @Test
     fun `indomax remains playable through its primary site or exact fallback`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
@@ -599,24 +694,63 @@ class CloudstreamTesterParityLiveTest {
         )
     }
 
+    @Test
+    fun `kawanfilm and pusatfilm satisfy the CloudStream tester contract`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val failures = mutableListOf<String>()
+        remainingProviders().forEach { provider ->
+            try {
+                withTimeout(PROVIDER_TIMEOUT_MILLIS) {
+                    verifyProvider(provider, Random(0), requireHomepage = true)
+                }
+            } catch (error: TimeoutCancellationException) {
+                failures += "${provider.name}: timed out"
+            } catch (error: Throwable) {
+                failures += "${provider.name}: ${error.message ?: error::class.simpleName}"
+            }
+        }
+
+        assertTrue(
+            failures.isEmpty(),
+            "Remaining CloudStream parity failures:\n${failures.joinToString("\n")}"
+        )
+    }
+
     private suspend fun verifyProvider(
         provider: MainAPI,
         random: Random,
+        requireHomepage: Boolean = false,
         linkVerifier: suspend (List<ExtractorLink>) -> Unit = {}
     ) {
         val page = provider.mainPage.firstOrNull()
             ?: error("has no main-page category")
-        val homepage = try {
+        val homepageRequest = MainPageRequest(page.name, page.data, page.horizontalImages)
+        val homepage = if (requireHomepage) {
             provider.getMainPage(
                 1,
-                MainPageRequest(page.name, page.data, page.horizontalImages)
+                homepageRequest
             )?.items?.flatMap { it.list }.orEmpty()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: NotImplementedError) {
-            throw error
-        } catch (_: Throwable) {
-            emptyList()
+        } else {
+            try {
+                provider.getMainPage(1, homepageRequest)
+                    ?.items?.flatMap { it.list }.orEmpty()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: NotImplementedError) {
+                throw error
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        }
+        if (requireHomepage) {
+            assertTrue(
+                homepage.isNotEmpty(),
+                "${provider.name} returned an empty homepage for ${page.name}"
+            )
         }
 
         val queries = (
@@ -935,6 +1069,7 @@ class CloudstreamTesterParityLiveTest {
         AnimasuProvider(),
         DutamovieProvider(),
         IndomaxProvider(),
+        KawanfilmProvider(),
         KuronimeProvider(),
         KuramanimeProvider(),
         LayarKacaProvider(),
@@ -949,6 +1084,11 @@ class CloudstreamTesterParityLiveTest {
         DutamovieProvider(),
         KuronimeProvider(),
         LayarKacaProvider(),
+        PusatfilmProvider()
+    )
+
+    private fun remainingProviders(): List<MainAPI> = listOf(
+        KawanfilmProvider(),
         PusatfilmProvider()
     )
 

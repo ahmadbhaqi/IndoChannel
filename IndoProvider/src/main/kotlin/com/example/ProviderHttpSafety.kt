@@ -14,6 +14,7 @@ import java.net.URI
 import java.net.UnknownHostException
 import java.nio.charset.Charset
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import okhttp3.ConnectionPool
 import okhttp3.Cookie
 import okhttp3.Dns
@@ -62,6 +63,49 @@ internal fun interface ProviderHttpFetcher {
 
 internal fun interface ProviderDnsResolver {
     suspend fun resolve(host: String): List<InetAddress>
+}
+
+/**
+ * Resolves an allowlisted host through an official DNS alias first, while
+ * retaining the host's own answers as a fallback. The request URL, Host
+ * header, and TLS SNI are never rewritten; only the pinned connection
+ * addresses change after the safety client validates that they are public.
+ */
+internal class ProviderDnsAliasFallbackResolver(
+    private val delegate: ProviderDnsResolver,
+    aliases: Map<String, String>
+) : ProviderDnsResolver {
+    private val aliasesByHost = aliases.entries.associate { (host, alias) ->
+        requireNotNull(canonicalDnsHost(host)) { "Invalid DNS fallback host" } to
+            requireNotNull(canonicalDnsHost(alias)) { "Invalid DNS fallback alias" }
+    }
+
+    override suspend fun resolve(host: String): List<InetAddress> {
+        val normalizedHost = canonicalDnsHost(host) ?: return delegate.resolve(host)
+        val alias = aliasesByHost[normalizedHost]
+            ?: return delegate.resolve(normalizedHost)
+        val aliasAddresses = resolveOrEmpty(alias)
+        val primaryAddresses = resolveOrEmpty(normalizedHost)
+        val combined = (aliasAddresses + primaryAddresses).distinctBy { address ->
+            address.address.joinToString(separator = ".") { octet ->
+                (octet.toInt() and 0xff).toString()
+            }
+        }
+        if (combined.isEmpty()) {
+            throw UnknownHostException(
+                "DNS lookup returned no addresses for $normalizedHost or its official alias"
+            )
+        }
+        return combined
+    }
+
+    private suspend fun resolveOrEmpty(host: String): List<InetAddress> = try {
+        delegate.resolve(host)
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        emptyList()
+    }
 }
 
 internal fun interface ProviderUrlNormalizer {
@@ -325,6 +369,8 @@ internal class ProviderHttpSafetyClient(
     private suspend fun resolvePublicAddresses(host: String): List<InetAddress> {
         val addresses = try {
             resolver.resolve(host)
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: ProviderHttpSafetyException) {
             throw error
         } catch (error: Exception) {
@@ -592,7 +638,7 @@ internal class NiceHttpProviderFetcher(
     }
 }
 
-private object SystemProviderDnsResolver : ProviderDnsResolver {
+internal object SystemProviderDnsResolver : ProviderDnsResolver {
     override suspend fun resolve(host: String): List<InetAddress> =
         InetAddress.getAllByName(host).toList()
 }

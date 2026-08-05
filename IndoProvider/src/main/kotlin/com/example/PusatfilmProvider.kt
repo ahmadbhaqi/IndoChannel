@@ -42,6 +42,18 @@ class PusatfilmProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "id"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AsianDrama)
+    private val siteHttp by lazy(LazyThreadSafetyMode.NONE) {
+        ProviderHttpSafetyClient(
+            fetcher = NiceHttpProviderFetcher(app),
+            resolver = ProviderDnsAliasFallbackResolver(
+                delegate = SystemProviderDnsResolver,
+                aliases = mapOf(
+                    "v4.pusatfilm21info.com" to "pusatfilm.id",
+                    "v3.pusatfilm21info.com" to "pusatfilm.id"
+                )
+            )
+        )
+    }
     private val playerHttp by lazy(LazyThreadSafetyMode.NONE) {
         ProviderHttpSafetyClient(NiceHttpProviderFetcher(app))
     }
@@ -59,7 +71,13 @@ class PusatfilmProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val document = app.get("$mainUrl/${request.data.format(page)}").document
+        val fetch = getProviderPage("$mainUrl/${request.data.format(page)}")
+            ?: return newHomePageResponse(request.name, emptyList())
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return newHomePageResponse(request.name, emptyList())
+        val document = Jsoup.parse(fetch.body, fetch.url)
         val items = document.select("article.item, article.item-infinite").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, items)
     }
@@ -87,18 +105,28 @@ class PusatfilmProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, Charsets.UTF_8.name())
-        val document = app.get(
+        val fetch = getProviderPage(
             "$mainUrl/?s=$encodedQuery&post_type[]=post&post_type[]=tv",
-            timeout = 50L
-        ).document
+            timeoutSeconds = 50L
+        ) ?: return emptyList()
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return emptyList()
+        val document = Jsoup.parse(fetch.body, fetch.url)
         return document.select("article.item, article.item-infinite").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse {
         val requestUrl = normalizePageUrl(url)
             ?: throw ErrorLoadingException("Invalid Pusatfilm URL")
-        val fetch = app.get(requestUrl)
-        val document = fetch.document
+        val fetch = getProviderPage(requestUrl)
+            ?: throw ErrorLoadingException("Pusatfilm tidak dapat dihubungi")
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) throw ErrorLoadingException("Pusatfilm returned a non-content page")
+        val document = Jsoup.parse(fetch.body, fetch.url)
         val canonicalUrl = normalizePageUrl(fetch.url) ?: requestUrl
 
         val rawTitle = document.selectFirst("h1.entry-title, h1[itemprop=name]")?.text()
@@ -159,8 +187,12 @@ class PusatfilmProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val requestUrl = normalizePageUrl(data) ?: return false
-        val fetch = app.get(requestUrl, timeout = PROVIDER_HTTP_TIMEOUT_SECONDS)
-        val document = fetch.document
+        val fetch = getProviderPage(requestUrl) ?: return false
+        if (
+            fetch.code !in 200..299 ||
+            ProviderHtmlParser.isNonContentPage(fetch.body)
+        ) return false
+        val document = Jsoup.parse(fetch.body, fetch.url)
         val canonicalUrl = normalizePageUrl(fetch.url) ?: requestUrl
         val iframes = document
             .select("div.gmr-embed-responsive iframe, div.movieplay iframe, iframe")
@@ -216,6 +248,25 @@ class PusatfilmProvider : MainAPI() {
 
     private fun normalizePageUrl(raw: String?): String? {
         return ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, legacyHosts)
+    }
+
+    private suspend fun getProviderPage(
+        url: String,
+        timeoutSeconds: Long = PROVIDER_HTTP_TIMEOUT_SECONDS
+    ): ProviderHttpResult? = try {
+        siteHttp.get(
+            url = url,
+            normalizer = ProviderUrlNormalizer(::networkPageUrl),
+            timeoutSeconds = timeoutSeconds
+        )
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun networkPageUrl(raw: String?): String? {
+        return ProviderHtmlParser.preserveProviderPageUrl(raw, mainUrl, legacyHosts)
     }
 }
 

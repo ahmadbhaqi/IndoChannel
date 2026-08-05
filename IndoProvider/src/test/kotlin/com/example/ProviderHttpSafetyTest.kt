@@ -17,6 +17,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -29,6 +30,26 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import okhttp3.RequestBody.Companion.toRequestBody
 
 class ProviderHttpSafetyTest {
+    @Test
+    fun `dns cancellation propagates without being wrapped as a safety error`() = runBlocking {
+        val cancellation = CancellationException("stop DNS lookup")
+        val client = ProviderHttpSafetyClient(
+            fetcher = ProviderHttpFetcher { _, _ ->
+                error("fetch must not run after DNS cancellation")
+            },
+            resolver = ProviderDnsResolver { throw cancellation }
+        )
+
+        val thrown = assertFailsWith<CancellationException> {
+            client.get(
+                "https://movie.example/current",
+                normalizer = allowHosts("movie.example")
+            )
+        }
+
+        assertSame(cancellation, thrown)
+    }
+
     @Test
     fun `head request stays pinned and never consumes a response body`() = runBlocking {
         val response = FakeRawResponse(
