@@ -198,6 +198,7 @@ class IndomaxProviderTest {
         val loaded = provider.loadLinks(detail.dataUrl, false, {}, links::add)
 
         assertEquals("Fallback Movie", detail.name)
+        assertEquals("Indomax", detail.apiName)
         assertTrue(loaded)
         assertEquals(listOf(resultUrl), fallback.loadCalls)
         assertEquals(listOf(resultUrl), fallback.linkCalls)
@@ -215,6 +216,7 @@ class IndomaxProviderTest {
 
         assertTrue(detail is MovieLoadResponse)
         assertEquals("Fallback Movie", detail.name)
+        assertEquals("Indomax", detail.apiName)
         assertEquals(listOf(resultUrl), stale.loadCalls)
         assertEquals(listOf(resultUrl), healthy.loadCalls)
     }

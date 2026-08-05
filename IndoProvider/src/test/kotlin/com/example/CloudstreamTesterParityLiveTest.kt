@@ -16,6 +16,7 @@ import javax.net.ssl.SSLException
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -720,6 +721,55 @@ class CloudstreamTesterParityLiveTest {
         )
     }
 
+    @Test
+    fun `layarkaca survives repeated CloudStream tester selections`() = runBlocking {
+        verifyRepeatedProvider(LayarKacaProvider())
+    }
+
+    @Test
+    fun `nomat survives repeated CloudStream tester selections`() = runBlocking {
+        verifyRepeatedProvider(NomatProvider())
+    }
+
+    @Test
+    fun `kawanfilm survives repeated CloudStream tester selections`() = runBlocking {
+        verifyRepeatedProvider(KawanfilmProvider())
+    }
+
+    private suspend fun verifyRepeatedProvider(provider: MainAPI) {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return
+        }
+
+        val attemptCount = System.getenv("REPEATED_PROVIDER_ATTEMPTS")
+            ?.toIntOrNull()
+            ?.coerceIn(3, 24)
+            ?: 3
+        val failures = mutableListOf<String>()
+        repeat(attemptCount) { attempt ->
+            try {
+                withTimeout(PROVIDER_TIMEOUT_MILLIS) {
+                    verifyProvider(
+                        provider = provider,
+                        random = Random(attempt),
+                        requireHomepage = true
+                    )
+                }
+            } catch (error: TimeoutCancellationException) {
+                failures += "attempt ${attempt + 1}: timed out"
+            } catch (error: Throwable) {
+                failures += "attempt ${attempt + 1}: " +
+                    (error.message ?: error::class.simpleName)
+            }
+        }
+
+        assertTrue(
+            failures.isEmpty(),
+            "${provider.name} repeated tester failures:\n${failures.joinToString("\n")}"
+        )
+    }
+
     private suspend fun verifyProvider(
         provider: MainAPI,
         random: Random,
@@ -752,6 +802,9 @@ class CloudstreamTesterParityLiveTest {
                 "${provider.name} returned an empty homepage for ${page.name}"
             )
         }
+        homepage.forEach { result ->
+            assertSearchResponseContract(provider, result, "homepage ${page.name}")
+        }
 
         val queries = (
             homepage.shuffled(random)
@@ -775,10 +828,16 @@ class CloudstreamTesterParityLiveTest {
             searchResults.isNotEmpty(),
             "did not return search responses for $queries"
         )
+        searchResults.forEach { result ->
+            assertSearchResponseContract(provider, result, "search ${result.name}")
+        }
 
         val attempts = mutableListOf<String>()
         val playable = searchResults.take(3).any { result ->
             val detail = provider.load(result.url)
+            if (detail != null) {
+                assertLoadResponseContract(provider, detail, "load ${result.name}")
+            }
             val playback = when (detail) {
                 is AnimeLoadResponse -> {
                     val gotNoEpisodes =
@@ -861,6 +920,40 @@ class CloudstreamTesterParityLiveTest {
 
         println("${provider.name} queries=$queries attempts=$attempts")
         assertTrue(playable, "failed its first three search results: $attempts")
+    }
+
+    private fun assertSearchResponseContract(
+        provider: MainAPI,
+        result: SearchResponse,
+        context: String
+    ) {
+        assertEquals(
+            provider.name,
+            result.apiName,
+            "${provider.name} returned a $context result owned by ${result.apiName}"
+        )
+        assertTrue(
+            result.type in provider.supportedTypes,
+            "${provider.name} returned unsupported $context type ${result.type}; " +
+                "supported=${provider.supportedTypes}"
+        )
+    }
+
+    private fun assertLoadResponseContract(
+        provider: MainAPI,
+        detail: com.lagradost.cloudstream3.LoadResponse,
+        context: String
+    ) {
+        assertEquals(
+            provider.name,
+            detail.apiName,
+            "${provider.name} returned a $context detail owned by ${detail.apiName}"
+        )
+        assertTrue(
+            detail.type in provider.supportedTypes,
+            "${provider.name} returned unsupported $context type ${detail.type}; " +
+                "supported=${provider.supportedTypes}"
+        )
     }
 
     private suspend fun verifyParallelDownloadRanges(

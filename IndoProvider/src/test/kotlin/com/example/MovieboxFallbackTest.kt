@@ -99,6 +99,19 @@ class MovieboxFallbackTest {
     }
 
     @Test
+    fun `detail retry recovers one transient empty response`() = runBlocking {
+        var attempts = 0
+
+        val detail = retryMovieboxDetail {
+            attempts++
+            if (attempts == 1) null else "detail"
+        }
+
+        assertEquals("detail", detail)
+        assertEquals(2, attempts)
+    }
+
+    @Test
     fun `external fallback result delegates detail and playback to its owner`() = runBlocking {
         val fallback = RecordingMovieboxFallback()
         val provider = MovieboxProvider { listOf(fallback) }
@@ -109,6 +122,7 @@ class MovieboxFallbackTest {
         val loaded = provider.loadLinks(detail.dataUrl, false, {}, links::add)
 
         assertEquals("Fallback Movie", detail.name)
+        assertEquals("Moviebox", detail.apiName)
         assertTrue(loaded)
         assertEquals(listOf(resultUrl), fallback.loadCalls)
         assertEquals(listOf(resultUrl), fallback.linkCalls)
