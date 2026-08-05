@@ -281,6 +281,26 @@ class LayarKacaPlayerParserTest {
     }
 
     @Test
+    fun `fallback requests derive a movie from the current root detail route`() {
+        assertEquals(
+            listOf(
+                NomatFallbackRequest(
+                    title = "Spider Man Across The Spider Verse 2023",
+                    year = null
+                ),
+                NomatFallbackRequest(
+                    title = "Spider Man Across The Spider Verse",
+                    year = 2023
+                )
+            ),
+            LayarKacaPlayerParser.fallbackRequests(
+                Jsoup.parse(""),
+                "https://tv.nontonfilm.red/spider-man-across-the-spider-verse-2023/"
+            )
+        )
+    }
+
+    @Test
     fun `blocked movie url does not mistake a numeric title for its release year`() {
         val blockedDocument = Jsoup.parse("")
 

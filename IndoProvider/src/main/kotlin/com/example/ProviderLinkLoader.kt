@@ -79,6 +79,8 @@ private const val MAX_HOWNETWORK_API_RESPONSE_BYTES = 2_000_000
 private const val MAX_FIRESTREAM_API_RESPONSE_BYTES = 256_000
 private const val FIRESTREAM_RESOLVE_ATTEMPTS = 2
 private const val MAX_MEDIA_PROBE_BYTES = 65_536
+private const val MAX_DOWNLOAD_RANGE_PROBE_BYTES = 65_536
+private const val DOWNLOAD_RANGE_PROBE_OFFSET_BYTES = 10_485_760L
 private const val MEDIA_PROBE_TIMEOUT_SECONDS = 10L
 private const val MAX_ABYSS_QUALITY_PROBES = 8
 private const val MAX_PLAYLIST_PROBE_ITEMS = 16
@@ -593,7 +595,8 @@ internal class LinkResolutionSession(
 
             if (host == "abyssplayer.com" || host.endsWith(".abyssplayer.com") ||
                 host == "abyss.to" || host.endsWith(".abyss.to") ||
-                host == "abysscdn.com"
+                host == "abysscdn.com" ||
+                host == "playhydrax.com" || host.endsWith(".playhydrax.com")
             ) {
                 val html = pageFetcher(url, referer)
                 cachedHtml = html
@@ -1284,7 +1287,7 @@ private suspend fun probeExtractorLink(
         .lastOrNull { it.key.equals("Referer", ignoreCase = true) }
         ?.value
         ?.takeIf { it.isNotBlank() }
-    val requestHeaders = linkedMapOf<String, String>().apply {
+    val baseRequestHeaders = linkedMapOf<String, String>().apply {
         link.headers.forEach { (key, value) ->
             if (
                 !key.equals("Referer", ignoreCase = true) &&
@@ -1293,15 +1296,19 @@ private suspend fun probeExtractorLink(
                 put(key, value)
             }
         }
-        if (link.type == ExtractorLinkType.VIDEO) {
+    }
+    val requestedInitialRange = link.type == ExtractorLinkType.VIDEO
+    val requestHeaders = baseRequestHeaders.toMutableMap().apply {
+        if (requestedInitialRange) {
             put("Range", "bytes=0-${MAX_MEDIA_PROBE_BYTES - 1}")
         }
     }
+    val probeReferer = explicitReferer ?: link.referer.takeIf { it.isNotBlank() }
     return try {
         val response = mediaProbeHttp.getPrefix(
             url = link.url,
             normalizer = publicMediaUrlNormalizer,
-            referer = explicitReferer ?: link.referer.takeIf { it.isNotBlank() },
+            referer = probeReferer,
             headers = requestHeaders,
             maxBodyBytes = MAX_MEDIA_PROBE_BYTES,
             timeoutSeconds = timeoutSeconds.coerceIn(1L, 60L)
@@ -1321,6 +1328,108 @@ private suspend fun probeExtractorLink(
         val contentType = response.header("Content-Type")
         val prefix = response.bodyBytes
         val detectedType = sniffMediaType(prefix, contentType) ?: return null
+
+        if (detectedType == ExtractorLinkType.VIDEO) {
+            val head = try {
+                mediaProbeHttp.head(
+                    url = link.url,
+                    normalizer = publicMediaUrlNormalizer,
+                    referer = probeReferer,
+                    headers = baseRequestHeaders,
+                    timeoutSeconds = timeoutSeconds.coerceIn(1L, 60L)
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: ProviderHttpSafetyException) {
+                return null
+            } catch (_: Exception) {
+                null
+            }
+            if (head != null && !isSafeRemoteHttpUrl(head.url)) return null
+
+            val initialRangeResponse = if (requestedInitialRange) {
+                response
+            } else {
+                mediaProbeHttp.getPrefix(
+                    url = link.url,
+                    normalizer = publicMediaUrlNormalizer,
+                    referer = probeReferer,
+                    headers = baseRequestHeaders +
+                        ("Range" to "bytes=0-${MAX_MEDIA_PROBE_BYTES - 1}"),
+                    maxBodyBytes = MAX_MEDIA_PROBE_BYTES,
+                    timeoutSeconds = timeoutSeconds.coerceIn(1L, 60L)
+                )
+            }
+            if (!isSafeRemoteHttpUrl(initialRangeResponse.url)) return null
+            val successfulHead = head?.takeIf { it.code in 200..299 }
+            val acceptRanges = successfulHead?.header("Accept-Ranges")
+            val parsedInitialRange = parseHttpByteContentRange(
+                initialRangeResponse.header("Content-Range")
+            )
+            val requiresNonZeroProbe = cloudstreamWillUseParallelRanges(
+                acceptRanges,
+                initialRangeResponse.code
+            )
+            val nonZeroStart = if (requiresNonZeroProbe) {
+                val total = parsedInitialRange?.total ?: return null
+                minOf(DOWNLOAD_RANGE_PROBE_OFFSET_BYTES, total / 2L)
+                    .coerceAtLeast(MAX_DOWNLOAD_RANGE_PROBE_BYTES.toLong())
+                    .takeIf { it < total }
+                    ?: return null
+            } else {
+                null
+            }
+            val nonZeroResponse = nonZeroStart?.let { start ->
+                mediaProbeHttp.getPrefix(
+                    url = link.url,
+                    normalizer = publicMediaUrlNormalizer,
+                    referer = probeReferer,
+                    // CloudStream's parallel downloader requests each chunk
+                    // from its starting offset through EOF and stops reading at
+                    // the next chunk boundary. Probe that exact server behavior.
+                    headers = baseRequestHeaders + ("Range" to "bytes=$start-"),
+                    maxBodyBytes = MAX_DOWNLOAD_RANGE_PROBE_BYTES,
+                    timeoutSeconds = timeoutSeconds.coerceIn(1L, 60L)
+                )
+            }
+            if (nonZeroResponse != null && !isSafeRemoteHttpUrl(nonZeroResponse.url)) return null
+            if (
+                !parallelDownloadProbeIsValid(
+                    headResponseCode = head?.code,
+                    acceptRanges = head?.header("Accept-Ranges"),
+                    headContentLength = head?.header("Content-Length")
+                        ?.trim()
+                        ?.toLongOrNull()
+                        ?.takeIf { it > 0L },
+                    initial = DownloadRangeProbeEvidence(
+                        requestedStart = 0L,
+                        requestedEnd = MAX_MEDIA_PROBE_BYTES - 1L,
+                        maxBodyBytes = MAX_MEDIA_PROBE_BYTES,
+                        responseCode = initialRangeResponse.code,
+                        contentRange = initialRangeResponse.header("Content-Range"),
+                        responseContentLength = initialRangeResponse.header("Content-Length")
+                            ?.trim()
+                            ?.toLongOrNull(),
+                        bodyByteCount = initialRangeResponse.bodyBytes.size,
+                        bodyTruncated = initialRangeResponse.bodyTruncated
+                    ),
+                    nonZero = nonZeroResponse?.let { rangeResponse ->
+                        DownloadRangeProbeEvidence(
+                            requestedStart = nonZeroStart ?: return null,
+                            requestedEnd = null,
+                            maxBodyBytes = MAX_DOWNLOAD_RANGE_PROBE_BYTES,
+                            responseCode = rangeResponse.code,
+                            contentRange = rangeResponse.header("Content-Range"),
+                            responseContentLength = rangeResponse.header("Content-Length")
+                                ?.trim()
+                                ?.toLongOrNull(),
+                            bodyByteCount = rangeResponse.bodyBytes.size,
+                            bodyTruncated = rangeResponse.bodyTruncated
+                        )
+                    }
+                )
+            ) return null
+        }
 
         // Keep the original URL and concrete subtype. The player can follow the
         // same redirect, while DRM, playlist and alternate-audio metadata stay
@@ -1448,6 +1557,101 @@ internal fun expectedSoraRangeIsValid(
     val end = range.groupValues[2].toLongOrNull() ?: return false
     val total = range.groupValues[3].toLongOrNull() ?: return false
     return start == 0L && end in start until total && total == expectedSize
+}
+
+private data class HttpByteContentRange(
+    val start: Long,
+    val end: Long,
+    val total: Long
+)
+
+private fun parseHttpByteContentRange(raw: String?): HttpByteContentRange? {
+    val range = raw
+        ?.trim()
+        ?.let { Regex("(?i)^bytes\\s+(\\d+)-(\\d+)/(\\d+)$").matchEntire(it) }
+        ?: return null
+    val start = range.groupValues[1].toLongOrNull() ?: return null
+    val end = range.groupValues[2].toLongOrNull() ?: return null
+    val total = range.groupValues[3].toLongOrNull() ?: return null
+    return HttpByteContentRange(start, end, total).takeIf {
+        start >= 0L && start <= end && end < total
+    }
+}
+
+private fun cloudstreamWillUseParallelRanges(
+    acceptRanges: String?,
+    initialResponseCode: Int
+): Boolean = when (acceptRanges?.trim()?.lowercase()) {
+    "none" -> false
+    "bytes" -> true
+    else -> initialResponseCode == 206
+}
+
+internal data class DownloadRangeProbeEvidence(
+    val requestedStart: Long,
+    /** Null means the same open-ended range (`bytes=start-`) CloudStream uses. */
+    val requestedEnd: Long?,
+    val maxBodyBytes: Int,
+    val responseCode: Int,
+    val contentRange: String?,
+    val responseContentLength: Long?,
+    val bodyByteCount: Int,
+    val bodyTruncated: Boolean
+)
+
+private fun DownloadRangeProbeEvidence.validatedRange(): HttpByteContentRange? {
+    if (responseCode != 206 || requestedStart < 0L || maxBodyBytes <= 0) return null
+    val range = parseHttpByteContentRange(contentRange) ?: return null
+    if (range.start != requestedStart) return null
+
+    val expectedEnd = requestedEnd?.let { boundedEnd ->
+        if (boundedEnd < requestedStart) return null
+        minOf(boundedEnd, range.total - 1L)
+    } ?: (range.total - 1L)
+    if (range.end != expectedEnd) return null
+
+    val representedLength = range.end - range.start + 1L
+    if (
+        responseContentLength != null &&
+        responseContentLength != representedLength
+    ) return null
+
+    val expectedBodyBytes = minOf(representedLength, maxBodyBytes.toLong()).toInt()
+    if (bodyByteCount != expectedBodyBytes) return null
+    if (bodyTruncated != (representedLength > maxBodyBytes.toLong())) return null
+    return range
+}
+
+/**
+ * Mirrors CloudStream's direct-file downloader decision. A host that claims
+ * byte-range support in HEAD makes CloudStream split the file into parallel
+ * chunks with open-ended GETs. Both the first and a nonzero response must
+ * identify the exact requested span, expose enough bytes for the bounded
+ * probe, and agree about the complete file size. A failed HEAD is not terminal:
+ * CloudStream can infer range support and length from a 206 GET instead.
+ */
+internal fun parallelDownloadProbeIsValid(
+    headResponseCode: Int?,
+    acceptRanges: String?,
+    headContentLength: Long?,
+    initial: DownloadRangeProbeEvidence,
+    nonZero: DownloadRangeProbeEvidence?
+): Boolean {
+    val successfulHead = headResponseCode != null && headResponseCode in 200..299
+    val effectiveAcceptRanges = acceptRanges.takeIf { successfulHead }
+    val effectiveHeadContentLength = headContentLength.takeIf { successfulHead }
+    if (!cloudstreamWillUseParallelRanges(effectiveAcceptRanges, initial.responseCode)) {
+        return initial.responseCode in 200..299
+    }
+
+    val initialRange = initial.validatedRange() ?: return false
+    if (
+        effectiveHeadContentLength != null &&
+        effectiveHeadContentLength != initialRange.total
+    ) return false
+
+    val nonZeroRange = nonZero?.validatedRange() ?: return false
+    return nonZeroRange.start > 0L && nonZeroRange.total == initialRange.total
 }
 
 internal fun sniffMediaType(

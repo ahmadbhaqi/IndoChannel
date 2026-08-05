@@ -30,7 +30,7 @@ class ProviderDomainTest {
             "LayarKacaProvider.kt" to """override var mainUrl = "https://tv.nontonfilm.red"""",
             "NgefilmProvider.kt" to """override var mainUrl = "https://new39.ngefilm.site"""",
             "PusatfilmProvider.kt" to """override var mainUrl = "https://v4.pusatfilm21info.com"""",
-            "DutamovieProvider.kt" to """override var mainUrl = "https://cowboysgab.com"""",
+            "DutamovieProvider.kt" to """override var mainUrl = "https://bdmoviesonline.com"""",
             "IndoxxiProvider.kt" to """override var mainUrl = "https://filmbioskop21.lk21.in.net"""",
             "FilmapikProvider.kt" to """override var mainUrl = "https://filmapik.college"""",
             "RebahinProvider.kt" to """override var mainUrl = "https://rebahinxxi3.lol""""
@@ -128,7 +128,7 @@ class ProviderDomainTest {
 
     @Test
     fun `dutamovie uses the current official domain`() {
-        assertEquals("https://cowboysgab.com", DutamovieProvider().mainUrl)
+        assertEquals("https://bdmoviesonline.com", DutamovieProvider().mainUrl)
     }
 
     @Test
@@ -136,11 +136,15 @@ class ProviderDomainTest {
         val provider = DutamovieProvider()
         val cachedUrls = mapOf(
             "https://austincomputerworks.org/lunok-2026/?server=2#player" to
-                "https://cowboysgab.com/lunok-2026/?server=2#player",
+                "https://bdmoviesonline.com/lunok-2026/?server=2#player",
             "https://wavereview.com/tv/series/episode-7/?quality=720p#watch" to
-                "https://cowboysgab.com/tv/series/episode-7/?quality=720p#watch",
+                "https://bdmoviesonline.com/tv/series/episode-7/?quality=720p#watch",
             "https://restaurantesabadell.com/legacy-title/?player=2" to
-                "https://cowboysgab.com/legacy-title/?player=2"
+                "https://bdmoviesonline.com/legacy-title/?player=2",
+            "https://cowboysgab.com/movie/legacy-title/?player=2" to
+                "https://bdmoviesonline.com/movie/legacy-title/?player=2",
+            "https://ohionewsnow.com/movie/current-title/?player=2" to
+                "https://bdmoviesonline.com/movie/current-title/?player=2"
         )
 
         cachedUrls.forEach { (cached, expected) ->

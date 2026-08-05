@@ -24,6 +24,7 @@ internal const val PROVIDER_HTTP_DEFAULT_BODY_LIMIT_BYTES = 2_000_000
 
 internal enum class ProviderHttpMethod {
     GET,
+    HEAD,
     POST
 }
 
@@ -175,6 +176,30 @@ internal class ProviderHttpSafetyClient(
         truncateOversizedBody = true
     )
 
+    suspend fun head(
+        url: String,
+        normalizer: ProviderUrlNormalizer,
+        headers: Map<String, String> = emptyMap(),
+        referer: String? = null,
+        cookies: Map<String, String> = emptyMap(),
+        followRedirects: Boolean = true,
+        timeoutSeconds: Long = PROVIDER_HTTP_TIMEOUT_SECONDS
+    ): ProviderHttpResult = execute(
+        initialRequest = ProviderHttpRequest(
+            method = ProviderHttpMethod.HEAD,
+            url = url,
+            headers = headers,
+            referer = referer,
+            cookies = cookies,
+            timeoutSeconds = timeoutSeconds
+        ),
+        normalizer = normalizer,
+        followRedirects = followRedirects,
+        maxBodyBytes = 0,
+        truncateOversizedBody = true,
+        readBody = false
+    )
+
     suspend fun postForm(
         url: String,
         form: Map<String, String>,
@@ -232,7 +257,8 @@ internal class ProviderHttpSafetyClient(
         normalizer: ProviderUrlNormalizer,
         followRedirects: Boolean,
         maxBodyBytes: Int,
-        truncateOversizedBody: Boolean
+        truncateOversizedBody: Boolean,
+        readBody: Boolean = true
     ): ProviderHttpResult {
         require(maxBodyBytes in 0..MAX_BODY_LIMIT_BYTES)
         require(initialRequest.timeoutSeconds > 0L)
@@ -275,11 +301,15 @@ internal class ProviderHttpSafetyClient(
                 }
 
                 val responseUrl = normalizeUrl(currentResponse.url, normalizer).url
-                val boundedBody = readBoundedBody(
-                    currentResponse,
-                    maxBodyBytes,
-                    truncateOversizedBody
-                )
+                val boundedBody = if (readBody) {
+                    readBoundedBody(
+                        currentResponse,
+                        maxBodyBytes,
+                        truncateOversizedBody
+                    )
+                } else {
+                    BoundedProviderBody(ByteArray(0), truncated = false)
+                }
                 return ProviderHttpResult(
                     code = currentResponse.code,
                     url = responseUrl,
@@ -492,19 +522,32 @@ internal class NiceHttpProviderFetcher(
         val response = try {
             when (val body = request.body) {
                 null -> {
-                    if (request.method != ProviderHttpMethod.GET) {
-                        throw ProviderHttpSafetyException("POST request has no body")
+                    when (request.method) {
+                        ProviderHttpMethod.GET -> pinnedRequests.get(
+                            request.url,
+                            headers = outgoingHeaders,
+                            referer = outgoingReferer,
+                            cookies = request.cookies,
+                            allowRedirects = false,
+                            cacheTime = requests.defaultCacheTime,
+                            cacheUnit = requests.defaultCacheTimeUnit,
+                            timeout = request.timeoutSeconds
+                        )
+
+                        ProviderHttpMethod.HEAD -> pinnedRequests.head(
+                            request.url,
+                            headers = outgoingHeaders,
+                            referer = outgoingReferer,
+                            cookies = request.cookies,
+                            allowRedirects = false,
+                            cacheTime = requests.defaultCacheTime,
+                            cacheUnit = requests.defaultCacheTimeUnit,
+                            timeout = request.timeoutSeconds
+                        )
+
+                        ProviderHttpMethod.POST ->
+                            throw ProviderHttpSafetyException("POST request has no body")
                     }
-                    pinnedRequests.get(
-                        request.url,
-                        headers = outgoingHeaders,
-                        referer = outgoingReferer,
-                        cookies = request.cookies,
-                        allowRedirects = false,
-                        cacheTime = requests.defaultCacheTime,
-                        cacheUnit = requests.defaultCacheTimeUnit,
-                        timeout = request.timeoutSeconds
-                    )
                 }
 
                 is ProviderHttpBody.Form -> {

@@ -485,7 +485,7 @@ class LayarKacaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val providers = listOf(FilmapikProvider(), PusatfilmProvider())
+        val providers = playbackFallbackProviders()
         for (provider in providers) {
             var callbackFailure: Throwable? = null
             try {
@@ -554,6 +554,9 @@ class LayarKacaProvider : MainAPI() {
 
     private fun fallbackProviders(): List<MainAPI> =
         listOf(FilmapikProvider(), PusatfilmProvider())
+
+    private fun playbackFallbackProviders(): List<MainAPI> =
+        listOf(PencurimovieProvider()) + fallbackProviders()
 
     private fun fallbackCategoryNames(requestedName: String): Set<String> = when {
         requestedName.equals("Drama Korea", ignoreCase = true) ->
@@ -683,7 +686,7 @@ internal object LayarKacaPlayerParser {
     private val fallbackEpisodePathRegex =
         Regex("""(?i)([^/]+?)-season-(\d+)-episode-(\d+)/?$""")
     private val fallbackDetailPathRegex =
-        Regex("""(?i)/(?:movie|tv)/([^/?#]+)/?$""")
+        Regex("""(?i)^/(?:movie/|tv/)?([^/?#]+)/?$""")
     private val fallbackSeriesSuffixRegex = Regex(
         """(?i)\bseason\s*[-:]?\s*\d+\b.*$"""
     )

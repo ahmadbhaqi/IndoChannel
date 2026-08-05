@@ -30,6 +30,35 @@ import okhttp3.RequestBody.Companion.toRequestBody
 
 class ProviderHttpSafetyTest {
     @Test
+    fun `head request stays pinned and never consumes a response body`() = runBlocking {
+        val response = FakeRawResponse(
+            code = 200,
+            url = "https://media.example/video.mp4",
+            headers = mapOf(
+                "Content-Length" to listOf("1833408341"),
+                "Accept-Ranges" to listOf("bytes")
+            ),
+            body = "body-must-not-be-read"
+        )
+        val fetcher = ScriptedFetcher(listOf(response))
+        val client = ProviderHttpSafetyClient(
+            fetcher,
+            ProviderDnsResolver { listOf(publicAddress()) }
+        )
+
+        val result = client.head(
+            "https://media.example/video.mp4",
+            normalizer = allowHosts("media.example")
+        )
+
+        assertEquals(ProviderHttpMethod.HEAD, fetcher.requests.single().method)
+        assertEquals("1833408341", result.header("Content-Length"))
+        assertTrue(result.bodyBytes.isEmpty())
+        assertEquals(0, response.bytesRead)
+        assertTrue(response.closed)
+    }
+
+    @Test
     fun `nicehttp adapter sends one explicit browser user agent`() = runBlocking {
         val browserUserAgent = "Mozilla/5.0 ProviderHttpSafetyTest"
         val captured = mutableListOf<okhttp3.Request>()

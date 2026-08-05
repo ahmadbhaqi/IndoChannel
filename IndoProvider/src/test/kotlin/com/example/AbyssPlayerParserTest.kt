@@ -349,6 +349,54 @@ class AbyssPlayerParserTest {
     }
 
     @Test
+    fun `resolver treats the current playhydrax host as an Abyss player`() = runBlocking {
+        val media = """
+            {"mp4":{
+              "sources":[{
+                "label":"720p",
+                "res_id":4,
+                "size":406038866,
+                "sub":"current-subdomain",
+                "status":true
+              }],
+              "domains":["current-subdomain.sssrr.org"]
+            }}
+        """.trimIndent()
+        val playerUrl = "https://playhydrax.com/?v=current-movie"
+        val playerPage = abyssPage(media)
+        val links = mutableListOf<ExtractorLink>()
+        var genericAttempts = 0
+        val session = LinkResolutionSession(
+            api = PusatfilmProvider(),
+            subtitleCallback = {},
+            callback = links::add,
+            pageFetcher = { url, _ ->
+                assertEquals(playerUrl, url)
+                playerPage
+            },
+            extractorLoader = { _, _, _, _ ->
+                genericAttempts++
+                false
+            },
+            mediaLinkProbe = { link -> link }
+        )
+
+        assertTrue(
+            session.resolve(
+                playerUrl,
+                "https://kotakajaib.me/embed/current"
+            )
+        )
+        assertEquals(0, genericAttempts)
+        assertEquals(1, links.size)
+        assertTrue(
+            links.single().url.startsWith(
+                "https://current-subdomain.sssrr.org/sora/406038866/"
+            )
+        )
+    }
+
+    @Test
     fun `resolver does not trust abysscdn lookalike hosts`() = runBlocking {
         val lookalikes = listOf(
             "https://abysscdn.com.evil.example/?v=current-movie",

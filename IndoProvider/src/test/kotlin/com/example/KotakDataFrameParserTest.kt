@@ -129,6 +129,7 @@ class KotakDataFrameParserTest {
         val html = listOf(hydrax, turbo).joinToString("") { url ->
             "<button class=\"server-item\" data-frame=\"${encoded(url)}\"></button>"
         }
+        val requestedPages = mutableListOf<String>()
         val requestedMirrors = mutableListOf<String>()
         val links = mutableListOf<ExtractorLink>()
         val session = LinkResolutionSession(
@@ -136,6 +137,7 @@ class KotakDataFrameParserTest {
             subtitleCallback = {},
             callback = links::add,
             pageFetcher = { url, _ ->
+                requestedPages += url
                 if (url == "https://kotakajaib.me/embed/current") html else "<html></html>"
             },
             extractorLoader = { url, _, _, callback ->
@@ -150,7 +152,11 @@ class KotakDataFrameParserTest {
         )
 
         assertTrue(session.resolve("https://kotakajaib.me/embed/current", "https://provider.example/movie"))
-        assertEquals(listOf(hydrax, turbo), requestedMirrors)
+        assertEquals(
+            listOf("https://kotakajaib.me/embed/current", hydrax, turbo),
+            requestedPages
+        )
+        assertEquals(listOf(turbo), requestedMirrors)
         assertEquals("https://media.example/current/master.m3u8", links.single().url)
     }
 

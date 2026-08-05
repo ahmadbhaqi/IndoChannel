@@ -27,11 +27,13 @@ private const val MAX_DUTAMOVIE_DISCOVERY_TABS = 16
 private const val DUTAMOVIE_DISCOVERY_CONCURRENCY = 4
 
 class DutamovieProvider : MainAPI() {
-    override var mainUrl = "https://cowboysgab.com"
+    override var mainUrl = "https://bdmoviesonline.com"
     private val legacyHosts = setOf(
         "restaurantesabadell.com",
         "austincomputerworks.org",
-        "wavereview.com"
+        "wavereview.com",
+        "cowboysgab.com",
+        "ohionewsnow.com"
     )
     override var name = "Dutamovie"
     override val hasMainPage = true

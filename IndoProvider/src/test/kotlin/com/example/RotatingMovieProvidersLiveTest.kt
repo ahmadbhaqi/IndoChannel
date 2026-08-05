@@ -1,7 +1,10 @@
 package com.example
 
 import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.MainPageRequest
+import com.lagradost.cloudstream3.MovieLoadResponse
 import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.TvSeriesLoadResponse
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -37,7 +40,23 @@ class RotatingMovieProvidersLiveTest {
             org.junit.Assume.assumeTrue(false)
             return@runBlocking
         }
-        verify(DutamovieProvider(), "https://cowboysgab.com/lunok-2026/")
+        val provider = DutamovieProvider()
+        val page = provider.mainPage.first()
+        val catalog = provider.getMainPage(
+            1,
+            MainPageRequest(page.name, page.data, page.horizontalImages)
+        )?.items?.flatMap { it.list }.orEmpty()
+        val item = catalog.firstOrNull()
+            ?: error("Dutamovie current catalog is empty")
+        val detail = provider.load(item.url)
+        val playbackData = when (detail) {
+            is MovieLoadResponse -> detail.dataUrl
+            is TvSeriesLoadResponse -> detail.episodes.maxByOrNull { episode ->
+                (episode.season ?: 0) * 10_000 + (episode.episode ?: 0)
+            }?.data
+            else -> null
+        } ?: error("Dutamovie current catalog item has no playback data")
+        verify(provider, playbackData)
     }
 
     @Test

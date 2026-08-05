@@ -24,8 +24,8 @@ local.properties
 /.codex/
 /.claude/
 /.cursor/
-/.graphify/
 /docs/
+/.graphify/
 /graphify-out/
 /artifacts/
 /.superpowers/

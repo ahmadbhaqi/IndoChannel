@@ -8,7 +8,10 @@ import com.lagradost.cloudstream3.MovieLoadResponse
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import java.net.URI
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
 import kotlin.test.Test
@@ -130,6 +133,35 @@ class CloudstreamTesterParityLiveTest {
         assertTrue(
             loaded && links.isNotEmpty(),
             "Pencurimovie exact fallback returned loaded=$loaded links=${links.size}"
+        )
+    }
+
+    @Test
+    fun `layarkaca stale Spider-Verse mirrors resolve through an exact fallback`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val provider = LayarKacaProvider()
+        val result = provider.search("Spider-Man:").orEmpty()
+            .firstOrNull {
+                it.name.contains(
+                    "Across the Spider-Verse",
+                    ignoreCase = true
+                )
+            }
+            ?: error("LayarKaca Spider-Verse regression title is missing")
+        val detail = provider.load(result.url) as? MovieLoadResponse
+            ?: error("LayarKaca Spider-Verse detail did not load as a movie")
+        val links = mutableListOf<ExtractorLink>()
+        val loaded = withTimeout(PROVIDER_TIMEOUT_MILLIS) {
+            provider.loadLinks(detail.dataUrl, false, {}, links::add)
+        }
+
+        assertTrue(
+            loaded && links.isNotEmpty(),
+            "LayarKaca exact fallback returned loaded=$loaded links=${links.size}"
         )
     }
 
@@ -479,7 +511,99 @@ class CloudstreamTesterParityLiveTest {
         )
     }
 
-    private suspend fun verifyProvider(provider: MainAPI, random: Random) {
+    @Test
+    fun `four reported providers satisfy the CloudStream tester contract`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val failures = mutableListOf<String>()
+        requestedProviders().forEach { provider ->
+            try {
+                withTimeout(PROVIDER_TIMEOUT_MILLIS) {
+                    verifyProvider(provider, Random(0))
+                }
+            } catch (error: TimeoutCancellationException) {
+                failures += "${provider.name}: timed out"
+            } catch (error: Throwable) {
+                failures += "${provider.name}: ${error.message ?: error::class.simpleName}"
+            }
+        }
+
+        assertTrue(
+            failures.isEmpty(),
+            "Four-provider CloudStream parity failures:\n${failures.joinToString("\n")}"
+        )
+    }
+
+    @Test
+    fun `four reported providers survive concurrent CloudStream tests`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val outcomes = supervisorScope {
+            requestedProviders().map { provider ->
+                async {
+                    val error = try {
+                        withTimeout(PROVIDER_TIMEOUT_MILLIS) {
+                            verifyProvider(provider, Random.Default)
+                        }
+                        null
+                    } catch (error: TimeoutCancellationException) {
+                        error
+                    } catch (error: Throwable) {
+                        error
+                    }
+                    provider.name to error
+                }
+            }.awaitAll()
+        }
+        val failures = outcomes.mapNotNull { (name, error) ->
+            error?.let { "$name: ${it.message ?: it::class.simpleName}" }
+        }
+
+        assertTrue(
+            failures.isEmpty(),
+            "Four-provider concurrent tester failures:\n${failures.joinToString("\n")}"
+        )
+    }
+
+    @Test
+    fun `four reported providers emit direct files safe for parallel download`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val failures = mutableListOf<String>()
+        requestedProviders().forEach { provider ->
+            try {
+                withTimeout(PROVIDER_TIMEOUT_MILLIS) {
+                    verifyProvider(provider, Random(0)) { links ->
+                        verifyParallelDownloadRanges(provider.name, links)
+                    }
+                }
+            } catch (error: TimeoutCancellationException) {
+                failures += "${provider.name}: timed out"
+            } catch (error: Throwable) {
+                failures += "${provider.name}: ${error.message ?: error::class.simpleName}"
+            }
+        }
+
+        assertTrue(
+            failures.isEmpty(),
+            "Direct-download integrity failures:\n${failures.joinToString("\n")}"
+        )
+    }
+
+    private suspend fun verifyProvider(
+        provider: MainAPI,
+        random: Random,
+        linkVerifier: suspend (List<ExtractorLink>) -> Unit = {}
+    ) {
         val page = provider.mainPage.firstOrNull()
             ?: error("has no main-page category")
         val homepage = try {
@@ -590,7 +714,9 @@ class CloudstreamTesterParityLiveTest {
                     )
                     links += link
                 }
-                attempts += "${result.name}: loaded=$loaded links=${links.size}"
+                if (links.isNotEmpty()) linkVerifier(links)
+                attempts += "${result.name}: loaded=$loaded links=${links.size} " +
+                    "types=${links.map { it.javaClass.simpleName to it.type }}"
                 assertTrue(
                     loaded,
                     "returns false on loadLinks() with ${links.size} links loaded; $attempts"
@@ -603,6 +729,200 @@ class CloudstreamTesterParityLiveTest {
         assertTrue(playable, "failed its first three search results: $attempts")
     }
 
+    private suspend fun verifyParallelDownloadRanges(
+        providerName: String,
+        links: List<ExtractorLink>
+    ) {
+        val directLinks = links
+            .asSequence()
+            .filter { it.type == ExtractorLinkType.VIDEO }
+            .sortedByDescending { it.quality }
+            .distinctBy { link ->
+                runCatching {
+                    URI(link.url).host.orEmpty().lowercase().split('.')
+                        .takeLast(2)
+                        .joinToString(".")
+                }.getOrDefault(link.url)
+            }
+            .take(8)
+            .toList()
+        if (directLinks.isEmpty()) return
+
+        val http = ProviderHttpSafetyClient(NiceHttpProviderFetcher(app))
+        val normalizer = ProviderUrlNormalizer { candidate ->
+            candidate.takeIf(::isSafeRemoteHttpUrl)
+        }
+        val failures = mutableListOf<String>()
+        directLinks.forEach { link ->
+            val host = runCatching { URI(link.url).host.orEmpty() }.getOrDefault("opaque")
+            try {
+                val explicitReferer = link.headers.entries
+                    .lastOrNull { it.key.equals("Referer", ignoreCase = true) }
+                    ?.value
+                    ?.takeIf { it.isNotBlank() }
+                val referer = explicitReferer ?: link.referer.takeIf { it.isNotBlank() }
+                val headers = link.headers.filterKeys { key ->
+                    !key.equals("Referer", ignoreCase = true) &&
+                        !key.equals("Range", ignoreCase = true)
+                }
+                val head = withTimeout(30_000) {
+                    http.head(
+                        link.url,
+                        normalizer = normalizer,
+                        referer = referer,
+                        headers = headers,
+                        timeoutSeconds = 30L
+                    )
+                }
+                val zero = withTimeout(30_000) {
+                    http.getPrefix(
+                        link.url,
+                        normalizer = normalizer,
+                        referer = referer,
+                        headers = headers + ("Range" to "bytes=0-65535"),
+                        maxBodyBytes = 65_536,
+                        timeoutSeconds = 30L
+                    )
+                }
+                val successfulHead = head.code in 200..299
+                val acceptRanges = head.header("Accept-Ranges").takeIf { successfulHead }
+                val supportsRanges = when (acceptRanges?.trim()?.lowercase()) {
+                    "none" -> false
+                    "bytes" -> true
+                    else -> zero.code == 206
+                }
+                if (!supportsRanges && zero.code !in 200..299) {
+                    failures += "$host zero=${zero.code}"
+                } else if (supportsRanges) {
+                    val initialEvidence = DownloadRangeProbeEvidence(
+                        requestedStart = 0L,
+                        requestedEnd = 65_535L,
+                        maxBodyBytes = 65_536,
+                        responseCode = zero.code,
+                        contentRange = zero.header("Content-Range"),
+                        responseContentLength = zero.header("Content-Length")
+                            ?.trim()
+                            ?.toLongOrNull(),
+                        bodyByteCount = zero.bodyBytes.size,
+                        bodyTruncated = zero.bodyTruncated
+                    )
+                    val zeroRange = parseContentRange(initialEvidence.contentRange)
+                    liveRangeProbeError(initialEvidence)?.let { error ->
+                        failures += "$host zero $error"
+                    }
+                    val total = zeroRange?.third
+                    if (total == null) {
+                        failures += "$host zero range has no total"
+                    } else if (
+                        successfulHead &&
+                        head.header("Content-Length")
+                            ?.trim()
+                            ?.toLongOrNull()
+                            ?.takeIf { it > 0L }
+                            ?.let { it != total } == true
+                    ) {
+                        failures += "$host HEAD size=${head.header("Content-Length")} " +
+                            "range total=$total"
+                    } else {
+                        val offset = minOf(10_485_760L, total / 2L)
+                            .coerceAtLeast(65_536L)
+                            .takeIf { it < total }
+                        if (offset == null) {
+                            failures += "$host media is too small for a nonzero probe"
+                            return@forEach
+                        }
+                        val nonZero = withTimeout(30_000) {
+                            http.getPrefix(
+                                link.url,
+                                normalizer = normalizer,
+                                referer = referer,
+                                headers = headers + ("Range" to "bytes=$offset-"),
+                                maxBodyBytes = 65_536,
+                                timeoutSeconds = 30L
+                            )
+                        }
+                        val nonZeroEvidence = DownloadRangeProbeEvidence(
+                            requestedStart = offset,
+                            requestedEnd = null,
+                            maxBodyBytes = 65_536,
+                            responseCode = nonZero.code,
+                            contentRange = nonZero.header("Content-Range"),
+                            responseContentLength = nonZero.header("Content-Length")
+                                ?.trim()
+                                ?.toLongOrNull(),
+                            bodyByteCount = nonZero.bodyBytes.size,
+                            bodyTruncated = nonZero.bodyTruncated
+                        )
+                        liveRangeProbeError(nonZeroEvidence, total)?.let { error ->
+                            failures += "$host nonzero $error"
+                        }
+                    }
+                }
+                println(
+                    "$providerName download host=$host " +
+                        "head=${head.code}/${head.header("Content-Length")}/" +
+                        "${head.header("Accept-Ranges")} zero=${zero.code}/" +
+                        "${zero.header("Content-Range")}/${zero.bodyBytes.size}/" +
+                        "truncated=${zero.bodyTruncated}"
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                failures += "$host ${error.message ?: error::class.simpleName}"
+            }
+        }
+        assertTrue(failures.isEmpty(), "$providerName unsafe direct links: $failures")
+    }
+
+    private fun liveRangeProbeError(
+        evidence: DownloadRangeProbeEvidence,
+        expectedTotal: Long? = null
+    ): String? {
+        if (evidence.responseCode != 206) return "status=${evidence.responseCode}"
+        val range = parseContentRange(evidence.contentRange)
+            ?: return "invalid Content-Range=${evidence.contentRange}"
+        if (range.first != evidence.requestedStart) {
+            return "start=${range.first}, expected=${evidence.requestedStart}"
+        }
+        if (expectedTotal != null && range.third != expectedTotal) {
+            return "total=${range.third}, expected=$expectedTotal"
+        }
+        val expectedEnd = evidence.requestedEnd
+            ?.let { minOf(it, range.third - 1L) }
+            ?: (range.third - 1L)
+        if (range.second != expectedEnd) {
+            return "end=${range.second}, expected=$expectedEnd"
+        }
+        val responseLength = range.second - range.first + 1L
+        if (
+            evidence.responseContentLength != null &&
+            evidence.responseContentLength != responseLength
+        ) {
+            return "Content-Length=${evidence.responseContentLength}, expected=$responseLength"
+        }
+        val expectedBody = minOf(responseLength, evidence.maxBodyBytes.toLong()).toInt()
+        if (evidence.bodyByteCount != expectedBody) {
+            return "body=${evidence.bodyByteCount}, expected=$expectedBody"
+        }
+        val expectedTruncated = responseLength > evidence.maxBodyBytes.toLong()
+        if (evidence.bodyTruncated != expectedTruncated) {
+            return "truncated=${evidence.bodyTruncated}, expected=$expectedTruncated"
+        }
+        return null
+    }
+
+    private fun parseContentRange(raw: String?): Triple<Long, Long, Long>? {
+        val match = raw?.trim()?.let {
+            Regex("(?i)^bytes\\s+(\\d+)-(\\d+)/(\\d+)$").matchEntire(it)
+        } ?: return null
+        val start = match.groupValues[1].toLongOrNull() ?: return null
+        val end = match.groupValues[2].toLongOrNull() ?: return null
+        val total = match.groupValues[3].toLongOrNull() ?: return null
+        return Triple(start, end, total).takeIf {
+            start <= end && end < total
+        }
+    }
+
     private fun String.firstSearchWord(): String? =
         trim().split(Regex("""\s+""")).firstOrNull { it.isNotBlank() }
 
@@ -613,13 +933,23 @@ class CloudstreamTesterParityLiveTest {
 
     private fun reportedProviders(): List<MainAPI> = listOf(
         AnimasuProvider(),
+        DutamovieProvider(),
         IndomaxProvider(),
+        KuronimeProvider(),
         KuramanimeProvider(),
         LayarKacaProvider(),
         MovieboxProvider(),
         NomatProvider(),
         PencurimovieProvider(),
+        PusatfilmProvider(),
         ZoronimeProvider()
+    )
+
+    private fun requestedProviders(): List<MainAPI> = listOf(
+        DutamovieProvider(),
+        KuronimeProvider(),
+        LayarKacaProvider(),
+        PusatfilmProvider()
     )
 
     private companion object {
