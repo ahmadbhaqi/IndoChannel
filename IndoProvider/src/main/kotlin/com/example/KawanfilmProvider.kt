@@ -9,6 +9,7 @@ import java.net.URI
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class KawanfilmProvider : MainAPI() {
@@ -172,32 +173,42 @@ class KawanfilmProvider : MainAPI() {
         }
 
         val baseUrl = URI(pageUrl).let { "${it.scheme}://${it.rawAuthority}" }
-        for (request in PopularProviderLinkLimits.muviproAjaxRequests(document)) {
-            if (!resolver.canContinue) break
-            try {
-                val response = safeHttp.postForm(
-                    url = "$baseUrl/wp-admin/admin-ajax.php",
-                    form = request.toPostData(),
-                    normalizer = ProviderUrlNormalizer(::networkProviderUrl),
-                    referer = pageUrl,
-                    headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
-                    timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
-                )
-                if (
-                    response.code !in 200..299 ||
-                    ProviderHtmlParser.isNonContentPage(response.body)
-                ) continue
-                val responseDocument = Jsoup.parse(response.body, response.url)
-                ProviderHtmlParser.mediaSources(responseDocument).take(48).forEach { candidate ->
-                    val playerUrl = ProviderHtmlParser.absoluteUrl(candidate, response.url)
-                        ?: return@forEach
-                    if (resolver.canContinue) resolver.resolve(playerUrl, pageUrl)
+        val ajaxPages = buildList {
+            for (request in PopularProviderLinkLimits.muviproAjaxRequests(document)) {
+                if (!resolver.canContinue) break
+                try {
+                    val response = safeHttp.postForm(
+                        url = "$baseUrl/wp-admin/admin-ajax.php",
+                        form = request.toPostData(),
+                        normalizer = ProviderUrlNormalizer(::networkProviderUrl),
+                        referer = pageUrl,
+                        headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                        timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
+                    )
+                    if (
+                        response.code !in 200..299 ||
+                        ProviderHtmlParser.isNonContentPage(response.body)
+                    ) continue
+                    add(Jsoup.parse(response.body, response.url) to response.url)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    // Continue with the remaining player tabs.
                 }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                // Continue with the remaining player tabs.
             }
+        }
+        val ajaxCandidates = KawanfilmPlayerParser.ajaxResolutionCandidates(
+            pages = ajaxPages,
+            detailUrl = pageUrl
+        ).map { candidate ->
+            PlayerResolutionCandidate(candidate.url, candidate.referer)
+        }
+        resolveByPriorityTiers(
+            tiers = listOf(ajaxCandidates),
+            maxConcurrency = 3,
+            canContinue = { resolver.canContinue }
+        ) { candidate ->
+            resolver.resolve(candidate.url, candidate.referer)
         }
         return resolver.loaded
     }
@@ -222,4 +233,29 @@ class KawanfilmProvider : MainAPI() {
 
     private fun networkProviderUrl(raw: String?): String? =
         ProviderHtmlParser.preserveProviderPageUrl(raw, mainUrl, ownedHosts)
+}
+
+internal object KawanfilmPlayerParser {
+    data class AjaxResolutionCandidate(
+        val url: String,
+        val referer: String
+    )
+
+    fun ajaxResolutionCandidates(
+        pages: List<Pair<Document, String>>,
+        detailUrl: String
+    ): List<AjaxResolutionCandidate> {
+        return pages.asSequence()
+            .flatMap { (document, pageUrl) ->
+                ProviderHtmlParser.mediaSources(document)
+                    .asSequence()
+                    .mapNotNull { source ->
+                        ProviderHtmlParser.absoluteUrl(source, pageUrl)
+                    }
+            }
+            .distinct()
+            .take(48)
+            .map { source -> AjaxResolutionCandidate(source, detailUrl) }
+            .toList()
+    }
 }

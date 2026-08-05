@@ -88,7 +88,9 @@ class PusatfilmProvider : MainAPI() {
         ) ?: return null
         val href = normalizePageUrl(this.selectFirst("a")?.attr("href")) ?: return null
         if (SensitiveContentPolicy.isBlockedCatalogCard(this, title, href)) return null
-        val posterUrl = fixUrlNull(this.selectFirst("a > img")?.getImageAttr()).fixImageQuality()
+        val posterUrl = PusatfilmPosterUrl.normalize(
+            fixUrlNull(this.selectFirst("a > img")?.getImageAttr())
+        )
         val quality = this.select("div.gmr-qual, div.gmr-quality-item > a").text().trim().replace("-", "")
 
         return if (quality.isEmpty()) {
@@ -135,7 +137,9 @@ class PusatfilmProvider : MainAPI() {
         val title = MovieMetadataParser.title(rawTitle)
             ?: MovieMetadataParser.title(document.selectFirst("meta[property=og:title]")?.attr("content"))
             ?: throw ErrorLoadingException("Pusatfilm returned a page without a movie title")
-        val poster = fixUrlNull(document.selectFirst("figure.pull-left > img")?.getImageAttr()?.fixImageQuality())
+        val poster = PusatfilmPosterUrl.normalize(
+            fixUrlNull(document.selectFirst("figure.pull-left > img")?.getImageAttr())
+        )
         val tags = document.select("div.gmr-moviedata a").map { it.text() }
         val year = document.select("div.gmr-moviedata strong:contains(Year:) > a").text().trim().toIntOrNull()
         val episodeElements = document.select("div.vid-episodes a, div.gmr-listseries a")
@@ -240,12 +244,6 @@ class PusatfilmProvider : MainAPI() {
         }
     }
 
-    private fun String?.fixImageQuality(): String? {
-        if (this == null) return null
-        val regex = Regex("(-\\d*x\\d*)").find(this)?.groupValues?.get(0) ?: return this
-        return this.replace(regex, "")
-    }
-
     private fun normalizePageUrl(raw: String?): String? {
         return ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, legacyHosts)
     }
@@ -267,6 +265,33 @@ class PusatfilmProvider : MainAPI() {
 
     private fun networkPageUrl(raw: String?): String? {
         return ProviderHtmlParser.preserveProviderPageUrl(raw, mainUrl, legacyHosts)
+    }
+}
+
+internal object PusatfilmPosterUrl {
+    private val providerImageHosts = setOf(
+        "v4.pusatfilm21info.com",
+        "v3.pusatfilm21info.com",
+        "cdn.pusatfilm21info.com"
+    )
+    private val wordpressSizeSuffix = Regex("-\\d+x\\d+(?=\\.[^.]+$)")
+    private val tmdbFileName = Regex(
+        "^[A-Za-z0-9_-]{20,}\\.(?:jpe?g|png|webp)$",
+        RegexOption.IGNORE_CASE
+    )
+
+    fun normalize(raw: String?): String? {
+        val value = raw?.trim()?.takeIf(::isSafeRemoteHttpUrl) ?: return null
+        val uri = runCatching { URI(value) }.getOrNull() ?: return null
+        val host = uri.host?.lowercase() ?: return null
+        if (host !in providerImageHosts ||
+            !uri.path.orEmpty().startsWith("/wp-content/uploads/")
+        ) return value
+
+        val fileName = uri.path.substringAfterLast('/')
+            .replace(wordpressSizeSuffix, "")
+        if (!tmdbFileName.matches(fileName)) return value
+        return "https://image.tmdb.org/t/p/w500/$fileName"
     }
 }
 

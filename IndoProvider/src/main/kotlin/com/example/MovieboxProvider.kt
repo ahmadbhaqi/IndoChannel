@@ -104,11 +104,13 @@ class MovieboxProvider(
                 request.detailPath ?: return loadFallbackDetail(request)
             )
         } ?: return loadFallbackDetail(request)
-        val detail = getApi(
-            detailUrl,
-            if (legacyRequest) MovieboxApi.legacyApiHeaders else MovieboxApi.apiHeaders,
-            MOVIEBOX_JSON_BODY_LIMIT_BYTES
-        )?.parse<MovieboxDetailResponse>()?.data ?: return loadFallbackDetail(request)
+        val detail = retryMovieboxDetail {
+            getApi(
+                detailUrl,
+                if (legacyRequest) MovieboxApi.legacyApiHeaders else MovieboxApi.apiHeaders,
+                MOVIEBOX_JSON_BODY_LIMIT_BYTES
+            )?.parse<MovieboxDetailResponse>()?.data
+        } ?: return loadFallbackDetail(request)
         if (detail.isForbid == true) return loadFallbackDetail(request)
         val subject = detail.subject?.takeIf {
             if (legacyRequest) it.hasResource != false else it.hasResource == true
@@ -195,13 +197,14 @@ class MovieboxProvider(
             media.episode ?: 0,
             detailPath
         ) ?: return loadFallback(media, isCasting, subtitleCallback, callback)
-        val payload = getApi(
-            downloadUrl,
-            MovieboxApi.apiHeaders,
-            MOVIEBOX_JSON_BODY_LIMIT_BYTES
-        )?.parse<MovieboxDownloadResponse>()?.data
-            ?.takeIf { it.hasResource == true }
-            ?: return loadFallback(media, isCasting, subtitleCallback, callback)
+        val payload = retryMovieboxDetail {
+            getApi(
+                downloadUrl,
+                MovieboxApi.apiHeaders,
+                MOVIEBOX_JSON_BODY_LIMIT_BYTES
+            )?.parse<MovieboxDownloadResponse>()?.data
+                ?.takeIf { it.hasResource == true }
+        } ?: return loadFallback(media, isCasting, subtitleCallback, callback)
 
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
         payload.downloads.orEmpty()
@@ -241,7 +244,7 @@ class MovieboxProvider(
     private suspend fun loadDelegatedDetail(url: String): LoadResponse? =
         withTimeoutOrNull(MOVIEBOX_CATALOG_FALLBACK_TIMEOUT_MS) {
             firstNonEmptyFallback(fallbackProviders()) { provider ->
-                listOfNotNull(provider.load(url))
+                listOfNotNull(provider.load(url)?.withProviderOwner(name))
             }.firstOrNull()
         }
 
@@ -261,7 +264,7 @@ class MovieboxProvider(
                     for (result in exactResults) {
                         val detail = provider.load(result.url) ?: continue
                         if (media.matchesFallbackDetail(request, detail)) {
-                            return@withTimeoutOrNull detail
+                            return@withTimeoutOrNull detail.withProviderOwner(name)
                         }
                     }
                 } catch (error: CancellationException) {
@@ -498,6 +501,23 @@ class MovieboxProvider(
         const val MOVIEBOX_PLAYBACK_FALLBACK_TIMEOUT_MS = 90_000L
         const val MOVIEBOX_MAX_FALLBACK_RESULTS = 8
     }
+}
+
+internal suspend fun <T> retryMovieboxDetail(
+    attempts: Int = 2,
+    operation: suspend () -> T?
+): T? {
+    repeat(attempts.coerceIn(1, 3)) {
+        val result = try {
+            operation()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            null
+        }
+        if (result != null) return result
+    }
+    return null
 }
 
 internal object MovieboxApi {

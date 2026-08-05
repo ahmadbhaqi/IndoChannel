@@ -11,7 +11,18 @@ import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
 
-class PencurimovieProvider : MainAPI() {
+private const val PENCURIMOVIE_CATALOG_TIMEOUT_MS = 60_000L
+
+class PencurimovieProvider(
+    private val fallbackProviderFactory: () -> List<MainAPI> = {
+        listOf(
+            FilmapikProvider(),
+            PusatfilmProvider(),
+            KitanontonProvider(),
+            MovieboxProvider()
+        )
+    }
+) : MainAPI() {
     override var mainUrl = "https://ww21.pencurimovie.sbs"
     override var name = "Pencurimovie"
     override var lang = "id"
@@ -39,20 +50,47 @@ class PencurimovieProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val fetch = getProviderPage(
+        val primaryItems = getProviderPage(
             "$mainUrl/${request.data}/page/${page.coerceAtLeast(1)}"
-        ) ?: return newHomePageResponse(request.name, emptyList())
-        if (
-            fetch.code !in 200..299 ||
-            ProviderHtmlParser.isNonContentPage(fetch.body)
-        ) return newHomePageResponse(request.name, emptyList())
-        val document = Jsoup.parse(fetch.body, fetch.url)
-        return newHomePageResponse(request.name, document.select("div.ml-item").mapNotNull {
-            it.toSearchResult()
-        })
+        )?.takeIf { fetch ->
+            fetch.code in 200..299 &&
+                !ProviderHtmlParser.isNonContentPage(fetch.body)
+        }?.let { fetch ->
+            Jsoup.parse(fetch.body, fetch.url).select("div.ml-item").mapNotNull {
+                it.toSearchResult()
+            }
+        }.orEmpty()
+        val items = resolvePencurimovieCatalog(
+            primaryItems = primaryItems,
+            fallbackProviders = fallbackProviders(),
+            owner = name
+        ) { provider ->
+            val fallbackPage = provider.mainPage.firstOrNull { candidate ->
+                candidate.name.equals(request.name, ignoreCase = true)
+            } ?: provider.mainPage.firstOrNull()
+                ?: return@resolvePencurimovieCatalog emptyList()
+            provider.getMainPage(
+                page,
+                MainPageRequest(
+                    fallbackPage.name,
+                    fallbackPage.data,
+                    fallbackPage.horizontalImages
+                )
+            )?.items?.flatMap { it.list }.orEmpty()
+        }
+        return newHomePageResponse(request.name, items)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
+        return resolvePencurimovieSearch(
+            query = query,
+            primarySearch = { searchPrimary(query) },
+            fallbackProviders = fallbackProviders(),
+            owner = name
+        )
+    }
+
+    private suspend fun searchPrimary(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, Charsets.UTF_8.name())
         val fetch = getProviderPage("$mainUrl/?s=$encoded") ?: return emptyList()
         if (
@@ -90,7 +128,7 @@ class PencurimovieProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val requestUrl = providerUrl(url) ?: return null
+        val requestUrl = providerUrl(url) ?: return loadDelegatedDetail(url)
         val fetch = getProviderPage(requestUrl) ?: return null
         if (
             fetch.code !in 200..299 ||
@@ -167,7 +205,8 @@ class PencurimovieProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val requestUrl = providerUrl(data) ?: return false
+        val requestUrl = providerUrl(data)
+            ?: return loadDelegatedLinks(data, isCasting, subtitleCallback, callback)
         val urlFallbackRequests = PencurimovieParser.fallbackRequests(
             Jsoup.parse(""),
             requestUrl
@@ -305,8 +344,7 @@ class PencurimovieProvider : MainAPI() {
         )
     }
 
-    private fun fallbackProviders(): List<MainAPI> =
-        listOf(FilmapikProvider(), PusatfilmProvider(), KitanontonProvider())
+    private fun fallbackProviders(): List<MainAPI> = fallbackProviderFactory()
 
     private suspend fun getProviderPage(url: String): ProviderHttpResult? = try {
         safeHttp.get(
@@ -329,12 +367,76 @@ class PencurimovieProvider : MainAPI() {
     private fun networkProviderUrl(raw: String?): String? =
         ProviderHtmlParser.preserveProviderPageUrl(raw, mainUrl, ownedHosts)
 
+    private suspend fun loadDelegatedDetail(url: String): LoadResponse? =
+        withTimeoutOrNull(PENCURIMOVIE_CATALOG_TIMEOUT_MS) {
+            firstNonEmptyFallback(fallbackProviders()) { provider ->
+                listOfNotNull(provider.load(url)?.withProviderOwner(name))
+            }.firstOrNull()
+        }
+
+    private suspend fun loadDelegatedLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean = withPlaybackFallbackBudget(PENCURIMOVIE_FALLBACK_TIMEOUT_MS) {
+        loadFirstEmittingFallback(
+            candidates = fallbackProviders(),
+            callback = callback
+        ) { provider, fallbackCallback ->
+            provider.loadLinks(
+                data,
+                isCasting,
+                subtitleCallback,
+                fallbackCallback
+            )
+        }
+    }
+
     private companion object {
         const val PENCURIMOVIE_PRIMARY_TIMEOUT_MS = 35_000L
         const val PENCURIMOVIE_FALLBACK_TIMEOUT_MS = 90_000L
         const val PENCURIMOVIE_PROVIDER_FALLBACK_TIMEOUT_MS = 55_000L
         const val PENCURIMOVIE_MAX_FALLBACK_RESULTS = 8
     }
+}
+
+internal suspend fun resolvePencurimovieCatalog(
+    primaryItems: List<SearchResponse>,
+    fallbackProviders: Iterable<MainAPI>,
+    owner: String,
+    fallbackItems: suspend (MainAPI) -> List<SearchResponse>
+): List<SearchResponse> {
+    if (primaryItems.isNotEmpty()) return primaryItems
+    return withTimeoutOrNull(PENCURIMOVIE_CATALOG_TIMEOUT_MS) {
+        firstNonEmptyFallback(fallbackProviders) { provider ->
+            fallbackItems(provider).map { result -> result.withProviderOwner(owner) }
+        }
+    }.orEmpty()
+}
+
+internal suspend fun resolvePencurimovieSearch(
+    query: String,
+    primarySearch: suspend () -> List<SearchResponse>,
+    fallbackProviders: Iterable<MainAPI>,
+    owner: String
+): List<SearchResponse> {
+    repeat(2) {
+        val primary = try {
+            primarySearch()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            emptyList()
+        }
+        if (primary.isNotEmpty()) return primary
+    }
+    return withTimeoutOrNull(PENCURIMOVIE_CATALOG_TIMEOUT_MS) {
+        firstNonEmptyFallback(fallbackProviders) { provider ->
+            provider.search(query).orEmpty()
+                .map { result -> result.withProviderOwner(owner) }
+        }
+    }.orEmpty()
 }
 
 internal object PencurimovieParser {

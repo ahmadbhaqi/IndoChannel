@@ -121,6 +121,7 @@ class IndomaxProvider(
                 withTimeoutOrNull(INDOMAX_CATALOG_PROVIDER_TIMEOUT_MS) {
                     try {
                         provider.search(query).orEmpty()
+                            .map { result -> result.withProviderOwner(name) }
                     } catch (error: CancellationException) {
                         throw error
                     } catch (_: Exception) {
@@ -381,7 +382,8 @@ class IndomaxProvider(
     private suspend fun loadDelegatedDetail(url: String): LoadResponse? =
         withTimeoutOrNull(INDOMAX_CATALOG_FALLBACK_TIMEOUT_MS) {
             firstNonEmptyFallback(fallbackProviders()) { provider ->
-                listOfNotNull(provider.load(url)).filter(::isUsableFallbackDetail)
+                listOfNotNull(provider.load(url)?.withProviderOwner(name))
+                    .filter(::isUsableFallbackDetail)
             }.firstOrNull()
         }
 
@@ -428,7 +430,9 @@ class IndomaxProvider(
 
                             else -> false
                         }
-                        if (exactDetail) return@withTimeoutOrNull detail
+                        if (exactDetail) {
+                            return@withTimeoutOrNull detail.withProviderOwner(name)
+                        }
                     }
                 } catch (error: CancellationException) {
                     throw error

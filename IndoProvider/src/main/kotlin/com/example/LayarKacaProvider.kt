@@ -14,7 +14,11 @@ import org.jsoup.nodes.Element
 
 private val LAYARKACA_LEGACY_HOSTS = setOf("parachutedrone.com", "tv10.lk21official.cc")
 
-class LayarKacaProvider : MainAPI() {
+class LayarKacaProvider(
+    private val fallbackProviderFactory: () -> List<MainAPI> = {
+        listOf(PusatfilmProvider(), FilmapikProvider(), MovieboxProvider())
+    }
+) : MainAPI() {
     override var mainUrl = "https://tv.nontonfilm.red"
     override var name = "LayarKaca"
     override val hasMainPage = true
@@ -61,7 +65,9 @@ class LayarKacaProvider : MainAPI() {
                         fallbackPage.data,
                         fallbackPage.horizontalImages
                     )
-                )?.items?.flatMap { it.list }.orEmpty()
+                )?.items?.flatMap { it.list }
+                    ?.map { result -> result.withProviderOwner(name) }
+                    .orEmpty()
             }
         }.orEmpty()
         return newHomePageResponse(request.name, fallbackItems)
@@ -81,13 +87,19 @@ class LayarKacaProvider : MainAPI() {
         } catch (_: Exception) {
             emptyList()
         }
-        if (primaryResults.isNotEmpty()) return primaryResults
+        val relevantPrimaryResults = primaryResults.filter { result ->
+            LayarKacaSearchPolicy.matches(query, result.name)
+        }
+        if (relevantPrimaryResults.isNotEmpty()) return relevantPrimaryResults
 
-        return withTimeoutOrNull(LAYARKACA_CATALOG_FALLBACK_TIMEOUT_MS) {
+        val fallbackResults = withTimeoutOrNull(LAYARKACA_CATALOG_FALLBACK_TIMEOUT_MS) {
             firstNonEmptyFallback(fallbackProviders()) { provider ->
                 provider.search(query).orEmpty()
+                    .filter { result -> LayarKacaSearchPolicy.matches(query, result.name) }
+                    .map { result -> result.withProviderOwner(name) }
             }
         }.orEmpty()
+        return fallbackResults.ifEmpty { primaryResults }
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
@@ -115,7 +127,7 @@ class LayarKacaProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         val requestUrl = providerUrl(url)
             ?: return firstNonEmptyFallback(fallbackProviders()) { provider ->
-                listOfNotNull(provider.load(url))
+                listOfNotNull(provider.load(url)?.withProviderOwner(name))
             }.firstOrNull()
         val urlFallbackRequests = LayarKacaPlayerParser.fallbackRequests(
             Jsoup.parse(""),
@@ -465,7 +477,7 @@ class LayarKacaProvider : MainAPI() {
                                 else -> false
                             }
                             if (matchesRequestedEpisode) {
-                                return@withTimeoutOrNull detail
+                                return@withTimeoutOrNull detail.withProviderOwner(name)
                             }
                         }
                     } catch (error: CancellationException) {
@@ -552,8 +564,7 @@ class LayarKacaProvider : MainAPI() {
     private fun providerUrl(raw: String?): String? =
         ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, LAYARKACA_LEGACY_HOSTS)
 
-    private fun fallbackProviders(): List<MainAPI> =
-        listOf(FilmapikProvider(), PusatfilmProvider())
+    private fun fallbackProviders(): List<MainAPI> = fallbackProviderFactory()
 
     private fun playbackFallbackProviders(): List<MainAPI> =
         listOf(PencurimovieProvider()) + fallbackProviders()
@@ -574,6 +585,28 @@ class LayarKacaProvider : MainAPI() {
         const val LAYARKACA_MAX_FALLBACK_SEARCH_RESULTS = 8
         const val LAYARKACA_FALLBACK_PLAYBACK_ATTEMPTS = 2
     }
+}
+
+internal object LayarKacaSearchPolicy {
+    private val tokenRegex = Regex("""[\p{L}\p{N}]+""")
+
+    fun matches(query: String, candidate: String): Boolean {
+        val queryTokens = tokens(query)
+        if (queryTokens.isEmpty()) return false
+        val candidateTokens = tokens(candidate).toSet()
+        return queryTokens.all(candidateTokens::contains)
+    }
+
+    private fun tokens(raw: String): List<String> {
+        val title = MovieMetadataParser.title(raw) ?: raw
+        return tokenRegex.findAll(title.lowercase())
+            .map { match -> match.value }
+            .filter { token -> token.isNotBlank() }
+            .take(MAX_SEARCH_TOKENS)
+            .toList()
+    }
+
+    private const val MAX_SEARCH_TOKENS = 12
 }
 
 internal suspend fun withPlaybackFallbackBudget(
