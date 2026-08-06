@@ -47,7 +47,3 @@ Pada Windows, gunakan `gradlew.bat` sebagai gantinya.
 ## Kontribusi
 
 Issue dan pull request untuk perbaikan parser, provider, pemutaran, subtitle, pengujian, atau dokumentasi sangat diterima. Saat melaporkan masalah, sertakan nama provider, judul, episode, server yang dipilih, dan langkah reproduksi. Jangan menyertakan cookie, token, kredensial akun, atau data pribadi apa pun.
-
-## Disclaimer
-
-IndoChannel adalah proyek komunitas independen dan tidak berafiliasi dengan CloudStream maupun situs provider yang tercantum. Pengembang tidak meng-host atau mengendalikan konten yang disediakan pihak ketiga. Pengguna bertanggung jawab mematuhi hukum, ketentuan layanan, dan hak cipta yang berlaku di wilayah masing-masing.
