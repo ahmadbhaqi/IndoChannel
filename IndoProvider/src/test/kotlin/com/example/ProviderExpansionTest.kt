@@ -290,6 +290,31 @@ class ProviderExpansionTest {
     }
 
     @Test
+    fun `nomat preserves coded catalog entries without disabling the shared policy`() {
+        val codedCard = Jsoup.parse(
+            """<article><a href="/category/genre/jav/">Genre</a></article>"""
+        ).selectFirst("article")!!
+        val ordinaryCard = Jsoup.parse(
+            """<article><a href="/category/genre/jav/">Genre</a></article>"""
+        ).selectFirst("article")!!
+
+        assertFalse(
+            NomatParser.shouldBlockCatalogCard(
+                codedCard,
+                "DVAJ-710 Example title",
+                "https://nomat.shop/play/dvaj-710-example"
+            )
+        )
+        assertTrue(
+            NomatParser.shouldBlockCatalogCard(
+                ordinaryCard,
+                "Ordinary Drama",
+                "https://nomat.shop/play/ordinary-drama"
+            )
+        )
+    }
+
+    @Test
     fun `nomat encodes search terms as one path segment`() {
         assertEquals("film%20baru%2F2026", NomatParser.searchPathSegment("film baru/2026"))
     }

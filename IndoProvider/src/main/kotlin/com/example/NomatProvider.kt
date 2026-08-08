@@ -65,7 +65,7 @@ class NomatProvider : MainAPI() {
     private fun Element.toSearchResult(): SearchResponse? {
         val href = providerUrl(attr("href")) ?: return null
         val title = MovieMetadataParser.title(selectFirst(".title")?.text()) ?: return null
-        if (SensitiveContentPolicy.isBlockedCatalogCard(this, title, href)) return null
+        if (NomatParser.shouldBlockCatalogCard(this, title, href)) return null
         val posterStyle = selectFirst(".poster")?.attr("style").orEmpty()
         val poster = fixUrlNull(
             Regex("""(?i)url\((?:['"])?([^'")]+)""")
@@ -307,6 +307,9 @@ internal object NomatParser {
     private val providerHosts = setOf("nomat.site", "nomat.store", "nomat.asia")
     private val playbackHosts = setOf("nontonhemat.link")
     private val yearRegex = Regex("""\b(?:19|20)\d{2}\b""")
+    private val codedCatalogTitleRegex = Regex(
+        """^\s*(?:(?:[A-Z0-9]{2,12}-){1,3}\d{2,10}|[A-Z]{2,10}\d{2,10})(?:\b|(?=\s))"""
+    )
     private val parenthesizedYearSuffixRegex =
         Regex("""\s*[\[(](?:19|20)\d{2}[\])]\s*$""")
     private val seasonRegex = Regex("""(?i)\bseason\s*[-:]?\s*(\d+)\b""")
@@ -314,6 +317,10 @@ internal object NomatParser {
 
     fun searchPathSegment(query: String): String =
         URLEncoder.encode(query, Charsets.UTF_8.name()).replace("+", "%20")
+
+    fun shouldBlockCatalogCard(card: Element, title: String?, url: String?): Boolean =
+        !codedCatalogTitleRegex.containsMatchIn(title.orEmpty()) &&
+            SensitiveContentPolicy.isBlockedCatalogCard(card, title, url)
 
     fun providerPageUrl(raw: String?, mainUrl: String): String? =
         ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, providerHosts)

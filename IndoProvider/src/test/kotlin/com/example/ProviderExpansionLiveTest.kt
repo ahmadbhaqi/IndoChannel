@@ -31,19 +31,24 @@ class ProviderExpansionLiveTest {
     fun `nomat current catalog resolves playback`() = live(NomatProvider())
 
     @Test
-    fun `nomat current JAV results resolve verified playback`() = runBlocking {
+    fun `nomat current coded catalog resolves verified playback`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
             org.junit.Assume.assumeTrue(false)
             return@runBlocking
         }
 
         val provider = NomatProvider()
-        val items = withTimeout(60_000) {
-            provider.search("masturbating")
-        }.take(MAX_NOMAT_JAV_PROBES)
+        val items = NOMAT_CODE_QUERIES.mapNotNull { query ->
+            withTimeout(60_000) {
+                provider.search(query)
+            }.firstOrNull { item ->
+                item.name.contains(query, ignoreCase = true)
+            }
+        }.distinctBy { it.url }
+            .take(MAX_NOMAT_CODE_PROBES)
         assertTrue(
-            items.size >= MIN_NOMAT_JAV_PROBES,
-            "Nomat returned too few current JAV regression items: ${items.map { it.name }}"
+            items.size >= MIN_NOMAT_CODE_PROBES,
+            "Nomat returned too few current coded regression items: ${items.map { it.name }}"
         )
 
         val failures = mutableListOf<String>()
@@ -83,13 +88,13 @@ class ProviderExpansionLiveTest {
                     "links=${links.map { it.url.safeHost() }}"
                 }
             }
-            println("Nomat JAV title=${item.name} outcome=${outcome.getOrNull()}")
+            println("Nomat coded title=${item.name} outcome=${outcome.getOrNull()}")
             outcome.exceptionOrNull()?.let { error ->
                 failures += "${item.name}: ${error.message ?: error::class.simpleName}"
             }
         }
 
-        assertTrue(failures.isEmpty(), "Nomat JAV playback failures:\n${failures.joinToString("\n")}")
+        assertTrue(failures.isEmpty(), "Nomat coded playback failures:\n${failures.joinToString("\n")}")
     }
 
     @Test
@@ -235,8 +240,15 @@ class ProviderExpansionLiveTest {
     private companion object {
         const val MAX_MEDIA_PROBES = 4
         const val MAX_POSTER_PROBES = 6
-        const val MAX_NOMAT_JAV_PROBES = 5
-        const val MIN_NOMAT_JAV_PROBES = 3
+        val NOMAT_CODE_QUERIES = listOf(
+            "MIDV-699",
+            "JUQ-472",
+            "SDJS-370",
+            "SSIS-997",
+            "IPX-814"
+        )
+        const val MAX_NOMAT_CODE_PROBES = 5
+        const val MIN_NOMAT_CODE_PROBES = 4
         const val MEDIA_PROBE_TIMEOUT_MILLIS = 20_000L
         const val MEDIA_PROBE_TIMEOUT_SECONDS = 20L
     }
