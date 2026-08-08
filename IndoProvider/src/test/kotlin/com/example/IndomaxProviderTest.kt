@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.MovieLoadResponse
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.newMovieLoadResponse
+import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -55,6 +56,20 @@ class IndomaxProviderTest {
                 maxResults = 5
             )
         )
+    }
+
+    @Test
+    fun `fallback homepage cards are rebound to Indomax ownership`() {
+        val source = RecordingIndomaxFallback()
+        val foreign = source.newMovieSearchResponse(
+            "Fallback Movie",
+            "https://fallback.example/movie/current",
+            TvType.Movie
+        )
+
+        val owned = ownIndomaxFallbackCatalog(listOf(foreign), "Indomax")
+
+        assertEquals(listOf("Indomax"), owned.map { result -> result.apiName })
     }
 
     @Test

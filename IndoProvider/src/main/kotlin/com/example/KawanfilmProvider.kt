@@ -8,6 +8,12 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import java.net.URI
 import java.net.URLEncoder
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -162,39 +168,36 @@ class KawanfilmProvider : MainAPI() {
             ProviderHtmlParser.isNonContentPage(fetch.body)
         ) return false
         val document = Jsoup.parse(fetch.body, pageUrl)
-        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
-        val candidates = buildList {
+        val directCandidates = buildList {
             addAll(ProviderHtmlParser.mediaSources(document))
             addAll(document.select("ul.muvipro-player-tabs a[href]").map { it.attr("href") })
             addAll(ProviderHtmlParser.downloadCandidateUrls(document, pageUrl))
-        }.mapNotNull { ProviderHtmlParser.absoluteUrl(it, pageUrl) }.distinct().take(48)
-        candidates.forEach { candidate ->
-            if (resolver.canContinue) resolver.resolve(candidate, pageUrl)
-        }
+        }.mapNotNull { ProviderHtmlParser.absoluteUrl(it, pageUrl) }
+            .distinct()
+            .take(KAWANFILM_MAX_MIRROR_CANDIDATES)
+            .map { candidate -> PlayerResolutionCandidate(candidate, pageUrl) }
 
         val baseUrl = URI(pageUrl).let { "${it.scheme}://${it.rawAuthority}" }
-        val ajaxPages = buildList {
-            for (request in PopularProviderLinkLimits.muviproAjaxRequests(document)) {
-                if (!resolver.canContinue) break
-                try {
-                    val response = safeHttp.postForm(
-                        url = "$baseUrl/wp-admin/admin-ajax.php",
-                        form = request.toPostData(),
-                        normalizer = ProviderUrlNormalizer(::networkProviderUrl),
-                        referer = pageUrl,
-                        headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
-                        timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
-                    )
-                    if (
-                        response.code !in 200..299 ||
-                        ProviderHtmlParser.isNonContentPage(response.body)
-                    ) continue
-                    add(Jsoup.parse(response.body, response.url) to response.url)
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Exception) {
-                    // Continue with the remaining player tabs.
-                }
+        val ajaxPages = collectKawanfilmAjaxResults(
+            requests = PopularProviderLinkLimits.muviproAjaxRequests(document),
+            totalTimeoutMs = KAWANFILM_AJAX_COLLECTION_TIMEOUT_MS,
+            maxConcurrency = KAWANFILM_MIRROR_CONCURRENCY
+        ) { request ->
+            val response = safeHttp.postForm(
+                url = "$baseUrl/wp-admin/admin-ajax.php",
+                form = request.toPostData(),
+                normalizer = ProviderUrlNormalizer(::networkProviderUrl),
+                referer = pageUrl,
+                headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                timeoutSeconds = PROVIDER_HTTP_TIMEOUT_SECONDS
+            )
+            if (
+                response.code !in 200..299 ||
+                ProviderHtmlParser.isNonContentPage(response.body)
+            ) {
+                null
+            } else {
+                Jsoup.parse(response.body, response.url) to response.url
             }
         }
         val ajaxCandidates = KawanfilmPlayerParser.ajaxResolutionCandidates(
@@ -203,9 +206,14 @@ class KawanfilmProvider : MainAPI() {
         ).map { candidate ->
             PlayerResolutionCandidate(candidate.url, candidate.referer)
         }
-        resolveByPriorityTiers(
-            tiers = listOf(ajaxCandidates),
-            maxConcurrency = 3,
+
+        // Start the resolver only after AJAX discovery so slow tab responses do
+        // not consume the playback session's own deadline.
+        val resolver = LinkResolutionSession(this, subtitleCallback, callback)
+        resolveKawanfilmMirrorRace(
+            directCandidates = directCandidates,
+            ajaxCandidates = ajaxCandidates,
+            maxConcurrency = KAWANFILM_MIRROR_CONCURRENCY,
             canContinue = { resolver.canContinue }
         ) { candidate ->
             resolver.resolve(candidate.url, candidate.referer)
@@ -259,3 +267,77 @@ internal object KawanfilmPlayerParser {
             .toList()
     }
 }
+
+internal suspend fun <Request, Result : Any> collectKawanfilmAjaxResults(
+    requests: Iterable<Request>,
+    totalTimeoutMs: Long = KAWANFILM_AJAX_COLLECTION_TIMEOUT_MS,
+    maxConcurrency: Int = KAWANFILM_MIRROR_CONCURRENCY,
+    operation: suspend (Request) -> Result?
+): List<Result> {
+    val requestList = requests.toList().take(KAWANFILM_MAX_AJAX_REQUESTS)
+    if (requestList.isEmpty()) return emptyList()
+    val results = MutableList<Result?>(requestList.size) { null }
+    val concurrency = maxConcurrency.coerceIn(1, 8)
+    withTimeoutOrNull(totalTimeoutMs.coerceIn(1L, KAWANFILM_MAX_AJAX_COLLECTION_TIMEOUT_MS)) {
+        supervisorScope {
+            val semaphore = Semaphore(concurrency)
+            requestList.mapIndexed { index, request ->
+                launch {
+                    semaphore.withPermit {
+                        results[index] = try {
+                            operation(request)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                }
+            }.joinAll()
+        }
+    }
+    return results.filterNotNull()
+}
+
+internal suspend fun <Candidate> resolveKawanfilmMirrorRace(
+    directCandidates: Iterable<Candidate>,
+    ajaxCandidates: Iterable<Candidate>,
+    maxConcurrency: Int = KAWANFILM_MIRROR_CONCURRENCY,
+    canContinue: () -> Boolean,
+    attempt: suspend (Candidate) -> Boolean
+): Boolean {
+    val prioritized = KawanfilmPlayerParser.prioritizedRaceCandidates(
+        directCandidates = directCandidates,
+        ajaxCandidates = ajaxCandidates,
+        maxCandidates = KAWANFILM_MAX_MIRROR_CANDIDATES
+    )
+    return resolveByPriorityTiers(
+        tiers = listOf(prioritized),
+        maxConcurrency = maxConcurrency,
+        canContinue = canContinue,
+        attempt = attempt
+    )
+}
+
+private fun <Candidate> KawanfilmPlayerParser.prioritizedRaceCandidates(
+    directCandidates: Iterable<Candidate>,
+    ajaxCandidates: Iterable<Candidate>,
+    maxCandidates: Int
+): List<Candidate> {
+    val direct = directCandidates.iterator()
+    val ajax = ajaxCandidates.iterator()
+    return buildList {
+        while (size < maxCandidates && (direct.hasNext() || ajax.hasNext())) {
+            repeat(2) {
+                if (size < maxCandidates && ajax.hasNext()) add(ajax.next())
+            }
+            if (size < maxCandidates && direct.hasNext()) add(direct.next())
+        }
+    }.distinct()
+}
+
+private const val KAWANFILM_MIRROR_CONCURRENCY = 3
+private const val KAWANFILM_MAX_AJAX_REQUESTS = 16
+private const val KAWANFILM_MAX_MIRROR_CANDIDATES = 48
+private const val KAWANFILM_AJAX_COLLECTION_TIMEOUT_MS = 30_000L
+private const val KAWANFILM_MAX_AJAX_COLLECTION_TIMEOUT_MS = 45_000L

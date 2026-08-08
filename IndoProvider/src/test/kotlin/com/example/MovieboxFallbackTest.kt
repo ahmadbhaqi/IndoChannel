@@ -15,6 +15,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
+import kotlin.system.measureTimeMillis
 
 class MovieboxFallbackTest {
     @Test
@@ -109,6 +111,23 @@ class MovieboxFallbackTest {
 
         assertEquals("detail", detail)
         assertEquals(2, attempts)
+    }
+
+    @Test
+    fun `detail retries obey one shared deadline`() = runBlocking {
+        val elapsed = measureTimeMillis {
+            val detail = retryMovieboxDetail(
+                attempts = 3,
+                totalTimeoutMs = 100
+            ) {
+                delay(80)
+                null
+            }
+
+            assertEquals(null, detail)
+        }
+
+        assertTrue(elapsed < 180, "shared 100ms retry deadline took ${elapsed}ms")
     }
 
     @Test

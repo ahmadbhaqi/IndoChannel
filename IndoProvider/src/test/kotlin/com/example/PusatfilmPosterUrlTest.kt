@@ -32,4 +32,13 @@ class PusatfilmPosterUrlTest {
 
         assertEquals(external, PusatfilmPosterUrl.normalize(external))
     }
+
+    @Test
+    fun `long ordinary wordpress filename is not mistaken for a TMDB hash`() {
+        val ordinary =
+            "https://v4.pusatfilm21info.com/wp-content/uploads/2026/08/" +
+                "official-current-movie-poster-300x450.jpg"
+
+        assertEquals(ordinary, PusatfilmPosterUrl.normalize(ordinary))
+    }
 }

@@ -3,7 +3,11 @@ package com.example
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import org.jsoup.Jsoup
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 
 class KawanfilmPlayerParserTest {
     @Test
@@ -64,5 +68,43 @@ class KawanfilmPlayerParserTest {
                 detailUrl = "https://web.kawanfilm21.co/download-current/"
             ).size
         )
+    }
+
+    @Test
+    fun `later ajax winner is not starved by many hanging direct candidates`() = runBlocking {
+        val winner = "ajax-winner"
+
+        val resolved = withTimeout(500) {
+            resolveKawanfilmMirrorRace(
+                directCandidates = (1..48).map { index -> "direct-$index" },
+                ajaxCandidates = listOf("ajax-hanging", winner),
+                maxConcurrency = 3,
+                canContinue = { true }
+            ) { candidate ->
+                if (candidate == winner) {
+                    true
+                } else {
+                    awaitCancellation()
+                }
+            }
+        }
+
+        assertTrue(resolved)
+    }
+
+    @Test
+    fun `ajax collection keeps completed pages when its shared deadline expires`() = runBlocking {
+        val pages = collectKawanfilmAjaxResults(
+            requests = listOf("fast", "hanging"),
+            totalTimeoutMs = 100,
+            maxConcurrency = 2
+        ) { request ->
+            if (request == "hanging") {
+                delay(5_000)
+            }
+            "page-$request"
+        }
+
+        assertEquals(listOf("page-fast"), pages)
     }
 }

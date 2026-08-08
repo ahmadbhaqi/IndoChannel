@@ -14,6 +14,8 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlin.system.measureTimeMillis
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 
 class PencurimovieCatalogFallbackTest {
@@ -80,6 +82,26 @@ class PencurimovieCatalogFallbackTest {
 
         assertTrue(loaded)
         assertEquals(listOf(SourceProvider.MEDIA_URL), links.map { it.url })
+    }
+
+    @Test
+    fun `primary retries and fallback share one total search deadline`() = runBlocking {
+        val elapsed = measureTimeMillis {
+            val results = resolvePencurimovieSearch(
+                query = "Fallback Movie",
+                primarySearch = {
+                    delay(80)
+                    emptyList()
+                },
+                fallbackProviders = emptyList(),
+                owner = "Pencurimovie",
+                totalTimeoutMs = 100
+            )
+
+            assertTrue(results.isEmpty())
+        }
+
+        assertTrue(elapsed < 180, "shared 100ms deadline took ${elapsed}ms")
     }
 
     private class SourceProvider : MainAPI() {

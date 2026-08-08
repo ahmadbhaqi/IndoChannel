@@ -276,7 +276,7 @@ internal object PusatfilmPosterUrl {
     )
     private val wordpressSizeSuffix = Regex("-\\d+x\\d+(?=\\.[^.]+$)")
     private val tmdbFileName = Regex(
-        "^[A-Za-z0-9_-]{20,}\\.(?:jpe?g|png|webp)$",
+        "^[A-Za-z0-9]{27}\\.(?:jpe?g|png|webp)$",
         RegexOption.IGNORE_CASE
     )
 

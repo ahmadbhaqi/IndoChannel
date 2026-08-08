@@ -92,7 +92,12 @@ class MovieboxProvider(
         )?.parse<MovieboxHomeResponse>()?.availableItems().orEmpty()
     }
 
-    override suspend fun load(url: String): LoadResponse? {
+    override suspend fun load(url: String): LoadResponse? =
+        withTimeoutOrNull(MOVIEBOX_LOAD_TOTAL_TIMEOUT_MS) {
+            loadWithinBudget(url)
+        }
+
+    private suspend fun loadWithinBudget(url: String): LoadResponse? {
         val request = MovieboxApi.loadData(url) ?: return loadDelegatedDetail(url)
         val id = request.id ?: return loadFallbackDetail(request)
         val legacyRequest = request.detailPath == null
@@ -179,6 +184,15 @@ class MovieboxProvider(
     }
 
     override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean = withTimeoutOrNull(MOVIEBOX_PLAYBACK_TOTAL_TIMEOUT_MS) {
+        loadLinksWithinBudget(data, isCasting, subtitleCallback, callback)
+    } ?: false
+
+    private suspend fun loadLinksWithinBudget(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -499,25 +513,32 @@ class MovieboxProvider(
         const val MOVIEBOX_HOME_BODY_LIMIT_BYTES = 4_000_000
         const val MOVIEBOX_CATALOG_FALLBACK_TIMEOUT_MS = 60_000L
         const val MOVIEBOX_PLAYBACK_FALLBACK_TIMEOUT_MS = 90_000L
+        const val MOVIEBOX_LOAD_TOTAL_TIMEOUT_MS = 60_000L
+        const val MOVIEBOX_PLAYBACK_TOTAL_TIMEOUT_MS = 75_000L
         const val MOVIEBOX_MAX_FALLBACK_RESULTS = 8
     }
 }
 
 internal suspend fun <T> retryMovieboxDetail(
     attempts: Int = 2,
+    totalTimeoutMs: Long = MOVIEBOX_DETAIL_RETRY_TIMEOUT_MS,
     operation: suspend () -> T?
 ): T? {
-    repeat(attempts.coerceIn(1, 3)) {
-        val result = try {
-            operation()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Exception) {
-            null
+    return withTimeoutOrNull(
+        totalTimeoutMs.coerceIn(1L, MOVIEBOX_DETAIL_RETRY_TIMEOUT_MS)
+    ) {
+        repeat(attempts.coerceIn(1, 3)) {
+            val result = try {
+                operation()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                null
+            }
+            if (result != null) return@withTimeoutOrNull result
         }
-        if (result != null) return result
+        null
     }
-    return null
 }
 
 internal object MovieboxApi {
@@ -771,13 +792,18 @@ private const val MOVIEBOX_MAX_EPISODES_PER_SEASON = 2_000
 private const val MOVIEBOX_MAX_TOTAL_EPISODES = 5_000
 private const val MOVIEBOX_SEARCH_ATTEMPTS = 2
 private const val MOVIEBOX_SEARCH_ATTEMPT_TIMEOUT_MS = 30_000L
+private const val MOVIEBOX_SEARCH_TOTAL_TIMEOUT_MS = 45_000L
+private const val MOVIEBOX_DETAIL_RETRY_TIMEOUT_MS = 30_000L
 private const val MOVIEBOX_SEARCH_RESULT_LIMIT = 30
 
 internal suspend fun resolveMovieboxSearchCandidates(
     query: String,
     remoteSearch: suspend () -> List<MovieboxItem>,
-    homepageFallback: suspend () -> List<MovieboxItem>
-): List<MovieboxItem> {
+    homepageFallback: suspend () -> List<MovieboxItem>,
+    totalTimeoutMs: Long = MOVIEBOX_SEARCH_TOTAL_TIMEOUT_MS
+): List<MovieboxItem> = withTimeoutOrNull(
+    totalTimeoutMs.coerceIn(1L, MOVIEBOX_SEARCH_TOTAL_TIMEOUT_MS)
+) {
     repeat(MOVIEBOX_SEARCH_ATTEMPTS) {
         val candidates = try {
             withTimeoutOrNull(MOVIEBOX_SEARCH_ATTEMPT_TIMEOUT_MS) {
@@ -791,11 +817,11 @@ internal suspend fun resolveMovieboxSearchCandidates(
             .distinctBy { it.subjectId }
             .take(MOVIEBOX_SEARCH_RESULT_LIMIT)
 
-        if (candidates.isNotEmpty()) return candidates
+        if (candidates.isNotEmpty()) return@withTimeoutOrNull candidates
     }
 
     val queryTokens = movieboxSearchTokens(query)
-    if (queryTokens.isEmpty()) return emptyList()
+    if (queryTokens.isEmpty()) return@withTimeoutOrNull emptyList()
     val homepageItems = try {
         withTimeoutOrNull(MOVIEBOX_SEARCH_ATTEMPT_TIMEOUT_MS) {
             homepageFallback()
@@ -805,7 +831,7 @@ internal suspend fun resolveMovieboxSearchCandidates(
     } catch (_: Exception) {
         emptyList()
     }
-    return homepageItems.asSequence()
+    homepageItems.asSequence()
         .filter(::isUsableMovieboxSearchItem)
         .filter { item ->
             val titleTokens = movieboxSearchTokens(item.title.orEmpty()).toSet()
@@ -814,7 +840,7 @@ internal suspend fun resolveMovieboxSearchCandidates(
         .distinctBy { it.subjectId }
         .take(MOVIEBOX_SEARCH_RESULT_LIMIT)
         .toList()
-}
+}.orEmpty()
 
 private fun isUsableMovieboxSearchItem(item: MovieboxItem): Boolean =
     item.hasResource == true &&

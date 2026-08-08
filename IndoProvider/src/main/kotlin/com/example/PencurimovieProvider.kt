@@ -419,19 +419,22 @@ internal suspend fun resolvePencurimovieSearch(
     query: String,
     primarySearch: suspend () -> List<SearchResponse>,
     fallbackProviders: Iterable<MainAPI>,
-    owner: String
+    owner: String,
+    totalTimeoutMs: Long = PENCURIMOVIE_CATALOG_TIMEOUT_MS
 ): List<SearchResponse> {
-    repeat(2) {
-        val primary = try {
-            primarySearch()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Exception) {
-            emptyList()
+    return withTimeoutOrNull(
+        totalTimeoutMs.coerceIn(1L, PENCURIMOVIE_CATALOG_TIMEOUT_MS)
+    ) {
+        repeat(2) {
+            val primary = try {
+                primarySearch()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                emptyList()
+            }
+            if (primary.isNotEmpty()) return@withTimeoutOrNull primary
         }
-        if (primary.isNotEmpty()) return primary
-    }
-    return withTimeoutOrNull(PENCURIMOVIE_CATALOG_TIMEOUT_MS) {
         firstNonEmptyFallback(fallbackProviders) { provider ->
             provider.search(query).orEmpty()
                 .map { result -> result.withProviderOwner(owner) }

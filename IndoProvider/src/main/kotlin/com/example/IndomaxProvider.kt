@@ -373,7 +373,9 @@ class IndomaxProvider(
                         fallbackPage.data,
                         fallbackPage.horizontalImages
                     )
-                )?.items?.flatMap { homeList -> homeList.list }.orEmpty()
+                )?.items?.flatMap { homeList -> homeList.list }
+                    ?.let { results -> ownIndomaxFallbackCatalog(results, name) }
+                    .orEmpty()
             }
         }.orEmpty()
         return newHomePageResponse(request.name, items)
@@ -634,6 +636,11 @@ internal fun <T, Key> interleaveIndomaxCatalogGroups(
         }
     }
 }
+
+internal fun ownIndomaxFallbackCatalog(
+    results: List<SearchResponse>,
+    owner: String
+): List<SearchResponse> = results.map { result -> result.withProviderOwner(owner) }
 
 internal object IndomaxParser {
     const val MAX_PLAYER_PAGES = 4
