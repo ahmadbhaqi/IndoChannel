@@ -21,7 +21,7 @@ IndoChannel adalah repositori ekstensi komunitas untuk CloudStream yang menghadi
 | Pusatfilm        |            |
 | keBioskop21      |            |
 
-![Hasil tes provider CloudStream: 24 dari 24 berhasil](assets/provider-tests-passed.png)
+<img src="assets/provider-tests-passed.jpg" alt="Hasil tes provider CloudStream: 24 dari 24 berhasil" width="320">
 
 ## Instalasi
 
