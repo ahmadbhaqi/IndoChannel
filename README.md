@@ -4,24 +4,38 @@ IndoChannel adalah repositori ekstensi komunitas untuk CloudStream yang menghadi
 
 ## Provider
 
-| Film & Serial    | Anime      |
-| ---------------- | ---------- |
-| Moviebox         | Kuramanime |
-| Pencurimovie     | Animasu    |
-| Sarangfilm       | Otakudesu  |
-| Nomat            | Samehadaku |
-| Kawanfilm        | Anoboy     |
-| LayarKaca (LK21) | Kuronime   |
-| Ngefilm          | Animeindo  |
-| Dutamovie        | Oploverz   |
-| KitaNonton       | Zoronime   |
-| IndoXXI          |            |
-| Filmapik         |            |
-| IDLIX            |            |
-| Pusatfilm        |            |
-| keBioskop21      |            |
-
-<img src="assets/provider-tests-passed.jpg" alt="Hasil tes provider CloudStream: 24 dari 24 berhasil" width="320">
+<table>
+  <tr>
+    <td valign="top">
+      <table>
+        <thead>
+          <tr><th>Film &amp; Serial</th><th>Anime</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Moviebox</td><td>Kuramanime</td></tr>
+          <tr><td>Pencurimovie</td><td>Animasu</td></tr>
+          <tr><td>Sarangfilm</td><td>Otakudesu</td></tr>
+          <tr><td>Nomat</td><td>Samehadaku</td></tr>
+          <tr><td>Kawanfilm</td><td>Anoboy</td></tr>
+          <tr><td>LayarKaca (LK21)</td><td>Kuronime</td></tr>
+          <tr><td>Ngefilm</td><td>Animeindo</td></tr>
+          <tr><td>Dutamovie</td><td>Oploverz</td></tr>
+          <tr><td>KitaNonton</td><td>Zoronime</td></tr>
+          <tr><td>IndoXXI</td><td></td></tr>
+          <tr><td>Filmapik</td><td></td></tr>
+          <tr><td>IDLIX</td><td></td></tr>
+          <tr><td>Pusatfilm</td><td></td></tr>
+          <tr><td>keBioskop21</td><td></td></tr>
+        </tbody>
+      </table>
+    </td>
+    <td valign="top">
+      <img src="assets/provider-tests-passed.jpg" alt="Hasil tes provider CloudStream: 24 dari 24 berhasil" width="260">
+      <br>
+      <sub>Hasil tes provider: 24/24 berhasil</sub>
+    </td>
+  </tr>
+</table>
 
 ## Instalasi
 
