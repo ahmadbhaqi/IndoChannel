@@ -613,6 +613,52 @@ class LayarKacaPlayerParserTest {
     }
 
     @Test
+    fun `stalled fallback provider cannot starve the next exact provider`() = runBlocking {
+        val attempts = mutableListOf<String>()
+        val emitted = mutableListOf<String>()
+
+        val loaded = loadFirstEmittingFallback(
+            candidates = listOf("stalled", "working"),
+            candidateTimeoutMs = 25,
+            callback = emitted::add
+        ) { candidate, callback ->
+            attempts += candidate
+            if (candidate == "stalled") {
+                delay(250)
+                false
+            } else {
+                callback("verified-link")
+                true
+            }
+        }
+
+        assertTrue(loaded)
+        assertEquals(listOf("stalled", "working"), attempts)
+        assertEquals(listOf("verified-link"), emitted)
+    }
+
+    @Test
+    fun `emitting fallback remains successful when provider completion stalls`() = runBlocking {
+        val attempts = mutableListOf<String>()
+        val emitted = mutableListOf<String>()
+
+        val loaded = loadFirstEmittingFallback(
+            candidates = listOf("emits-then-stalls", "duplicate"),
+            candidateTimeoutMs = 25,
+            callback = emitted::add
+        ) { candidate, callback ->
+            attempts += candidate
+            callback("verified-link")
+            if (candidate == "emits-then-stalls") delay(250)
+            true
+        }
+
+        assertTrue(loaded)
+        assertEquals(listOf("emits-then-stalls"), attempts)
+        assertEquals(listOf("verified-link"), emitted)
+    }
+
+    @Test
     fun `catalog fallback skips failed and empty sources`() = runBlocking {
         val attempts = mutableListOf<String>()
 

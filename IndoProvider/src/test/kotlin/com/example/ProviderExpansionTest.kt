@@ -1,6 +1,7 @@
 package com.example
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.lagradost.cloudstream3.newEpisode
 import java.io.File
 import java.util.Base64
 import kotlin.test.Test
@@ -290,7 +291,7 @@ class ProviderExpansionTest {
     }
 
     @Test
-    fun `nomat preserves coded catalog entries without disabling the shared policy`() {
+    fun `nomat coded catalog entries still enforce taxonomy metadata`() {
         val codedCard = Jsoup.parse(
             """<article><a href="/category/genre/jav/">Genre</a></article>"""
         ).selectFirst("article")!!
@@ -298,7 +299,7 @@ class ProviderExpansionTest {
             """<article><a href="/category/genre/jav/">Genre</a></article>"""
         ).selectFirst("article")!!
 
-        assertFalse(
+        assertTrue(
             NomatParser.shouldBlockCatalogCard(
                 codedCard,
                 "DVAJ-710 Example title",
@@ -749,6 +750,154 @@ class ProviderExpansionTest {
             events
         )
     }
+
+    @Test
+    fun `kuramanime falls back only after every native candidate fails`() = runBlocking {
+        val events = mutableListOf<String>()
+
+        val result = resolveAnimeNativeThenCrossProviderFallback(
+            resolveNative = {
+                events += "native"
+                false
+            },
+            resolveFallback = {
+                events += "fallback"
+                true
+            }
+        )
+
+        assertTrue(result)
+        assertEquals(listOf("native", "fallback"), events)
+    }
+
+    @Test
+    fun `kuramanime skips cross provider fallback when native playback succeeds`() = runBlocking {
+        val events = mutableListOf<String>()
+
+        val result = resolveAnimeNativeThenCrossProviderFallback(
+            resolveNative = {
+                events += "native"
+                true
+            },
+            resolveFallback = {
+                events += "fallback"
+                true
+            }
+        )
+
+        assertTrue(result)
+        assertEquals(listOf("native"), events)
+    }
+
+    @Test
+    fun `kuramanime retries a transient provider page failure once`() = runBlocking {
+        val attempts = mutableListOf<Int>()
+
+        val result = fetchKuramanimeProviderPageWithRetry { attempt ->
+            attempts += attempt
+            if (attempt == 1) null else "detail-page"
+        }
+
+        assertEquals("detail-page", result)
+        assertEquals(listOf(1, 2), attempts)
+    }
+
+    @Test
+    fun `kuramanime retries only transient provider statuses`() {
+        assertTrue(isTransientKuramanimePageStatus(408))
+        assertTrue(isTransientKuramanimePageStatus(425))
+        assertTrue(isTransientKuramanimePageStatus(429))
+        assertTrue(isTransientKuramanimePageStatus(503))
+        assertFalse(isTransientKuramanimePageStatus(404))
+    }
+
+    @Test
+    fun `kuramanime page exhaustion still invokes encoded fallback`() = runBlocking {
+        val events = mutableListOf<String>()
+
+        val result = resolveAnimeNativePageThenCrossProviderFallback(
+            nativePage = null as String?,
+            resolveNative = {
+                events += "native"
+                true
+            },
+            resolveFallback = {
+                events += "fallback"
+                true
+            }
+        )
+
+        assertTrue(result)
+        assertEquals(listOf("fallback"), events)
+    }
+
+    @Test
+    fun `kuramanime fallback metadata combines detail title with episode url`() {
+        val episodeUrl =
+            "https://v19.kuramanime.ing/episode/watch-token-episode-7/"
+        val request = animeFallbackRequestFromPlayback(
+            playback = AnimePlaybackData(
+                url = episodeUrl,
+                title = "Episode 7",
+                categories = emptyList(),
+                detailUrl = "https://v19.kuramanime.ing/anime/sample-series/"
+            ),
+            pageUrl = episodeUrl
+        )
+
+        assertNotNull(request)
+        assertTrue(AnimeCrossProviderFallback.isExactTitle("Sample Series", request.title))
+        assertEquals(7, request.episode)
+    }
+
+    @Test
+    fun `catalog sampling continues after a sparse first page`() = runBlocking {
+        val visitedPages = mutableListOf<Int>()
+
+        val samples = collectDistinctCatalogSamples(
+            sampleSize = 3,
+            maxPages = 3,
+            key = { value: String -> value }
+        ) { page ->
+            visitedPages += page
+            when (page) {
+                1 -> listOf("one")
+                2 -> listOf("one", "two", "three")
+                else -> emptyList()
+            }
+        }
+
+        assertEquals(listOf(1, 2), visitedPages)
+        assertEquals(listOf("one", "two", "three"), samples)
+    }
+
+    @Test
+    fun `catalog series playback tries an early episode after an unavailable latest episode`() =
+        runBlocking {
+            val attempts = mutableListOf<String>()
+            val emitted = mutableListOf<String>()
+            val provider = DutamovieProvider()
+            val episodes = listOf(
+                provider.newEpisode("episode-1", { episode = 1 }, fix = false),
+                provider.newEpisode("episode-5", { episode = 5 }, fix = false),
+                provider.newEpisode("episode-9", { episode = 9 }, fix = false)
+            )
+
+            val loaded = loadFirstEmittingFallback(
+                candidates = selectCatalogSeriesPlaybackCandidates(episodes),
+                candidateTimeoutMs = 100,
+                callback = emitted::add
+            ) { data, callback ->
+                attempts += data
+                if (data == "episode-9") error("latest episode is not ready")
+                callback("verified-link")
+                true
+            }
+
+            assertTrue(loaded)
+            assertEquals(listOf("episode-9", "episode-1"), attempts)
+            assertEquals(listOf("verified-link"), emitted)
+        }
 
     @Test
     fun `kuramanime stops after the first verified hydrated candidate`() = runBlocking {

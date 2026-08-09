@@ -240,6 +240,7 @@ class LayarKacaProvider(
             return withPlaybackFallbackBudget(LAYARKACA_FALLBACK_TIMEOUT_MS) {
                 val delegatedLoaded = loadFirstEmittingFallback(
                     candidates = fallbackProviders(),
+                    candidateTimeoutMs = LAYARKACA_FALLBACK_PROVIDER_TIMEOUT_MS,
                     callback = callback
                 ) { provider, fallbackCallback ->
                     provider.loadLinks(
@@ -497,9 +498,11 @@ class LayarKacaProvider(
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val providers = playbackFallbackProviders()
-        for (provider in providers) {
-            var callbackFailure: Throwable? = null
+        return loadFirstEmittingFallback(
+            candidates = playbackFallbackProviders(),
+            candidateTimeoutMs = LAYARKACA_FALLBACK_PROVIDER_TIMEOUT_MS,
+            callback = callback
+        ) { provider, fallbackCallback ->
             try {
                 val exactResults = provider.search(request.title).orEmpty()
                     .asSequence()
@@ -533,14 +536,7 @@ class LayarKacaProvider(
                     if (
                         retryFallbackPlayback(
                             maxAttempts = LAYARKACA_FALLBACK_PLAYBACK_ATTEMPTS,
-                            callback = { link ->
-                                try {
-                                    callback(link)
-                                } catch (error: Throwable) {
-                                    callbackFailure = error
-                                    throw error
-                                }
-                            }
+                            callback = fallbackCallback
                         ) { attemptCallback ->
                             provider.loadLinks(
                                 playbackData,
@@ -549,16 +545,15 @@ class LayarKacaProvider(
                                 attemptCallback
                             )
                         }
-                    ) return true
+                    ) return@loadFirstEmittingFallback true
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
                 // One fallback provider must not prevent the next exact match.
             }
-            callbackFailure?.let { throw it }
+            false
         }
-        return false
     }
 
     private fun providerUrl(raw: String?): String? =
@@ -582,6 +577,7 @@ class LayarKacaProvider(
         const val LAYARKACA_PRIMARY_SESSION_TIMEOUT_MS = 45_000L
         const val LAYARKACA_CATALOG_FALLBACK_TIMEOUT_MS = 60_000L
         const val LAYARKACA_FALLBACK_TIMEOUT_MS = 90_000L
+        const val LAYARKACA_FALLBACK_PROVIDER_TIMEOUT_MS = 20_000L
         const val LAYARKACA_MAX_FALLBACK_SEARCH_RESULTS = 8
         const val LAYARKACA_FALLBACK_PLAYBACK_ATTEMPTS = 2
     }
@@ -635,6 +631,7 @@ internal suspend fun <Candidate, Result> firstNonEmptyFallback(
 
 internal suspend fun <Candidate, Result> loadFirstEmittingFallback(
     candidates: Iterable<Candidate>,
+    candidateTimeoutMs: Long = DEFAULT_FALLBACK_CANDIDATE_TIMEOUT_MS,
     callback: (Result) -> Unit,
     attempt: suspend (Candidate, (Result) -> Unit) -> Boolean
 ): Boolean {
@@ -642,13 +639,15 @@ internal suspend fun <Candidate, Result> loadFirstEmittingFallback(
         var emitted = false
         var callbackFailure: Throwable? = null
         try {
-            attempt(candidate) { result ->
-                try {
-                    callback(result)
-                    emitted = true
-                } catch (error: Throwable) {
-                    callbackFailure = error
-                    throw error
+            withTimeoutOrNull(candidateTimeoutMs.coerceIn(1L, 120_000L)) {
+                attempt(candidate) { result ->
+                    try {
+                        callback(result)
+                        emitted = true
+                    } catch (error: Throwable) {
+                        callbackFailure = error
+                        throw error
+                    }
                 }
             }
         } catch (error: CancellationException) {
@@ -661,6 +660,8 @@ internal suspend fun <Candidate, Result> loadFirstEmittingFallback(
     }
     return false
 }
+
+private const val DEFAULT_FALLBACK_CANDIDATE_TIMEOUT_MS = 20_000L
 
 internal suspend fun <T> retryFallbackPlayback(
     maxAttempts: Int,

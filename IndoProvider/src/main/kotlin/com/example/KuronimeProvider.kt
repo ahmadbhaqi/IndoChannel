@@ -168,16 +168,7 @@ open class KuronimeProvider : MainAPI() {
             document.infoItem("Genre")?.select("a")?.map { it.text() }.orEmpty()
         }
         if (SensitiveContentPolicy.isBlocked(pageTitle, fetch.url, categories = pageTags)) return false
-        AnimeCrossProviderFallback.request(pageTitle, fetch.url)?.let { request ->
-            if (
-                AnimeCrossProviderFallback.resolve(
-                    request = request,
-                    isCasting = isCasting,
-                    subtitleCallback = subtitleCallback,
-                    callback = callback
-                )
-            ) return true
-        }
+        val fallbackRequest = AnimeCrossProviderFallback.request(pageTitle, fetch.url)
         val html = fetch.text
         val resolver = LinkResolutionSession(this, subtitleCallback, callback)
         val bloggerResolver = BloggerVideoResolver(name, resolver::emitResolved)
@@ -282,7 +273,19 @@ open class KuronimeProvider : MainAPI() {
                 throw error
             } catch (_: Exception) {}
         }
-        return resolver.linkCount > 0
+        return resolveAnimeNativeThenCrossProviderFallback(
+            resolveNative = { resolver.linkCount > 0 },
+            resolveFallback = {
+                fallbackRequest?.let { request ->
+                    AnimeCrossProviderFallback.resolve(
+                        request = request,
+                        isCasting = isCasting,
+                        subtitleCallback = subtitleCallback,
+                        callback = callback
+                    )
+                } ?: false
+            }
+        )
     }
 
     private companion object {

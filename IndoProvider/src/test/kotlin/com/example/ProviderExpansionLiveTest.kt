@@ -31,70 +31,23 @@ class ProviderExpansionLiveTest {
     fun `nomat current catalog resolves playback`() = live(NomatProvider())
 
     @Test
-    fun `nomat current coded catalog resolves verified playback`() = runBlocking {
+    fun `nomat current coded catalog stays filtered`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
             org.junit.Assume.assumeTrue(false)
             return@runBlocking
         }
 
         val provider = NomatProvider()
-        val items = NOMAT_CODE_QUERIES.mapNotNull { query ->
+        val exposed = NOMAT_FILTERED_QUERIES.flatMap { query ->
             withTimeout(60_000) {
                 provider.search(query)
-            }.firstOrNull { item ->
+            }
+        }.filter { item ->
+            NOMAT_FILTERED_QUERIES.any { query ->
                 item.name.contains(query, ignoreCase = true)
             }
-        }.distinctBy { it.url }
-            .take(MAX_NOMAT_CODE_PROBES)
-        assertTrue(
-            items.size >= MIN_NOMAT_CODE_PROBES,
-            "Nomat returned too few current coded regression items: ${items.map { it.name }}"
-        )
-
-        val failures = mutableListOf<String>()
-        items.forEach { item ->
-            val outcome = runCatching {
-                withTimeout(180_000) {
-                    val detail = provider.load(item.url)
-                        ?: error("detail did not load")
-                    val playbackData = when (detail) {
-                        is MovieLoadResponse -> detail.dataUrl
-                        is TvSeriesLoadResponse -> detail.episodes.lastOrNull()?.data
-                        is AnimeLoadResponse -> detail.episodes.values.flatten().lastOrNull()?.data
-                        else -> null
-                    } ?: error("detail returned no playback data")
-                    val links = mutableListOf<ExtractorLink>()
-                    val loaded = provider.loadLinks(playbackData, false, {}, links::add)
-                    if (!loaded || links.isEmpty()) {
-                        error("loaded=$loaded links=${links.size}")
-                    }
-                    val reachable = links.take(MAX_MEDIA_PROBES).any { link ->
-                        runCatching {
-                            withTimeout(MEDIA_PROBE_TIMEOUT_MILLIS) {
-                                app.get(
-                                    link.url,
-                                    referer = link.referer,
-                                    headers = link.headers + if (link.type == ExtractorLinkType.M3U8) {
-                                        emptyMap()
-                                    } else {
-                                        mapOf("Range" to "bytes=0-31")
-                                    },
-                                    timeout = MEDIA_PROBE_TIMEOUT_SECONDS
-                                ).code
-                            }
-                        }.getOrNull() in 200..299
-                    }
-                    if (!reachable) error("no reachable link from ${links.map { it.url.safeHost() }}")
-                    "links=${links.map { it.url.safeHost() }}"
-                }
-            }
-            println("Nomat coded title=${item.name} outcome=${outcome.getOrNull()}")
-            outcome.exceptionOrNull()?.let { error ->
-                failures += "${item.name}: ${error.message ?: error::class.simpleName}"
-            }
         }
-
-        assertTrue(failures.isEmpty(), "Nomat coded playback failures:\n${failures.joinToString("\n")}")
+        assertTrue(exposed.isEmpty(), "Nomat exposed filtered catalog entries")
     }
 
     @Test
@@ -240,15 +193,13 @@ class ProviderExpansionLiveTest {
     private companion object {
         const val MAX_MEDIA_PROBES = 4
         const val MAX_POSTER_PROBES = 6
-        val NOMAT_CODE_QUERIES = listOf(
+        val NOMAT_FILTERED_QUERIES = listOf(
             "MIDV-699",
             "JUQ-472",
             "SDJS-370",
             "SSIS-997",
             "IPX-814"
         )
-        const val MAX_NOMAT_CODE_PROBES = 5
-        const val MIN_NOMAT_CODE_PROBES = 4
         const val MEDIA_PROBE_TIMEOUT_MILLIS = 20_000L
         const val MEDIA_PROBE_TIMEOUT_SECONDS = 20L
     }

@@ -121,6 +121,37 @@ class AnimeProviderLiveTest {
         assertReachable("Kuronime", links)
     }
 
+    @Test
+    fun `kuramanime current second season survives dead native mirrors`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+
+        val provider = KuramanimeProvider()
+        val expectedTitle = "Kabushikigaisha Magi-Lumière 2nd Season"
+        val result = withTimeout(45_000) {
+            provider.search(expectedTitle)
+        }.firstOrNull { AnimeCrossProviderFallback.isExactTitle(expectedTitle, it.name) }
+            ?: error("Kuramanime search missed $expectedTitle")
+        val detail = withTimeout(45_000) {
+            provider.load(result.url)
+        } as? AnimeLoadResponse ?: error("Kuramanime failed to load ${result.url}")
+        val playbackData = detail.episodes.values
+            .flatten()
+            .firstOrNull()
+            ?.data
+            ?: error("Kuramanime exposed no episode for ${result.url}")
+        val links = mutableListOf<ExtractorLink>()
+        val loaded = withTimeout(120_000) {
+            provider.loadLinks(playbackData, false, {}, links::add)
+        }
+
+        assertTrue(loaded, "Kuramanime did not recover after its native mirrors failed")
+        assertTrue(links.isNotEmpty(), "Kuramanime fallback emitted no media")
+        assertReachable("Kuramanime", links)
+    }
+
     private suspend fun assertCurrentCatalogPlayable(provider: MainAPI) {
         val page = provider.mainPage.firstOrNull()
             ?: error("${provider.name} has no main-page category")

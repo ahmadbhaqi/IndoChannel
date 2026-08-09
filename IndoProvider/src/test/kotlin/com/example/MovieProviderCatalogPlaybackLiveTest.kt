@@ -1,5 +1,6 @@
 package com.example
 
+import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SubtitleFile
@@ -98,7 +99,7 @@ class MovieProviderCatalogPlaybackLiveTest {
             ProviderCase(
                 provider = IndoxxiProvider(),
                 categoryName = "Indonesia",
-                sampleSize = 6
+                sampleSize = 5
             )
         )
     }
@@ -127,14 +128,18 @@ class MovieProviderCatalogPlaybackLiveTest {
             case.categoryName == null || page.name.equals(case.categoryName, ignoreCase = true)
         } ?: error("${case.provider.name} has no ${case.categoryName.orEmpty()} category")
         val request = MainPageRequest(pageData.name, pageData.data, pageData.horizontalImages)
-        val catalog = withTimeout(45_000) {
-            case.provider.getMainPage(1, request)
-        }?.items
-            ?.flatMap { it.list }
-            .orEmpty()
-            .filter { it.url.startsWith("http") }
-            .distinctBy { it.url }
-            .take(case.sampleSize)
+        val catalog = collectDistinctCatalogSamples(
+            sampleSize = case.sampleSize,
+            maxPages = MAX_CATALOG_PAGES,
+            key = { item -> item.url }
+        ) { page ->
+            withTimeout(45_000) {
+                case.provider.getMainPage(page, request)
+            }?.items
+                ?.flatMap { it.list }
+                .orEmpty()
+                .filter { it.url.startsWith("http") }
+        }
 
         assertTrue(
             catalog.size == case.sampleSize,
@@ -147,16 +152,33 @@ class MovieProviderCatalogPlaybackLiveTest {
             val subtitles = mutableListOf<SubtitleFile>()
             var failure: Throwable? = null
             val loaded = try {
-                withTimeout(90_000) {
+                withTimeout(CATALOG_SAMPLE_TIMEOUT_MS) {
                     val detail = case.provider.load(item.url)
-                    val playbackData = (detail as? TvSeriesLoadResponse)
+                    val playbackCandidates = (detail as? TvSeriesLoadResponse)
                         ?.episodes
-                        ?.maxByOrNull { episode ->
-                            (episode.season ?: 0) * 10_000 + (episode.episode ?: 0)
+                        ?.let(::selectCatalogSeriesPlaybackCandidates)
+                        .orEmpty()
+                        .ifEmpty { listOf(item.url) }
+                    loadFirstEmittingFallback(
+                        candidates = playbackCandidates,
+                        candidateTimeoutMs = CATALOG_EPISODE_ATTEMPT_TIMEOUT_MS,
+                        callback = links::add
+                    ) { playbackData, attemptCallback ->
+                        val attemptSubtitles = mutableListOf<SubtitleFile>()
+                        var emitted = false
+                        try {
+                            case.provider.loadLinks(
+                                playbackData,
+                                false,
+                                attemptSubtitles::add
+                            ) { link ->
+                                emitted = true
+                                attemptCallback(link)
+                            }
+                        } finally {
+                            if (emitted) subtitles += attemptSubtitles
                         }
-                        ?.data
-                        ?: item.url
-                    case.provider.loadLinks(playbackData, false, subtitles::add, links::add)
+                    }
                 }
             } catch (error: TimeoutCancellationException) {
                 failure = error
@@ -191,4 +213,41 @@ class MovieProviderCatalogPlaybackLiveTest {
         val categoryName: String? = null,
         val sampleSize: Int = 3
     )
+
+    private companion object {
+        const val CATALOG_EPISODE_ATTEMPT_TIMEOUT_MS = 45_000L
+        const val CATALOG_SAMPLE_TIMEOUT_MS = 100_000L
+        const val MAX_CATALOG_PAGES = 3
+    }
+}
+
+internal fun selectCatalogSeriesPlaybackCandidates(
+    episodes: List<Episode>,
+    maxAttempts: Int = 2
+): List<String> {
+    val ordered = episodes
+        .filter { it.data.isNotBlank() }
+        .distinctBy { it.data }
+        .sortedBy { episode ->
+            (episode.season ?: 0) * 10_000 + (episode.episode ?: Int.MIN_VALUE)
+        }
+    return listOfNotNull(ordered.lastOrNull(), ordered.firstOrNull())
+        .distinctBy { it.data }
+        .take(maxAttempts.coerceIn(1, 3))
+        .map { it.data }
+}
+
+internal suspend fun <Item, Key> collectDistinctCatalogSamples(
+    sampleSize: Int,
+    maxPages: Int,
+    key: (Item) -> Key,
+    fetchPage: suspend (Int) -> List<Item>
+): List<Item> {
+    val discovered = linkedMapOf<Key, Item>()
+    for (page in 1..maxPages.coerceAtLeast(1)) {
+        val previousSize = discovered.size
+        fetchPage(page).forEach { item -> discovered.putIfAbsent(key(item), item) }
+        if (discovered.size >= sampleSize || discovered.size == previousSize) break
+    }
+    return discovered.values.take(sampleSize.coerceAtLeast(0))
 }

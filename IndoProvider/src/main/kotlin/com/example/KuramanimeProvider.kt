@@ -190,40 +190,67 @@ class KuramanimeProvider : MainAPI() {
         if (AnimePlaybackDataCodec.isBlocked(data)) return false
         val pageUrl = episodeUrl(playback?.url ?: data) ?: return false
         if (SensitiveContentPolicy.isBlocked(null, pageUrl)) return false
-        val response = getProviderPage(pageUrl) ?: return false
-        if (
-            response.code !in 200..299 ||
-            ProviderHtmlParser.isNonContentPage(response.body)
-        ) return false
-        val episodeDocument = Jsoup.parse(response.body, response.url)
-        val episodeTitle = episodeDocument.selectFirst("h1, .anime__details__title h3")
+        val encodedFallbackRequest = animeFallbackRequestFromPlayback(playback, pageUrl)
+        val response = getProviderPage(pageUrl)?.takeIf { fetch ->
+            fetch.code in 200..299 && !ProviderHtmlParser.isNonContentPage(fetch.body)
+        }
+        val episodeDocument = response?.let { fetch -> Jsoup.parse(fetch.body, fetch.url) }
+        val episodeTitle = episodeDocument
+            ?.selectFirst("h1, .anime__details__title h3")
             ?.text()
-        val episodeTags = episodeDocument.select(
+        val episodeTags = episodeDocument?.select(
             ".anime__details__widget li:contains(Genre:) a, " +
                 ".anime__details__widget a[href*='/properties/genre/']"
-        ).map { it.text().trim() }
+        )?.map { it.text().trim() }.orEmpty()
         if (
+            response != null &&
             SensitiveContentPolicy.isBlocked(
                 episodeTitle,
                 response.url,
                 categories = episodeTags
             )
         ) return false
-        val staticCandidates = KuramanimeParser.playerUrls(response.body, response.url)
-        val hydratedCandidates = fetchHydratedCandidates(response)
-        val resolver = LinkResolutionSession(
-            this,
-            subtitleCallback,
-            callback,
-            inlineSourceParser = KuramanimeParser::fragmentMediaUrls
-        )
-        return resolveKuramanimeCandidatesHydrationFirst(
-            staticCandidates = staticCandidates,
-            staticReferer = response.url,
-            hydrate = { hydratedCandidates },
-            canContinue = { resolver.canContinue },
-            isLoaded = { resolver.loaded },
-            resolve = { candidate, referer -> resolver.resolve(candidate, referer) }
+        val fallbackRequest = response?.let { fetch ->
+            AnimeCrossProviderFallback.request(episodeTitle, fetch.url)
+        } ?: encodedFallbackRequest
+        return resolveAnimeNativePageThenCrossProviderFallback(
+            nativePage = response,
+            resolveNative = { nativeResponse ->
+                val staticCandidates = KuramanimeParser.playerUrls(
+                    nativeResponse.body,
+                    nativeResponse.url
+                )
+                val hydratedCandidates = fetchHydratedCandidates(nativeResponse)
+                val resolver = LinkResolutionSession(
+                    this,
+                    subtitleCallback,
+                    callback,
+                    inlineSourceParser = KuramanimeParser::fragmentMediaUrls
+                )
+                resolveKuramanimeCandidatesHydrationFirst(
+                    staticCandidates = staticCandidates,
+                    staticReferer = nativeResponse.url,
+                    hydrate = { hydratedCandidates },
+                    canContinue = { resolver.canContinue },
+                    isLoaded = { resolver.loaded },
+                    resolve = { candidate, referer -> resolver.resolve(candidate, referer) }
+                )
+            },
+            resolveFallback = {
+                fallbackRequest?.let { request ->
+                    AnimeCrossProviderFallback.resolve(
+                        request = request,
+                        isCasting = isCasting,
+                        subtitleCallback = subtitleCallback,
+                        callback = callback,
+                        providerFactories = listOf(
+                            { AnimasuProvider() },
+                            { ZoronimeProvider() },
+                            { SamehadakuProvider() }
+                        )
+                    )
+                } ?: false
+            }
         )
     }
 
@@ -366,17 +393,24 @@ class KuramanimeProvider : MainAPI() {
         url: String,
         referer: String? = null,
         timeoutSeconds: Long = PROVIDER_HTTP_TIMEOUT_SECONDS
-    ): ProviderHttpResult? = try {
-        safeHttp.get(
-            url = url,
-            normalizer = ProviderUrlNormalizer(::networkProviderUrl),
-            referer = referer,
-            timeoutSeconds = timeoutSeconds
-        )
-    } catch (error: CancellationException) {
-        throw error
-    } catch (_: Exception) {
-        null
+    ): ProviderHttpResult? = fetchKuramanimeProviderPageWithRetry {
+        try {
+            safeHttp.get(
+                url = url,
+                normalizer = ProviderUrlNormalizer(::networkProviderUrl),
+                referer = referer,
+                timeoutSeconds = timeoutSeconds.coerceAtMost(
+                    KURAMANIME_PROVIDER_PAGE_ATTEMPT_TIMEOUT_SECONDS
+                )
+            )?.takeUnless { response ->
+                isTransientKuramanimePageStatus(response.code) ||
+                    ProviderHtmlParser.isNonContentPage(response.body)
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private suspend fun getProviderAsset(
@@ -453,6 +487,7 @@ class KuramanimeProvider : MainAPI() {
         const val KURAMANIME_SCRIPT_BODY_LIMIT_BYTES = 262_144
         const val KURAMANIME_TOKEN_BODY_LIMIT_BYTES = 4_096
         const val KURAMANIME_BOOTSTRAP_TIMEOUT_SECONDS = 10L
+        const val KURAMANIME_PROVIDER_PAGE_ATTEMPT_TIMEOUT_SECONDS = 18L
     }
 }
 
@@ -460,6 +495,53 @@ internal data class KuramanimeCandidateBatch(
     val urls: List<String>,
     val referer: String
 )
+
+internal suspend fun resolveAnimeNativeThenCrossProviderFallback(
+    resolveNative: suspend () -> Boolean,
+    resolveFallback: suspend () -> Boolean
+): Boolean {
+    if (resolveNative()) return true
+    return resolveFallback()
+}
+
+internal suspend fun <Page> resolveAnimeNativePageThenCrossProviderFallback(
+    nativePage: Page?,
+    resolveNative: suspend (Page) -> Boolean,
+    resolveFallback: suspend () -> Boolean
+): Boolean {
+    if (nativePage != null && resolveNative(nativePage)) return true
+    return resolveFallback()
+}
+
+internal fun animeFallbackRequestFromPlayback(
+    playback: AnimePlaybackData?,
+    pageUrl: String
+): AnimeFallbackRequest? {
+    val pageRequest = AnimeCrossProviderFallback.request(null, pageUrl)
+    val encodedTitleRequest = AnimeCrossProviderFallback.request(playback?.title, pageUrl)
+    val detailRequest = playback?.detailUrl?.let { detailUrl ->
+        AnimeCrossProviderFallback.request(null, detailUrl)
+    }
+    val titleRequest = detailRequest ?: encodedTitleRequest ?: pageRequest ?: return null
+    return titleRequest.copy(
+        episode = pageRequest?.episode
+            ?: encodedTitleRequest?.episode
+            ?: titleRequest.episode
+    )
+}
+
+internal fun isTransientKuramanimePageStatus(code: Int): Boolean =
+    code == 408 || code == 425 || code == 429 || code >= 500
+
+internal suspend fun <T> fetchKuramanimeProviderPageWithRetry(
+    maxAttempts: Int = 2,
+    fetch: suspend (attempt: Int) -> T?
+): T? {
+    for (attempt in 1..maxAttempts.coerceIn(1, 3)) {
+        fetch(attempt)?.let { return it }
+    }
+    return null
+}
 
 internal suspend fun resolveKuramanimeCandidatesHydrationFirst(
     staticCandidates: List<String>,

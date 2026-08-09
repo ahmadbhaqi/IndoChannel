@@ -319,7 +319,7 @@ internal object NomatParser {
         URLEncoder.encode(query, Charsets.UTF_8.name()).replace("+", "%20")
 
     fun shouldBlockCatalogCard(card: Element, title: String?, url: String?): Boolean =
-        !codedCatalogTitleRegex.containsMatchIn(title.orEmpty()) &&
+        codedCatalogTitleRegex.containsMatchIn(title.orEmpty()) ||
             SensitiveContentPolicy.isBlockedCatalogCard(card, title, url)
 
     fun providerPageUrl(raw: String?, mainUrl: String): String? =
