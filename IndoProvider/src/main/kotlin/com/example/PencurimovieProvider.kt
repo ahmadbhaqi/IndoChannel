@@ -30,6 +30,7 @@ class PencurimovieProvider(
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.Cartoon)
     private val ownedHosts = setOf(
+        "ww44.pencurimovie.baby",
         "ww73.pencurimovie.bond",
         "pencurimovie.bond",
         "pencurimovie.sbs"

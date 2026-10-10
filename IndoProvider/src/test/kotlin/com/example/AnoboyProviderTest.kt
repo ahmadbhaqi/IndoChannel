@@ -76,9 +76,9 @@ class AnoboyProviderTest {
         val currentBase = AnoboyProvider().mainUrl
         val legacyHosts = setOf("ww1.anoboy.boo")
 
-        assertEquals("https://anoboy.xyz", currentBase)
+        assertEquals("https://anoboy.quest", currentBase)
         assertEquals(
-            "https://anoboy.xyz/episode/example/?server=2#player",
+            "https://anoboy.quest/episode/example/?server=2#player",
             ProviderHtmlParser.normalizeProviderPageUrl(
                 "https://ww1.anoboy.boo/episode/example/?server=2#player",
                 currentBase,
@@ -86,7 +86,7 @@ class AnoboyProviderTest {
             )
         )
         assertEquals(
-            "https://anoboy.xyz/episode/example/?server=2#player",
+            "https://anoboy.quest/episode/example/?server=2#player",
             ProviderHtmlParser.normalizeProviderPageUrl(
                 "/episode/example/?server=2#player",
                 currentBase,

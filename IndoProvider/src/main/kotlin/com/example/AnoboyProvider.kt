@@ -8,7 +8,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class AnoboyProvider : MainAPI() {
-    override var mainUrl = "https://anoboy.xyz"
+    override var mainUrl = "https://anoboy.quest"
     override var name = "Anoboy"
     override val hasMainPage = true
     override var lang = "id"
@@ -136,7 +136,7 @@ class AnoboyProvider : MainAPI() {
         ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl, ANOBOY_LEGACY_HOSTS)
 
     private companion object {
-        val ANOBOY_LEGACY_HOSTS = setOf("ww1.anoboy.boo")
+        val ANOBOY_LEGACY_HOSTS = setOf("ww1.anoboy.boo", "anoboy.xyz")
     }
 }
 

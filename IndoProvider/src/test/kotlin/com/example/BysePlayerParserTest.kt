@@ -160,7 +160,7 @@ class BysePlayerParserTest {
         val links = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
         val subtitles = mutableListOf<com.lagradost.cloudstream3.SubtitleFile>()
         val session = LinkResolutionSession(
-            api = IndoxxiProvider(),
+            api = Film21Provider(),
             subtitleCallback = subtitles::add,
             callback = links::add,
             pageFetcher = { url, referer ->

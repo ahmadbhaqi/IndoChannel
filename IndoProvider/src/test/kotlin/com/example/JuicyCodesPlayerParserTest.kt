@@ -202,6 +202,14 @@ class JuicyCodesPlayerParserTest {
         assertTrue(juicyCodesPlayerPageHeaders("http://192.168.1.3/embed/current").isEmpty())
     }
 
+    @Test
+    fun `current hls type identifies extensionless variant manifests`() {
+        val config = """var config = {"sources":{"type":"hls","file":"https://daisy.groovy.monster/stream/variant/current?token=opaque"}};jwplayer.key = 'key';"""
+        val html = """<script>_juicycodes("${encode(config)}");</script>"""
+        val media = JuicyCodesPlayerParser.playback(html)!!.media.single()
+        assertTrue(media.isHls)
+    }
+
     private fun encode(decoded: String, salt: Int = 681): String {
         val symbols = "`%-+*\$!_^="
         val digitPayload = buildString(decoded.length * 4) {

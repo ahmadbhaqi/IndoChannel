@@ -4,7 +4,14 @@ import org.jsoup.Jsoup
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
-class IndoxxiPlayerParserTest {
+class Film21PlayerParserTest {
+    @Test
+    fun `first catalog page uses the advertised category root and later pages keep pagination`() {
+        val category = "https://154.203.167.77/country/indonesia/page/"
+        assertEquals("https://154.203.167.77/country/indonesia/", Film21PlayerParser.catalogPageUrl(category, 1))
+        assertEquals("https://154.203.167.77/country/indonesia/page/2/", Film21PlayerParser.catalogPageUrl(category, 2))
+    }
+
     @Test
     fun `AJAX fragment keeps script-only media candidates`() {
         val pageUrl = "https://filmbioskop21.lk21.in.net/indonesia/current/"
@@ -20,7 +27,7 @@ class IndoxxiPlayerParserTest {
 
         assertEquals(
             listOf("https://cdn.current.example/video/master.m3u8"),
-            IndoxxiPlayerParser.pageMediaUrls(document, pageUrl)
+            Film21PlayerParser.pageMediaUrls(document, pageUrl)
         )
     }
 
@@ -42,7 +49,7 @@ class IndoxxiPlayerParserTest {
                 "https://filmbioskop21.lk21.in.net/media/current.mp4",
                 "https://cdn.current.example/master.m3u8"
             ),
-            IndoxxiPlayerParser.pageMediaUrls(document, pageUrl)
+            Film21PlayerParser.pageMediaUrls(document, pageUrl)
         )
     }
 }

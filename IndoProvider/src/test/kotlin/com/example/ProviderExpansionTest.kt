@@ -48,11 +48,11 @@ class ProviderExpansionTest {
             "MovieboxProvider.kt" to "https://h5-api.aoneroom.com",
             "PencurimovieProvider.kt" to "https://ww21.pencurimovie.sbs",
             "SarangfilmProvider.kt" to "https://sarangfilm.diy",
-            "NomatProvider.kt" to "https://nomat.shop",
+            "NomatProvider.kt" to "https://nomat.world",
             "IndomaxProvider.kt" to "https://idmxl.ink",
             "KawanfilmProvider.kt" to "https://web.kawanfilm21.co",
-            "KuramanimeProvider.kt" to "https://v19.kuramanime.ing",
-            "AnimasuProvider.kt" to "https://v2.animasu.work"
+            "KuramanimeProvider.kt" to "https://v20.kuramanime.ing",
+            "AnimasuProvider.kt" to "https://animasu.love"
         )
 
         expectedDomains.forEach { (fileName, domain) ->

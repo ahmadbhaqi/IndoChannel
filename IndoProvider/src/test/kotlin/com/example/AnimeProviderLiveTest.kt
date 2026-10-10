@@ -15,6 +15,24 @@ import kotlin.test.assertTrue
 /** Opt-in end-to-end checks for provider page -> callback resolution. */
 class AnimeProviderLiveTest {
     @Test
+    fun `animasu earliest refining Qi episode resolves current Okru metadata`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+        val provider = AnimasuProvider()
+        val links = mutableListOf<ExtractorLink>()
+        val loaded = withTimeout(105_000) {
+            provider.loadLinks(
+                "${provider.mainUrl}/nonton-100-000-years-of-refining-qi-episode-1/",
+                false, {}, links::add
+            )
+        }
+        assertTrue(loaded && links.isNotEmpty(), "Animasu Refining Qi episode 1 emitted no media")
+        assertReachable("Animasu", links)
+    }
+
+    @Test
     fun `animeindo emits extensionless upstream media`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
             org.junit.Assume.assumeTrue(false)
@@ -38,13 +56,13 @@ class AnimeProviderLiveTest {
     }
 
     @Test
-    fun `oploverz resolves current blogger rpc`() = runBlocking {
+    fun `oploverz resolves the current episode payload`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
             org.junit.Assume.assumeTrue(false)
             return@runBlocking
         }
 
-        val pageUrl = "https://oploverz.org/anime/dr-stone-season-4-science-future-episode-26-subtitle-indonesia/"
+        val pageUrl = "https://oploverz.site/series/black-clover/episode/1"
         val links = mutableListOf<ExtractorLink>()
         val loaded = OploverzProvider().loadLinks(
             pageUrl,
@@ -152,7 +170,18 @@ class AnimeProviderLiveTest {
         assertReachable("Kuramanime", links)
     }
 
-    private suspend fun assertCurrentCatalogPlayable(provider: MainAPI) {
+    @Test
+    fun `oploverz current movie resolves its advertised stream`() = runBlocking {
+        if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
+            org.junit.Assume.assumeTrue(false)
+            return@runBlocking
+        }
+        assertCurrentCatalogPlayable(OploverzProvider()) { it.contains("/movie/") }
+    }
+    private suspend fun assertCurrentCatalogPlayable(
+        provider: MainAPI,
+        acceptsUrl: (String) -> Boolean = { true }
+    ) {
         val page = provider.mainPage.firstOrNull()
             ?: error("${provider.name} has no main-page category")
         val response = withTimeout(45_000) {
@@ -164,7 +193,7 @@ class AnimeProviderLiveTest {
         val item = response?.items
             ?.flatMap { it.list }
             .orEmpty()
-            .firstOrNull { it.url.startsWith("http") }
+            .firstOrNull { it.url.startsWith("http") && acceptsUrl(it.url) }
             ?: error("${provider.name} returned an empty current catalog")
         val links = mutableListOf<ExtractorLink>()
         val detail = withTimeout(45_000) { provider.load(item.url) }

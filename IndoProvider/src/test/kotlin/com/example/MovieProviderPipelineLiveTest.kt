@@ -28,7 +28,7 @@ class MovieProviderPipelineLiveTest {
 
         val failures = mutableListOf<String>()
         listOf(
-            IndoxxiProvider(),
+            Film21Provider(),
             LayarKacaProvider(),
             NgefilmProvider(),
             DutamovieProvider(),
@@ -74,13 +74,13 @@ class MovieProviderPipelineLiveTest {
 
         val cases = listOf(
             DetailCase(
-                IndoxxiProvider(),
-                "https://filmbioskop21.lk21.in.net/nonton-film-avatar-fire-and-ash-lk21-2025/",
-                "Avatar: Fire and Ash"
+                Film21Provider(),
+                "https://154.203.167.77/dragon-2027/",
+                "Dragon"
             ),
             DetailCase(
                 LayarKacaProvider(),
-                "https://tv.nontonfilm.red/caught-in-the-net-2026/",
+                "https://tv12.lk21official.cc/caught-in-the-net-2026",
                 "Caught in the Net"
             ),
             DetailCase(
@@ -90,12 +90,12 @@ class MovieProviderPipelineLiveTest {
             ),
             DetailCase(
                 DutamovieProvider(),
-                "https://cowboysgab.com/bagong-tukso-2-2026/",
-                "Bagong Tukso 2"
+                "http://165.227.229.131/bury-the-devil-2026/",
+                "Bury the Devil"
             ),
             DetailCase(
                 KitanontonProvider(),
-                "https://kitanonton2.casa/nonton-hold-the-fort-2025-sub-indo/",
+                "https://kitanonton2.beer/nonton-hold-the-fort-2025-sub-indo/",
                 "Hold the Fort"
             ),
             DetailCase(
@@ -105,7 +105,7 @@ class MovieProviderPipelineLiveTest {
             ),
             DetailCase(
                 PusatfilmProvider(),
-                "https://v4.pusatfilm21info.com/royal-2025/",
+                "https://v5.pusatfilm21info.com/royal-2025/",
                 "Royal"
             ),
             DetailCase(

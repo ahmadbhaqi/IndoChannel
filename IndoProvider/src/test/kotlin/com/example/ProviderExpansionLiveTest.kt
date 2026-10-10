@@ -78,6 +78,7 @@ class ProviderExpansionLiveTest {
         assertTrue(posters.isNotEmpty(), "Pusatfilm returned no current catalog posters")
 
         val providerImageHosts = setOf(
+            "v5.pusatfilm21info.com",
             "v4.pusatfilm21info.com",
             "v3.pusatfilm21info.com",
             "cdn.pusatfilm21info.com"
@@ -111,6 +112,9 @@ class ProviderExpansionLiveTest {
 
     @Test
     fun `animasu current catalog resolves playback`() = live(AnimasuProvider())
+
+    @Test
+    fun `oploverz current catalog resolves playback`() = live(OploverzProvider())
 
     private fun live(provider: MainAPI) = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {

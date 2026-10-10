@@ -26,9 +26,10 @@ private const val MAX_DUTAMOVIE_INITIAL_PROBES = 2
 private const val MAX_DUTAMOVIE_DISCOVERY_TABS = 16
 private const val DUTAMOVIE_DISCOVERY_CONCURRENCY = 4
 
-class DutamovieProvider : MainAPI() {
-    override var mainUrl = "https://bdmoviesonline.com"
-    private val legacyHosts = setOf(
+open class DutamovieProvider : MainAPI() {
+    override var mainUrl = "http://165.227.229.131"
+    protected open val legacyHosts = setOf(
+        "bdmoviesonline.com",
         "restaurantesabadell.com",
         "austincomputerworks.org",
         "wavereview.com",
@@ -41,12 +42,12 @@ class DutamovieProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AsianDrama)
 
     override val mainPage = mainPageOf(
-        "box-office/page/%d/" to "Box Office",
-        "serial-tv/page/%d/" to "TV Series",
-        "action/page/%d/" to "Action",
-        "comedy/page/%d/" to "Comedy",
-        "drama/page/%d/" to "Drama",
-        "horror/page/%d/" to "Horror"
+        "page/%d/" to "Terbaru",
+        "tv/page/%d/" to "TV Series",
+        "genre/action/page/%d/" to "Action",
+        "genre/comedy/page/%d/" to "Comedy",
+        "genre/drama/page/%d/" to "Drama",
+        "genre/horror/page/%d/" to "Horror"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {

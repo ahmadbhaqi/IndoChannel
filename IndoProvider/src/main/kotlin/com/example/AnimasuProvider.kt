@@ -44,7 +44,7 @@ internal object AnimasuCatalogRouting {
 }
 
 class AnimasuProvider : MainAPI() {
-    override var mainUrl = "https://v2.animasu.work"
+    override var mainUrl = "https://animasu.love"
     override var name = "Animasu"
     override var lang = "id"
     override val hasMainPage = true
@@ -56,7 +56,8 @@ class AnimasuProvider : MainAPI() {
         "animasu.com",
         "v1.animasu.top",
         "animasu.top",
-        "animasu.cc"
+        "animasu.cc",
+        "v2.animasu.work"
     )
     private val safeHttp by lazy {
         ProviderHttpSafetyClient(NiceHttpProviderFetcher(app))

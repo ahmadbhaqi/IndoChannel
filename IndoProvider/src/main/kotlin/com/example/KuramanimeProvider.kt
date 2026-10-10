@@ -11,13 +11,15 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class KuramanimeProvider : MainAPI() {
-    override var mainUrl = "https://v19.kuramanime.ing"
+    override var mainUrl = "https://v20.kuramanime.ing"
     override var name = "Kuramanime"
     override var lang = "id"
     override val hasMainPage = true
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
     private val ownedHosts = setOf(
+        "v20.kuramanime.ing",
+        "m2.kuramanime.ing",
         "v19.kuramanime.ing",
         "v8.kuramanime.tel",
         "v9.kuramanime.tel",

@@ -160,8 +160,10 @@ class KuramanimeHydrationRegressionTest {
 
         val currentEpisode = System.getenv("KURAMANIME_LIVE_EPISODE_URL")
             ?.takeIf(String::isNotBlank)
-            ?: "https://v19.kuramanime.ing/anime/4912/nitian-xie-shen-nian-fan/episode/18"
+            ?: "https://v20.kuramanime.ing/anime/4912/nitian-xie-shen-nian-fan/episode/18"
         val ownedHosts = setOf(
+            "v20.kuramanime.ing",
+            "m2.kuramanime.ing",
             "v19.kuramanime.ing",
             "v17.kuramanime.ing",
             "v17.kuramanime.tel"

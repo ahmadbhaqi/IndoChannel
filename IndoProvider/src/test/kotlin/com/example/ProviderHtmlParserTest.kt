@@ -1116,7 +1116,7 @@ class ProviderHtmlParserTest {
         var playerFetches = 0
         val links = mutableListOf<ExtractorLink>()
         val session = LinkResolutionSession(
-            api = IndoxxiProvider(),
+            api = Film21Provider(),
             subtitleCallback = {},
             callback = links::add,
             pageFetcher = { url, _ ->
@@ -1125,7 +1125,7 @@ class ProviderHtmlParserTest {
                 """<script>window.player = {file: "$mediaUrl"};</script>"""
             },
             extractorLoader = { _, _, _, _ -> false },
-            inlineSourceParser = IndoxxiPlayerParser::mediaUrls
+            inlineSourceParser = Film21PlayerParser::mediaUrls
         )
 
         assertTrue(session.resolve(playerUrl, "https://provider.example/item"))
@@ -1717,7 +1717,7 @@ class ProviderHtmlParserTest {
         """.trimIndent()
         val links = mutableListOf<ExtractorLink>()
         val session = LinkResolutionSession(
-            api = IndoxxiProvider(),
+            api = Film21Provider(),
             subtitleCallback = {},
             callback = links::add,
             pageFetcher = { url, _ ->
@@ -1746,7 +1746,7 @@ class ProviderHtmlParserTest {
             eval(function(p,a,c,k,e,d){e=function(c){return(c<a?'':e(c/a))+String.fromCharCode(c%a+161)};return p}('$token0 $token1="//plyr.freeon.site/api/?signed=1";',95,2,'var|url'.split('|')))
         """.trimIndent()
         val session = LinkResolutionSession(
-            api = IndoxxiProvider(),
+            api = Film21Provider(),
             subtitleCallback = {},
             callback = {},
             pageFetcher = { url, _ ->

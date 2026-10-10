@@ -9,7 +9,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class OploverzProvider : MainAPI() {
-    override var mainUrl = "https://oploverz.org"
+    override var mainUrl = "https://oploverz.site"
     override var name = "Oploverz"
     override val hasMainPage = true
     override var lang = "id"
@@ -17,39 +17,30 @@ class OploverzProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
 
     override val mainPage = mainPageOf(
-        "ongoing/page/%d/" to "Ongoing",
-        "complete/page/%d/" to "Completed",
-        "movie/page/%d/" to "Movie"
+        "home" to "Terbaru"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val document = app.get("$mainUrl/${request.data.format(page)}").document
-        return newHomePageResponse(request.name, document.toAnimeResults())
+        if (page > 1) return newHomePageResponse(request.name, emptyList())
+        val document = app.get("$mainUrl/").document
+        val items = OploverzCurrentSiteParser.catalogItems(document, mainUrl, true)
+            .mapNotNull { it.toCurrentAnimeResult() }
+        return newHomePageResponse(request.name, items)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val json = app.post(
-            "$mainUrl/ajax/search_suggests.php",
-            data = mapOf("kw" to query),
-            referer = "$mainUrl/",
-            headers = mapOf(
-                "Accept" to "application/json,text/javascript,*/*;q=0.01",
-                "X-Requested-With" to "XMLHttpRequest"
-            )
-        ).text
-        return OploverzSearchParser.parse(json).mapNotNull { item ->
-            val type = if (item.title.contains("Movie", ignoreCase = true)) {
-                TvType.AnimeMovie
-            } else {
-                TvType.Anime
-            }
-            val title = item.title.cleanOploverzTitle()
-            val detailUrl = "$mainUrl/${item.slug}/"
-            if (SensitiveContentPolicy.isBlocked(title, detailUrl)) return@mapNotNull null
-            val poster = "$mainUrl/assets/covers/${item.image.replace(" ", "%20")}"
-            newAnimeSearchResponse(title, detailUrl, type) {
-                posterUrl = poster
-            }
+        if (query.isBlank()) return emptyList()
+        val document = app.get("$mainUrl/series").document
+        return OploverzCurrentSiteParser.catalogItems(document, mainUrl, false)
+            .filter { it.title.contains(query.trim(), ignoreCase = true) }
+            .mapNotNull { it.toCurrentAnimeResult() }
+    }
+
+    private fun OploverzCurrentCatalogItem.toCurrentAnimeResult(): AnimeSearchResponse? {
+        if (SensitiveContentPolicy.isBlocked(title, url)) return null
+        val type = if (url.contains("/movie/")) TvType.AnimeMovie else TvType.Anime
+        return newAnimeSearchResponse(title, url, type) {
+            posterUrl = poster
         }
     }
 
@@ -87,6 +78,9 @@ class OploverzProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         if (SensitiveContentPolicy.isBlocked(null, url)) return null
+        if (url.startsWith("$mainUrl/series/") || url.startsWith("$mainUrl/movie/")) {
+            return loadCurrentSeries(url)
+        }
         val document = app.get(url).document
         val rawTitle = document.selectFirst("h1.entry-title, meta[property=og:title]")
             ?.let { if (it.tagName() == "meta") it.attr("content") else it.text() }
@@ -182,6 +176,45 @@ class OploverzProvider : MainAPI() {
         }
     }
 
+    private suspend fun loadCurrentSeries(url: String): LoadResponse? {
+        val fetch = app.get(url)
+        val document = fetch.document
+        val title = document.select("meta[property=og:title]").lastOrNull()
+            ?.attr("content")?.substringBefore('|')?.trim()
+            ?.takeIf { it.isNotBlank() } ?: return null
+        val tags = OploverzCurrentSiteParser.genres(fetch.text)
+        if (SensitiveContentPolicy.isBlocked(title, url, categories = tags)) return null
+        val poster = document.select("meta[property=og:image]").lastOrNull()
+            ?.attr("content")?.takeIf { it.isNotBlank() }
+        val description = document.select("meta[property=og:description]").lastOrNull()
+            ?.attr("content")?.takeIf { it.isNotBlank() }
+        val isMovie = url.contains("/movie/")
+        val episodeEntries = if (isMovie) listOf(url to 1) else OploverzCurrentSiteParser.episodeLinks(document, url)
+        val episodes = episodeEntries.map { (episodeUrl, number) ->
+            newEpisode(
+                AnimePlaybackDataCodec.encode(
+                    url = episodeUrl,
+                    title = title,
+                    categories = tags,
+                    detailUrl = url
+                ),
+                initializer = {
+                    name = if (isMovie) title else number?.let { "Episode $it" } ?: title
+                    episode = number
+                    posterUrl = poster
+                },
+                fix = false
+            )
+        }
+        if (episodes.isEmpty()) return null
+        return newAnimeLoadResponse(title, url, if (isMovie) TvType.AnimeMovie else TvType.Anime) {
+            posterUrl = poster
+            plot = description
+            this.tags = tags
+            addEpisodes(DubStatus.Subbed, episodes)
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -200,11 +233,11 @@ class OploverzProvider : MainAPI() {
             return false
         }
         val document = fetch.document
-        val pageTitle = document.selectFirst("h1.entry-title, meta[property=og:title]")
+        val pageTitle = document.select("meta[property=og:title]").lastOrNull()
             ?.let { if (it.tagName() == "meta") it.attr("content") else it.text() }
         val pageTags = document
             .select(".infopost a[href*='/genres/'], .infopost a[href*='/genre/']")
-            .map { it.text().trim() }
+            .map { it.text().trim() } + OploverzCurrentSiteParser.genres(fetch.text)
         if (SensitiveContentPolicy.isBlocked(pageTitle, fetch.url, categories = pageTags)) return false
         val resolver = LinkResolutionSession(
             this,
@@ -221,6 +254,18 @@ class OploverzProvider : MainAPI() {
             }
             resolver.resolve(candidate, pageReferer)
         }
+
+        val currentStreams = if (pageUrl.contains("/movie/")) {
+            OploverzCurrentSiteParser.movieStreams(fetch.text)
+        } else {
+            OploverzCurrentSiteParser.episodeStreams(fetch.text)
+        }
+        currentStreams.forEach { raw ->
+            if (!resolver.loaded && resolver.canContinue) {
+                resolveCandidate(raw, fetch.url)
+            }
+        }
+        if (resolver.loaded) return true
 
         ProviderHtmlParser.mediaSources(document, "iframe#istream, iframe").forEach { raw ->
             resolveCandidate(raw, fetch.url)
@@ -281,5 +326,87 @@ internal object OploverzSearchParser {
                 OploverzSearchItem(slug, image, title)
             }
             .orEmpty()
+    }
+}
+
+internal data class OploverzCurrentCatalogItem(
+    val title: String,
+    val url: String,
+    val poster: String?
+)
+
+internal object OploverzCurrentSiteParser {
+    fun movieStreams(html: String): List<String> {
+        val streams = Regex(
+            """type:\s*"data"\s*,\s*data:\s*\{\s*series:\s*\{.*?episodes:\s*\[.*?streamUrl:\s*\[(.*?)]""",
+            RegexOption.DOT_MATCHES_ALL
+        ).find(html)?.groupValues?.getOrNull(1) ?: return emptyList()
+        return streamUrls(streams)
+    }
+
+    fun genres(html: String): List<String> {
+        val values = Regex(
+            """type:\s*"data"\s*,\s*data:\s*\{\s*(?:series|episode):\s*\{.*?genres:\s*\[(.*?)]""",
+            RegexOption.DOT_MATCHES_ALL
+        ).find(html)?.groupValues?.getOrNull(1) ?: return emptyList()
+        return Regex("""name:\s*"([^\"]+)"""").findAll(values)
+            .map { it.groupValues[1] }.distinct().toList()
+    }
+
+    fun catalogItems(
+        document: Document,
+        mainUrl: String,
+        requirePoster: Boolean
+    ): List<OploverzCurrentCatalogItem> {
+        return document.select("a[href*=/series/], a[href*=/movie/]").mapNotNull { link ->
+            val raw = link.attr("href").substringBefore("/episode/")
+            val url = ProviderHtmlParser.normalizeProviderPageUrl(raw, mainUrl)
+                ?: return@mapNotNull null
+            val path = runCatching { java.net.URI(url).path }.getOrNull().orEmpty()
+            if (!Regex("""^/(?:series|movie)/[^/]+/?$""").matches(path)) return@mapNotNull null
+            val poster = ProviderHtmlParser.imageSource(link.selectFirst("img"))
+            if (requirePoster && poster.isNullOrBlank()) return@mapNotNull null
+            val title = link.selectFirst("img[alt]")?.attr("alt")
+                ?.takeIf { it.isNotBlank() }
+                ?: link.text().trim().takeIf { it.isNotBlank() }
+                ?: return@mapNotNull null
+            OploverzCurrentCatalogItem(title, url, poster)
+        }.distinctBy { it.url }
+    }
+
+    fun episodeLinks(document: Document, seriesUrl: String): List<Pair<String, Int?>> {
+        val prefix = seriesUrl.trimEnd('/') + "/episode/"
+        return document.select("a[href*=episode]").mapNotNull { link ->
+            val url = ProviderHtmlParser.absoluteUrl(link.attr("href"), seriesUrl)
+                ?: return@mapNotNull null
+            if (!url.startsWith(prefix)) return@mapNotNull null
+            val number = url.removePrefix(prefix).substringBefore('/').toIntOrNull()
+            url to number
+        }.distinctBy { it.first }
+    }
+
+    fun episodeStreams(html: String): List<String> {
+        val streams = Regex(
+            """type:\s*"data"\s*,\s*data:\s*\{\s*episode:\s*\{.*?streamUrl:\s*\[(.*?)]""",
+            RegexOption.DOT_MATCHES_ALL
+        ).find(html)?.groupValues?.getOrNull(1) ?: return emptyList()
+        return streamUrls(streams)
+    }
+
+    private fun streamUrls(streams: String): List<String> {
+        return Regex("""source:\s*"([^\"]*)"\s*,\s*url:\s*"([^\"]+)"""")
+            .findAll(streams)
+            .mapNotNull { match ->
+                val source = match.groupValues[1]
+                val value = match.groupValues[2].replace("\\u0026", "&").replace("\\/", "/")
+                when {
+                    source.equals("okru", true) && value.matches(Regex("""\d{1,20}""")) ->
+                        "https://ok.ru/videoembed/$value"
+                    isSafeRemoteHttpUrl(value) -> value
+                    else -> null
+                }
+            }
+            .distinct()
+            .toList()
     }
 }

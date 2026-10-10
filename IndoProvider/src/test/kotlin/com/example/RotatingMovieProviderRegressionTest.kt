@@ -182,7 +182,7 @@ class RotatingMovieProviderRegressionTest {
     fun `ngefilm and pusatfilm keep episode links when only the slug has season and episode`() {
         val providers = listOf(
             Triple("NgefilmProvider.kt", "https://new39.ngefilm.site", NgefilmProvider()),
-            Triple("PusatfilmProvider.kt", "https://v4.pusatfilm21info.com", PusatfilmProvider())
+            Triple("PusatfilmProvider.kt", "https://v5.pusatfilm21info.com", PusatfilmProvider())
         )
 
         providers.forEach { (fileName, baseUrl, provider) ->

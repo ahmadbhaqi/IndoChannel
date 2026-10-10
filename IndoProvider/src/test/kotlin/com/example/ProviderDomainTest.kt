@@ -25,13 +25,49 @@ class ProviderDomainTest {
     }
 
     @Test
+    fun `pencurimovie accepts its current search redirect and rejects lookalike hosts`() {
+        val provider = PencurimovieProvider()
+        val normalizer = provider.javaClass.getDeclaredMethod("networkProviderUrl", String::class.java)
+        normalizer.isAccessible = true
+        val currentUrl = "https://ww44.pencurimovie.baby/search/Rumah+Sewa+RM50/?page=2"
+        assertEquals(currentUrl, normalizer.invoke(provider, currentUrl))
+        assertEquals(null, normalizer.invoke(provider, "https://ww44.pencurimovie.baby.attacker.example/search/title"))
+        assertEquals(null, normalizer.invoke(provider, "https://unrelated.example/search/title"))
+    }
+
+    @Test
+    fun `reported providers use the current site addresses`() {
+        val expectedDomains = mapOf(
+            "AnimasuProvider.kt" to "https://animasu.love",
+            "AnimeindoProvider.kt" to "https://anime-indo.lol",
+            "AnoboyProvider.kt" to "https://anoboy.quest",
+            "DutamovieProvider.kt" to "http://165.227.229.131",
+            "DutafilmProvider.kt" to "http://178.128.161.40",
+            "KitanontonProvider.kt" to "https://kitanonton2.beer",
+            "KuramanimeProvider.kt" to "https://v20.kuramanime.ing",
+            "LayarKacaProvider.kt" to "https://tv12.lk21official.cc",
+            "NomatProvider.kt" to "https://nomat.world",
+            "OploverzProvider.kt" to "https://oploverz.site",
+            "OtakudesuProvider.kt" to "https://otakudesu.blog/",
+            "PusatfilmProvider.kt" to "https://v5.pusatfilm21info.com",
+            "SamehadakuProvider.kt" to "https://v2.samehadaku.how",
+            "Film21Provider.kt" to "https://154.203.167.77"
+        )
+        expectedDomains.forEach { (fileName, domain) ->
+            assertTrue(source(fileName).contains(domain), "$fileName should use $domain")
+        }
+        assertFalse(File(sourceRoot, "IndoxxiProvider.kt").exists())
+        assertFalse(source("IndoPlugin.kt").contains("registerMainAPI(IndoxxiProvider())"))
+    }
+
+    @Test
     fun `new movie providers use requested domains`() {
         val expectedDomains = mapOf(
-            "LayarKacaProvider.kt" to """override var mainUrl = "https://tv.nontonfilm.red"""",
+            "LayarKacaProvider.kt" to """override var mainUrl = "https://tv12.lk21official.cc"""",
             "NgefilmProvider.kt" to """override var mainUrl = "https://new39.ngefilm.site"""",
-            "PusatfilmProvider.kt" to """override var mainUrl = "https://v4.pusatfilm21info.com"""",
-            "DutamovieProvider.kt" to """override var mainUrl = "https://bdmoviesonline.com"""",
-            "IndoxxiProvider.kt" to """override var mainUrl = "https://filmbioskop21.lk21.in.net"""",
+            "PusatfilmProvider.kt" to """override var mainUrl = "https://v5.pusatfilm21info.com"""",
+            "DutamovieProvider.kt" to """override var mainUrl = "http://165.227.229.131"""",
+            "Film21Provider.kt" to """override var mainUrl = "https://154.203.167.77"""",
             "FilmapikProvider.kt" to """override var mainUrl = "https://filmapik.college"""",
             "RebahinProvider.kt" to """override var mainUrl = "https://rebahinxxi3.lol""""
         )
@@ -45,7 +81,7 @@ class ProviderDomainTest {
     fun `new anime providers use requested domains`() {
         val expectedDomains = mapOf(
             "AnimeindoProvider.kt" to """override var mainUrl = "https://anime-indo.lol"""",
-            "OploverzProvider.kt" to """override var mainUrl = "https://oploverz.org"""",
+            "OploverzProvider.kt" to """override var mainUrl = "https://oploverz.site"""",
             "ZoronimeProvider.kt" to """override var mainUrl = "https://zoronime.live""""
         )
 
@@ -58,7 +94,8 @@ class ProviderDomainTest {
     fun `plugin registers new providers`() {
         val plugin = source("IndoPlugin.kt")
         val expectedRegistrations = listOf(
-            "registerMainAPI(IndoxxiProvider())",
+            "registerMainAPI(Film21Provider())",
+            "registerMainAPI(DutafilmProvider())",
             "registerMainAPI(FilmapikProvider())",
             "registerMainAPI(IdlixProvider())",
             "registerMainAPI(PusatfilmProvider())",
@@ -108,7 +145,7 @@ class ProviderDomainTest {
         val plugin = source("IndoPlugin.kt")
         val expected = listOf(
             "LayarKacaProvider", "NgefilmProvider", "DutamovieProvider",
-            "KitanontonProvider", "IndoxxiProvider", "FilmapikProvider",
+            "KitanontonProvider", "Film21Provider", "DutafilmProvider", "FilmapikProvider",
             "IdlixProvider", "PusatfilmProvider", "KeBioskopProvider",
             "OtakudesuProvider", "SamehadakuProvider", "AnoboyProvider",
             "KuronimeProvider", "AnimeindoProvider", "OploverzProvider", "ZoronimeProvider"
@@ -128,7 +165,7 @@ class ProviderDomainTest {
 
     @Test
     fun `dutamovie uses the current official domain`() {
-        assertEquals("https://bdmoviesonline.com", DutamovieProvider().mainUrl)
+        assertEquals("http://165.227.229.131", DutamovieProvider().mainUrl)
     }
 
     @Test
@@ -136,15 +173,15 @@ class ProviderDomainTest {
         val provider = DutamovieProvider()
         val cachedUrls = mapOf(
             "https://austincomputerworks.org/lunok-2026/?server=2#player" to
-                "https://bdmoviesonline.com/lunok-2026/?server=2#player",
+                "http://165.227.229.131/lunok-2026/?server=2#player",
             "https://wavereview.com/tv/series/episode-7/?quality=720p#watch" to
-                "https://bdmoviesonline.com/tv/series/episode-7/?quality=720p#watch",
+                "http://165.227.229.131/tv/series/episode-7/?quality=720p#watch",
             "https://restaurantesabadell.com/legacy-title/?player=2" to
-                "https://bdmoviesonline.com/legacy-title/?player=2",
+                "http://165.227.229.131/legacy-title/?player=2",
             "https://cowboysgab.com/movie/legacy-title/?player=2" to
-                "https://bdmoviesonline.com/movie/legacy-title/?player=2",
+                "http://165.227.229.131/movie/legacy-title/?player=2",
             "https://ohionewsnow.com/movie/current-title/?player=2" to
-                "https://bdmoviesonline.com/movie/current-title/?player=2"
+                "http://165.227.229.131/movie/current-title/?player=2"
         )
 
         cachedUrls.forEach { (cached, expected) ->
@@ -154,8 +191,8 @@ class ProviderDomainTest {
     }
 
     @Test
-    fun `kitanonton uses the current casa domain`() {
-        assertEquals("https://kitanonton2.casa", KitanontonProvider().mainUrl)
+    fun `kitanonton uses the current beer domain`() {
+        assertEquals("https://kitanonton2.beer", KitanontonProvider().mainUrl)
     }
 
     @Test
@@ -184,7 +221,7 @@ class ProviderDomainTest {
     fun `kitanonton rehomes cached surf urls without trusting foreign hosts`() {
         val provider = KitanontonProvider()
         assertEquals(
-            "https://kitanonton2.casa/series/example/watch?episode=7#server-2",
+            "https://kitanonton2.beer/series/example/watch?episode=7#server-2",
             normalizePageUrl(
                 provider,
                 "https://kitanonton2.surf/series/example/watch?episode=7#server-2"
@@ -226,8 +263,9 @@ class ProviderDomainTest {
 
         assertTrue(ngefilm.contains("\"year/2026/page/%d/\" to \"Terbaru\""))
         assertFalse(ngefilm.contains("private var directUrl"))
-        assertTrue(dutamovie.contains("\"box-office/page/%d/\" to \"Box Office\""))
-        assertTrue(dutamovie.contains("\"serial-tv/page/%d/\" to \"TV Series\""))
+        assertTrue(dutamovie.contains("\"page/%d/\" to \"Terbaru\""))
+        assertTrue(dutamovie.contains("\"tv/page/%d/\" to \"TV Series\""))
+        assertTrue(dutamovie.contains("\"genre/action/page/%d/\" to \"Action\""))
         assertFalse(dutamovie.contains("category/box-office"))
         assertFalse(dutamovie.contains("category/serial-tv"))
         assertFalse(dutamovie.contains("private var directUrl"))
@@ -274,7 +312,7 @@ class ProviderDomainTest {
         val independentProviders = listOf(
             "AnimeindoProvider.kt",
             "IndofilmProvider.kt",
-            "IndoxxiProvider.kt",
+            "Film21Provider.kt",
             "LayarKacaProvider.kt"
         )
 

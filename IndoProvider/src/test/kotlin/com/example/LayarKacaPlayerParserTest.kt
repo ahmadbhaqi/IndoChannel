@@ -15,6 +15,30 @@ import org.jsoup.Jsoup
 
 class LayarKacaPlayerParserTest {
     @Test
+    fun `current lk21 player menu exposes every native mirror`() {
+        val pageUrl = "https://tv12.lk21official.cc/current-2026"
+        val document = Jsoup.parse(
+            """
+            <iframe id="main-player" src="https://videonode.de/iframe3/p2p/current?v=1"></iframe>
+            <ul id="player-list">
+              <li><a data-url="https://videonode.de/iframe3/p2p/current">P2P</a></li>
+              <li><a data-url="https://videonode.de/iframe3/cast/current">CAST</a></li>
+            </ul>
+            <select id="player-select"><option value="https://videonode.de/iframe3/hydrax/current">HYDRAX</option></select>
+            """.trimIndent(),
+            pageUrl
+        )
+        assertEquals(
+            listOf(
+                "https://videonode.de/iframe3/p2p/current?v=1",
+                "https://videonode.de/iframe3/cast/current",
+                "https://videonode.de/iframe3/hydrax/current"
+            ),
+            LayarKacaPlayerParser.pageMediaUrls(document, pageUrl)
+        )
+    }
+
+    @Test
     fun `episode navigation excludes self and View All Episodes links`() {
         val detailUrl = "https://tv.nontonfilm.red/tv/example/"
 

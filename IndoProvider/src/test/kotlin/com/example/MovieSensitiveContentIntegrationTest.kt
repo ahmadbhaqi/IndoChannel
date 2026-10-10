@@ -33,8 +33,9 @@ class MovieSensitiveContentIntegrationTest {
                 "LayarKacaProvider",
                 "NgefilmProvider",
                 "DutamovieProvider",
+                "DutafilmProvider",
                 "KitanontonProvider",
-                "IndoxxiProvider",
+                "Film21Provider",
                 "FilmapikProvider",
                 "IdlixProvider",
                 "PusatfilmProvider",
@@ -46,8 +47,12 @@ class MovieSensitiveContentIntegrationTest {
         registered.forEach { providerName ->
             val fileName = "$providerName.kt"
             val source = File(sourceRoot, fileName).readText()
+            val policySource = if (providerName == "DutafilmProvider") {
+                assertTrue(source.contains("DutamovieProvider()"))
+                File(sourceRoot, "DutamovieProvider.kt").readText()
+            } else source
             assertTrue(
-                source.contains("SensitiveContentPolicy.isBlocked"),
+                policySource.contains("SensitiveContentPolicy.isBlocked"),
                 "$fileName must use the shared sensitive-content policy"
             )
         }

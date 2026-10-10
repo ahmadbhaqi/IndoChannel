@@ -37,14 +37,14 @@ class CloudstreamTesterParityLiveTest {
             return@runBlocking
         }
 
-        val providerHost = "v4.pusatfilm21info.com"
+        val providerHost = "v5.pusatfilm21info.com"
         val discoveryHost = "pusatfilm.id"
         val requestUrl = "https://$providerHost/film-terbaru/page/1/"
         val normalizer = ProviderUrlNormalizer { candidate ->
             ProviderHtmlParser.preserveProviderPageUrl(
                 candidate,
                 "https://$providerHost",
-                setOf("v3.pusatfilm21info.com")
+                setOf("v4.pusatfilm21info.com", "v3.pusatfilm21info.com")
             )
         }
         val brokenPrimaryAddresses = SystemProviderDnsResolver.resolve(

@@ -14,7 +14,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class NomatProvider : MainAPI() {
-    override var mainUrl = "https://nomat.shop"
+    override var mainUrl = "https://nomat.world"
     override var name = "Nomat"
     override var lang = "id"
     override val hasMainPage = true
@@ -304,7 +304,7 @@ internal data class NomatFallbackRequest(
 
 internal object NomatParser {
     private const val MAX_SERVER_VALUE_SIZE = 16_384
-    private val providerHosts = setOf("nomat.site", "nomat.store", "nomat.asia")
+    private val providerHosts = setOf("nomat.site", "nomat.store", "nomat.asia", "nomat.shop")
     private val playbackHosts = setOf("nontonhemat.link")
     private val yearRegex = Regex("""\b(?:19|20)\d{2}\b""")
     private val codedCatalogTitleRegex = Regex(

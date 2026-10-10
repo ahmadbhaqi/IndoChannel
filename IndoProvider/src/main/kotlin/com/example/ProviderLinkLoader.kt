@@ -202,6 +202,7 @@ internal class LinkResolutionSession(
     private val justPlayApiFetcher: JustPlayApiFetcher = ::fetchBoundedJustPlayApi,
     private val howNetworkApiFetcher: HowNetworkApiFetcher = ::fetchBoundedHowNetworkApi,
     private val firestreamApiFetcher: FirestreamApiFetcher = ::fetchBoundedFirestreamApi,
+    private val vidhideApiFetcher: VidhideApiFetcher = ::fetchBoundedVidhideApi,
     private val extractorLoader: CloudstreamExtractorLoader = ::loadExtractorWithResult,
     private val juicyCodesPlaybackParser: JuicyCodesPlaybackParser = { html ->
         JuicyCodesPlayerParser.playback(html)
@@ -515,6 +516,58 @@ internal class LinkResolutionSession(
                 return
             }
 
+            if (OkruPlayerParser.supports(url)) {
+                try {
+                    withTimeoutOrNull(genericExtractorBudgetMs(candidateDeadlineNanos)) {
+                        val html = pageFetcher(url, referer)
+                        cachedHtml = html
+                        for (source in OkruPlayerParser.sources(html, url)) {
+                            emitVerified(directLinkFactory(
+                                api.name, "${api.name} OK.ru", source.url, url,
+                                source.quality, source.type,
+                                mapOf("Referer" to url, "Origin" to "https://ok.ru")
+                            ))
+                            if (loaded) return@withTimeoutOrNull
+                        }
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    if (callbackFailure === error) throw error
+                    // Keep the normal extractor available when native metadata or probes fail.
+                }
+                if (loaded) return
+            }
+            if (VidhidePlayerParser.supports(host)) {
+                try {
+                    val native = withTimeoutOrNull(genericExtractorBudgetMs(candidateDeadlineNanos)) {
+                        val html = pageFetcher(url, referer)
+                        cachedHtml = html
+                        val request = VidhidePlayerParser.resolveRequest(html, url)
+                            ?: return@withTimeoutOrNull null
+                        request to vidhideApiFetcher(request)
+                    }
+                    if (native != null) {
+                        for (source in VidhidePlayerParser.sources(native.second, native.first.password)) {
+                            emitDirect(
+                                source.url,
+                                url,
+                                if (source.mimeType.equals("hls", true) || source.mimeType.contains("mpegurl", true)) {
+                                    ExtractorLinkType.M3U8
+                                } else ExtractorLinkType.VIDEO,
+                                includeOrigin = true
+                            )
+                            if (loaded) return
+                        }
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    if (callbackFailure === error) throw error
+                    // A changed bootstrap or temporary API failure leaves the generic extractor available.
+                }
+                if (loaded) return
+            }
             if (FirestreamPlayerParser.supports(host)) {
                 val beforeAdapter = emittedLinks.size
                 repeat(FIRESTREAM_RESOLVE_ATTEMPTS) {
@@ -1249,6 +1302,18 @@ private suspend fun fetchBoundedHowNetworkApi(request: HowNetworkApiRequest): St
     return readBoundedBody(response.body, MAX_HOWNETWORK_API_RESPONSE_BYTES)
 }
 
+private suspend fun fetchBoundedVidhideApi(request: VidhideResolveRequest): String {
+    val response = app.post(
+        request.apiUrl,
+        requestBody = request.body.toRequestBody("text/plain".toMediaType()),
+        referer = request.playerUrl,
+        headers = mapOf("Origin" to URI(request.playerUrl).let {
+            URI(it.scheme.lowercase(), null, it.host, it.port, null, null, null).toString()
+        }),
+        timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
+    )
+    return readBoundedBody(response.body, 512_000)
+}
 private suspend fun fetchBoundedFirestreamApi(request: FirestreamResolveRequest): String {
     val response = app.post(
         request.apiUrl,

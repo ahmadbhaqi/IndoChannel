@@ -28,6 +28,8 @@ class MovieProviderCatalogPlaybackLiveTest {
         verifyCases(
             listOf(
                 ProviderCase(DutamovieProvider()),
+                ProviderCase(DutafilmProvider()),
+                ProviderCase(Film21Provider()),
                 ProviderCase(FilmapikProvider()),
                 ProviderCase(LayarKacaProvider()),
                 ProviderCase(NgefilmProvider()),
@@ -47,6 +49,7 @@ class MovieProviderCatalogPlaybackLiveTest {
         verifyCases(
             listOf(
                 ProviderCase(DutamovieProvider(), categoryName = "TV Series"),
+                ProviderCase(DutafilmProvider(), categoryName = "TV Series"),
                 ProviderCase(FilmapikProvider(), categoryName = "K-Drama"),
                 ProviderCase(KitanontonProvider(), categoryName = "Series"),
                 ProviderCase(NgefilmProvider(), categoryName = "TV Series"),
@@ -89,7 +92,7 @@ class MovieProviderCatalogPlaybackLiveTest {
     }
 
     @Test
-    fun `indoxxi resolves current Indonesia catalog samples`() = runBlocking {
+    fun `film21 resolves current Indonesia catalog samples`() = runBlocking {
         if (System.getenv("RUN_LIVE_PROVIDER_TESTS") != "1") {
             org.junit.Assume.assumeTrue(false)
             return@runBlocking
@@ -97,7 +100,7 @@ class MovieProviderCatalogPlaybackLiveTest {
 
         verifyCurrentSamples(
             ProviderCase(
-                provider = IndoxxiProvider(),
+                provider = Film21Provider(),
                 categoryName = "Indonesia",
                 sampleSize = 5
             )

@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -36,8 +37,8 @@ internal suspend fun resolvePusatfilmStrategies(
 }
 
 class PusatfilmProvider : MainAPI() {
-    override var mainUrl = "https://v4.pusatfilm21info.com"
-    private val legacyHosts = setOf("v3.pusatfilm21info.com")
+    override var mainUrl = "https://v5.pusatfilm21info.com"
+    private val legacyHosts = setOf("v4.pusatfilm21info.com", "v3.pusatfilm21info.com")
     override var name = "Pusatfilm"
     override val hasMainPage = true
     override var lang = "id"
@@ -48,6 +49,7 @@ class PusatfilmProvider : MainAPI() {
             resolver = ProviderDnsAliasFallbackResolver(
                 delegate = SystemProviderDnsResolver,
                 aliases = mapOf(
+                    "v5.pusatfilm21info.com" to "pusatfilm.id",
                     "v4.pusatfilm21info.com" to "pusatfilm.id",
                     "v3.pusatfilm21info.com" to "pusatfilm.id"
                 )
@@ -251,25 +253,41 @@ class PusatfilmProvider : MainAPI() {
     private suspend fun getProviderPage(
         url: String,
         timeoutSeconds: Long = PROVIDER_HTTP_TIMEOUT_SECONDS
-    ): ProviderHttpResult? = try {
+    ): ProviderHttpResult? = fetchPusatfilmProviderPageWithRetry {
         siteHttp.get(
             url = url,
             normalizer = ProviderUrlNormalizer(::networkPageUrl),
-            timeoutSeconds = timeoutSeconds
+            timeoutSeconds = timeoutSeconds.coerceAtMost(15L)
         )
-    } catch (error: CancellationException) {
-        throw error
-    } catch (_: Exception) {
-        null
     }
-
     private fun networkPageUrl(raw: String?): String? {
         return ProviderHtmlParser.preserveProviderPageUrl(raw, mainUrl, legacyHosts)
     }
 }
 
+internal suspend fun fetchPusatfilmProviderPageWithRetry(
+    attemptTimeoutMs: Long = 15_000L,
+    fetch: suspend () -> ProviderHttpResult?
+): ProviderHttpResult? {
+    repeat(2) {
+        val response = try {
+            withTimeoutOrNull(attemptTimeoutMs.coerceIn(1L, 15_000L)) { fetch() }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            null
+        }
+        if (response != null) {
+            if (response.code in setOf(408, 425, 429) || response.code >= 500) return@repeat
+            if (response.code !in 200..299) return response
+            if (response.body.isNotBlank() && !ProviderHtmlParser.isNonContentPage(response.body)) return response
+        }
+    }
+    return null
+}
 internal object PusatfilmPosterUrl {
     private val providerImageHosts = setOf(
+        "v5.pusatfilm21info.com",
         "v4.pusatfilm21info.com",
         "v3.pusatfilm21info.com",
         "cdn.pusatfilm21info.com"

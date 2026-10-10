@@ -21,7 +21,8 @@ IndoChannel adalah repositori ekstensi komunitas untuk CloudStream yang menghadi
           <tr><td>Ngefilm</td><td>Animeindo</td></tr>
           <tr><td>Dutamovie</td><td>Oploverz</td></tr>
           <tr><td>KitaNonton</td><td>Zoronime</td></tr>
-          <tr><td>IndoXXI</td><td></td></tr>
+          <tr><td>Film21</td><td></td></tr>
+          <tr><td>Dutafilm</td><td></td></tr>
           <tr><td>Filmapik</td><td></td></tr>
           <tr><td>IDLIX</td><td></td></tr>
           <tr><td>Pusatfilm</td><td></td></tr>
@@ -30,9 +31,9 @@ IndoChannel adalah repositori ekstensi komunitas untuk CloudStream yang menghadi
       </table>
     </td>
     <td valign="top">
-      <img src="assets/provider-tests-passed.jpg" alt="Hasil tes provider CloudStream: 24 dari 24 berhasil" width="260">
+      <img src="assets/provider-tests-passed.jpg" alt="Cuplikan pengujian provider CloudStream sebelumnya: 24 dari 24 berhasil" width="260">
       <br>
-      <sub>Hasil tes provider: 24/24 berhasil</sub>
+      <sub>Cuplikan pengujian sebelumnya: 24/24 berhasil</sub>
     </td>
   </tr>
 </table>

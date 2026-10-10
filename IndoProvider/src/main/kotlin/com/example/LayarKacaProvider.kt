@@ -12,14 +12,16 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
-private val LAYARKACA_LEGACY_HOSTS = setOf("parachutedrone.com", "tv10.lk21official.cc")
+private val LAYARKACA_LEGACY_HOSTS = setOf(
+    "parachutedrone.com", "tv10.lk21official.cc", "tv.nontonfilm.red"
+)
 
 class LayarKacaProvider(
     private val fallbackProviderFactory: () -> List<MainAPI> = {
         listOf(PusatfilmProvider(), FilmapikProvider(), MovieboxProvider())
     }
 ) : MainAPI() {
-    override var mainUrl = "https://tv.nontonfilm.red"
+    override var mainUrl = "https://tv12.lk21official.cc"
     override var name = "LayarKaca"
     override val hasMainPage = true
     override var lang = "id"
@@ -27,7 +29,6 @@ class LayarKacaProvider(
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.AsianDrama)
 
     override val mainPage = mainPageOf(
-        "$mainUrl/genre/box-office/page/" to "Box Office",
         "$mainUrl/genre/action/page/" to "Action",
         "$mainUrl/genre/horror/page/" to "Horror",
         "$mainUrl/genre/drama-korea/page/" to "Drama Korea",
@@ -40,7 +41,7 @@ class LayarKacaProvider(
                 request.data + page,
                 timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
             ).document
-                .select("article.item-infinite, article.item, div.ml-item")
+                .select("article.item-infinite, article.item, article:has(h3.poster-title), div.ml-item")
                 .mapNotNull { it.toSearchResult() }
         } catch (error: CancellationException) {
             throw error
@@ -77,10 +78,10 @@ class LayarKacaProvider(
         val encodedQuery = URLEncoder.encode(query, Charsets.UTF_8.name())
         val primaryResults = try {
             app.get(
-                "$mainUrl/?s=$encodedQuery",
+                "$mainUrl/search?s=$encodedQuery",
                 timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
             ).document
-                .select("article.item-infinite, article.item, div.ml-item")
+                .select("article.item-infinite, article.item, article:has(h3.poster-title), div.ml-item")
                 .mapNotNull { it.toSearchResult() }
         } catch (error: CancellationException) {
             throw error
@@ -103,12 +104,15 @@ class LayarKacaProvider(
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val anchor = ProviderHtmlParser.firstTitledLink(this) ?: return null
-        val title = MovieMetadataParser.title(anchor.text()) ?: return null
+        val anchor = selectFirst("figure a[href]:has(h3.poster-title)")
+            ?: ProviderHtmlParser.firstTitledLink(this) ?: return null
+        val title = MovieMetadataParser.title(
+            selectFirst("h3.poster-title")?.text() ?: anchor.text()
+        ) ?: return null
         val href = providerUrl(anchor.attr("href")) ?: return null
         if (SensitiveContentPolicy.isBlockedCatalogCard(this, title, href)) return null
         val poster = fixUrlNull(ProviderHtmlParser.firstImageSource(this))
-        val quality = selectFirst("div.gmr-quality-item, div.gmr-qual")?.text()?.trim()
+        val quality = selectFirst("div.gmr-quality-item, div.gmr-qual, span[class*=label-]")?.text()?.trim()
         val isSeries = href.contains("/tv/", ignoreCase = true) ||
             selectFirst("div.gmr-numbeps, div.last-episode") != null
 
@@ -154,20 +158,24 @@ class LayarKacaProvider(
         val canonicalUrl = providerUrl(fetch.url)
             ?: return loadFallbackDetail(fallbackRequests)
         val title = MovieMetadataParser.title(
-            document.selectFirst("h1.entry-title, h3[itemprop=name]")?.text()
+            document.selectFirst("h1.entry-title, h3[itemprop=name], h1[itemprop=name], h1")?.text()
         ) ?: return loadFallbackDetail(fallbackRequests)
         val poster = fixUrlNull(
-            ProviderHtmlParser.imageSource(
-                document.selectFirst("img.thumbnail, figure.pull-left > img, img.img-thumbnail")
-            )
+            document.selectFirst("meta[property=og:image]")?.attr("content")
+                ?: ProviderHtmlParser.imageSource(
+                    document.selectFirst("img.thumbnail, figure.pull-left > img, img.img-thumbnail, img[itemprop=image]")
+                )
         )
-        val description = MovieMetadataParser.synopsis(document)
+        val description = document.selectFirst(".synopsis")?.text()?.takeIf { it.isNotBlank() }
+            ?: MovieMetadataParser.synopsis(document)
         val year = document.select("a[href*=/year/], span.year")
             .firstNotNullOfOrNull { Regex("(?:19|20)\\d{2}").find(it.text())?.value?.toIntOrNull() }
-        val tags = document.select("div.gmr-moviedata a[href*=/genre/], span.jptag a")
+            ?: Regex("(?:19|20)\\d{2}").find(document.selectFirst("h1")?.text().orEmpty())?.value?.toIntOrNull()
+        val tags = document.select("div.gmr-moviedata a[href*=/genre/], span.jptag a, .tag-list a[href*=/genre/]")
             .map { it.text().trim() }
             .filter { it.isNotBlank() }
-        val actors = document.select("div.gmr-moviedata span[itemprop=actors] a").map { it.text().trim() }
+        val actors = document.select("div.gmr-moviedata span[itemprop=actors] a, .detail a[href*=/artist/]")
+            .map { it.text().trim() }
         val trailer = document.selectFirst("a.gmr-trailer-popup")?.attr("href")
         val episodeElements = document
             .select("div.vid-episodes a[href], div.gmr-listseries a[href], div.episode-list a[href]")
@@ -333,7 +341,7 @@ class LayarKacaProvider(
         ) { candidate ->
             when (candidate) {
                 is LayarKacaPlaybackCandidate.InlinePlayer ->
-                    resolver.resolveInline(candidate.url, canonicalUrl)
+                    resolveNativePlayer(candidate.url, canonicalUrl, resolver)
 
                 is LayarKacaPlaybackCandidate.ServerPage -> try {
                     val playerDocument = app.get(
@@ -362,7 +370,7 @@ class LayarKacaProvider(
                         maxConcurrency = 3,
                         canContinue = { !resolver.loaded && resolver.canContinue }
                     ) { media ->
-                        resolver.resolveInline(media.url, media.referer)
+                        resolveNativePlayer(media.url, media.referer, resolver)
                     }
                 } catch (error: CancellationException) {
                     throw error
@@ -421,6 +429,33 @@ class LayarKacaProvider(
             subtitleCallback = subtitleCallback,
             callback = callback
         )
+    }
+
+    private suspend fun resolveNativePlayer(
+        playerUrl: String?,
+        referer: String?,
+        resolver: LinkResolutionSession
+    ): Boolean {
+        if (resolver.loaded) return true
+        val candidateUrl = playerUrl ?: return false
+        val request = VideonodePlayerParser.request(candidateUrl)
+            ?: return resolver.resolveInline(candidateUrl, referer)
+        return try {
+            val response = resolver.withinBudget {
+                app.post(
+                    request.apiUrl,
+                    data = mapOf("host" to request.host, "id" to request.id),
+                    referer = candidateUrl,
+                    timeout = 15L
+                )
+            } ?: return false
+            val embedUrl = VideonodePlayerParser.embedUrl(response.text) ?: return false
+            resolver.resolveInline(embedUrl, candidateUrl)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private suspend fun loadFallback(
@@ -1078,9 +1113,12 @@ internal object LayarKacaPlayerParser {
     fun pageMediaUrls(document: Document, pageUrl: String): List<String> {
         return (
             ProviderHtmlParser.mediaSources(document) +
+                document.select("#player-list a[data-url], #player-select option[value]").map { element ->
+                    element.attr(if (element.tagName() == "option") "value" else "data-url")
+                } +
                 mediaUrls(document.outerHtml(), pageUrl)
             ).mapNotNull { ProviderHtmlParser.absoluteUrl(it, pageUrl) }
-            .distinct()
+            .distinctBy { url -> VideonodePlayerParser.request(url) ?: url }
     }
 
     fun mediaUrls(html: String, playerUrl: String): List<String> {

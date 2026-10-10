@@ -12,8 +12,8 @@ private const val KITANONTON_PAGE_TIMEOUT_SECONDS = 20L
 private const val KITANONTON_PAGE_ATTEMPTS = 2
 private const val KITANONTON_PLAYBACK_PAGE_TIMEOUT_SECONDS = 10L
 private const val KITANONTON_TARGET_LINKS = 2
-private const val KITANONTON_MAIN_URL = "https://kitanonton2.casa"
-private val KITANONTON_LEGACY_HOSTS = setOf("kitanonton2.surf")
+private const val KITANONTON_MAIN_URL = "https://kitanonton2.beer"
+private val KITANONTON_LEGACY_HOSTS = setOf("kitanonton2.surf", "kitanonton2.casa")
 
 class KitanontonProvider : MainAPI() {
     override var mainUrl = KITANONTON_MAIN_URL

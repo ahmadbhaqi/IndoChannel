@@ -15,7 +15,7 @@ configurations.named("testImplementation") {
     extendsFrom(configurations.getByName("compileOnly"))
 }
 
-version = 24
+version = 25
 
 cloudstream {
     description = "Film, serial, dan anime dari berbagai provider Indonesia dalam satu ekstensi CloudStream."

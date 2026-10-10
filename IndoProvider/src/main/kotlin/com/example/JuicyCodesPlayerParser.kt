@@ -114,7 +114,7 @@ internal object JuicyCodesPlayerParser {
             label = label,
             quality = Regex("""\d{3,4}""").find(label)?.value?.toIntOrNull()
                 ?: Qualities.Unknown.value,
-            isHls = type.contains("mpegurl") || url.substringBefore('?').endsWith(".m3u8", true),
+            isHls = type == "hls" || type.contains("mpegurl") || url.substringBefore('?').endsWith(".m3u8", true),
             userAgent = tokenUserAgent(url)
         )
     }

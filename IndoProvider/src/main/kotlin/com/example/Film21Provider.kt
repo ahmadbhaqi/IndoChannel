@@ -9,24 +9,24 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
-class IndoxxiProvider : MainAPI() {
-    override var mainUrl = "https://filmbioskop21.lk21.in.net"
-    private val legacyHosts = setOf("comblank.com")
-    override var name = "Indoxxi"
+class Film21Provider : MainAPI() {
+    override var mainUrl = "https://154.203.167.77"
+    private val legacyHosts = emptySet<String>()
+    override var name = "Film21"
     override val hasMainPage = true
     override var lang = "id"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.AsianDrama)
 
     override val mainPage = mainPageOf(
-        "$mainUrl/category/action/page/" to "Action",
-        "$mainUrl/category/horror/page/" to "Horror",
-        "$mainUrl/category/animation/page/" to "Animation",
-        "$mainUrl/category/comedy/page/" to "Comedy",
+        "$mainUrl/film-action-terbaru/page/" to "Action",
+        "$mainUrl/film-horror-terbaru/page/" to "Horror",
+        "$mainUrl/animation/page/" to "Animation",
+        "$mainUrl/comedy/page/" to "Comedy",
         "$mainUrl/country/indonesia/page/" to "Indonesia"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val items = app.get(request.data + page).document
+        val items = app.get(Film21PlayerParser.catalogPageUrl(request.data, page)).document
             .select("article.item-infinite, article.item, div.ml-item")
             .mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, items)
@@ -127,18 +127,18 @@ class IndoxxiProvider : MainAPI() {
             this,
             subtitleCallback,
             callback,
-            inlineSourceParser = IndoxxiPlayerParser::mediaUrls,
+            inlineSourceParser = Film21PlayerParser::mediaUrls,
             candidateTimeoutMs = 25_000L,
             sessionTimeoutMs = 120_000L
         )
 
-        for (source in IndoxxiPlayerParser.pageMediaUrls(document, canonicalUrl)) {
+        for (source in Film21PlayerParser.pageMediaUrls(document, canonicalUrl)) {
             if (!resolver.canContinue || resolver.loaded) break
             resolvePlayer(source, canonicalUrl, resolver)
         }
         if (resolver.loaded) return true
 
-        for (request in IndoxxiPlayerParser.orderAjaxRequests(
+        for (request in Film21PlayerParser.orderAjaxRequests(
             ProviderHtmlParser.muviproAjaxRequests(document)
         )) {
             if (!resolver.canContinue || resolver.loaded) break
@@ -152,7 +152,7 @@ class IndoxxiProvider : MainAPI() {
                         timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                     ).document
                 } ?: continue
-                for (source in IndoxxiPlayerParser.pageMediaUrls(response, canonicalUrl)) {
+                for (source in Film21PlayerParser.pageMediaUrls(response, canonicalUrl)) {
                     if (!resolver.canContinue || resolver.loaded) break
                     resolvePlayer(source, canonicalUrl, resolver)
                 }
@@ -175,7 +175,7 @@ class IndoxxiProvider : MainAPI() {
                     referer = canonicalUrl,
                     timeout = PROVIDER_HTTP_TIMEOUT_SECONDS
                 ).document
-                for (source in IndoxxiPlayerParser.pageMediaUrls(playerDocument, playerUrl)) {
+                for (source in Film21PlayerParser.pageMediaUrls(playerDocument, playerUrl)) {
                     if (!resolver.canContinue || resolver.loaded) break
                     resolvePlayer(source, playerUrl, resolver)
                 }
@@ -208,7 +208,11 @@ class IndoxxiProvider : MainAPI() {
     private fun baseUrl(url: String): String = URI(url).let { "${it.scheme}://${it.host}" }
 }
 
-internal object IndoxxiPlayerParser {
+internal object Film21PlayerParser {
+    fun catalogPageUrl(category: String, page: Int): String {
+        return if (page <= 1) category.removeSuffix("page/") else "$category$page/"
+    }
+
     fun orderAjaxRequests(requests: List<MuviproAjaxRequest>): List<MuviproAjaxRequest> {
         return requests.distinct().withIndex()
             .sortedWith(
